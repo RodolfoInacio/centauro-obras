@@ -23,4 +23,5 @@ input, select, textarea, button {
 
 @media print {
   button { display: none !important; }
+  .no-print { display: none !important; }
 }

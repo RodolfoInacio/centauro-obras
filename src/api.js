@@ -48,3 +48,30 @@ export async function saveEquipes(equipes) {
     if (error) throw error;
   }
 }
+
+// ─── ORDENS DE SERVIÇO ───────────────────────────────────────────────────────
+export async function fetchOrdens() {
+  // Resiliente: se a tabela ainda não existe, não quebra o app (retorna vazio).
+  const { data, error } = await supabase.from("ordens").select("data").order("numero", { ascending: false });
+  if (error) { console.warn("fetchOrdens:", error.message); return []; }
+  return (data || []).map(r => r.data);
+}
+
+export async function upsertOrdem(ordem) {
+  const row = {
+    id: ordem.id,
+    numero: ordem.numero,
+    equipe_id: ordem.equipeId,
+    periodo_inicio: ordem.periodoInicio || null,
+    periodo_fim: ordem.periodoFim || null,
+    updated_at: new Date().toISOString(),
+    data: ordem,
+  };
+  const { error } = await supabase.from("ordens").upsert(row);
+  if (error) throw error;
+}
+
+export async function deleteOrdem(id) {
+  const { error } = await supabase.from("ordens").delete().eq("id", id);
+  if (error) throw error;
+}
