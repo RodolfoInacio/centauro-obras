@@ -1256,7 +1256,9 @@ function OrdemPrint({ ordem, obras, onBack }) {
           <span>PERÍODO: {fmtDate(ordem.periodoInicio)} a {fmtDate(ordem.periodoFim)}</span>
           <span>DATA: {fmtDate(ordem.dataEmissao)}</span>
         </div>
-        <div style={{ fontSize: 16, fontWeight: 800, color: BRAND, marginBottom: 10 }}>EQUIPE {ordem.equipeNome?.toUpperCase()}</div>
+        <div style={{ fontSize: 16, fontWeight: 800, color: BRAND, marginBottom: 10 }}>
+          {(ordem.equipeNome || "").toUpperCase().startsWith("EQUIPE") ? (ordem.equipeNome || "").toUpperCase() : "EQUIPE " + (ordem.equipeNome || "").toUpperCase()}
+        </div>
 
         {/* Tabela */}
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
