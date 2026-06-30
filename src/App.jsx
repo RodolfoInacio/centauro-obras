@@ -1440,8 +1440,17 @@ function LoginScreen() {
   async function entrar(e) {
     e.preventDefault();
     setBusy(true); setErro("");
-    const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password: senha });
-    if (error) { setErro("Email ou senha inválidos."); setBusy(false); }
+    try {
+      const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 20000));
+      const { error } = await Promise.race([
+        supabase.auth.signInWithPassword({ email: email.trim(), password: senha }),
+        timeout,
+      ]);
+      if (error) { setErro("Email ou senha inválidos."); setBusy(false); }
+    } catch {
+      setErro("Conexão lenta ou indisponível. Tente entrar novamente.");
+      setBusy(false);
+    }
     // sucesso: onAuthStateChange troca a tela automaticamente
   }
 
