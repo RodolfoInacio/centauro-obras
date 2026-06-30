@@ -958,9 +958,12 @@ function CalendarView({ obras, equipes, onSelectObra }) {
 }
 
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({ obras, onSelect, onStatusChange, equipes }) {
+function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState("Todos");
+  const [dragArmed, setDragArmed] = useState(null); // id com alça pressionada (pode arrastar)
+  const [dragId, setDragId] = useState(null);       // id sendo arrastado
+  const [overId, setOverId] = useState(null);       // id sob o cursor
 
   const filtered = obras.filter(o => {
     const q = search.toLowerCase();
@@ -968,6 +971,20 @@ function Dashboard({ obras, onSelect, onStatusChange, equipes }) {
     const matchStatus = filterStatus === "Todos" || o.status === filterStatus;
     return matchText && matchStatus;
   });
+
+  // Reordenar só faz sentido na lista completa (sem busca/filtro)
+  const canReorder = !search && filterStatus === "Todos";
+
+  function handleDrop(targetId) {
+    if (!dragId || dragId === targetId) { setDragId(null); setOverId(null); setDragArmed(null); return; }
+    const ids = obras.map(o => o.id);
+    const from = ids.indexOf(dragId);
+    const to = ids.indexOf(targetId);
+    if (from < 0 || to < 0) return;
+    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    onReorder(ids);
+    setDragId(null); setOverId(null); setDragArmed(null);
+  }
 
   const totalGeral = obras.reduce((a, o) => a + (o.valorTotal || 0), 0);
   const totalPecas = obras.reduce((a, o) => a + o.itens.reduce((b, i) => b + (i.qtd || 0), 0), 0);
@@ -1018,14 +1035,30 @@ function Dashboard({ obras, onSelect, onStatusChange, equipes }) {
             ? Math.round(os.itens.reduce((a, i) => a + itemPercentual(i), 0) / os.itens.length)
             : 0;
           const statusColor = STATUS_COLORS[os.status] || "#94a3b8";
+          const isDragging = dragId === os.id;
+          const isOver = overId === os.id && dragId && dragId !== os.id;
           return (
             <div key={os.id}
-              style={{ background: "#fff", borderRadius: 12, padding: "18px 22px", boxShadow: "0 1px 4px rgba(0,0,0,0.07)", border: "1px solid #e2e8f0", cursor: "pointer", transition: "box-shadow 0.15s" }}
+              draggable={dragArmed === os.id}
+              onDragStart={e => { setDragId(os.id); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}
+              onDragOver={e => { if (canReorder && dragId) { e.preventDefault(); setOverId(os.id); } }}
+              onDrop={e => { e.preventDefault(); handleDrop(os.id); }}
+              onDragEnd={() => { setDragId(null); setOverId(null); setDragArmed(null); }}
+              style={{ background: "#fff", borderRadius: 12, padding: "18px 22px", boxShadow: "0 1px 4px rgba(0,0,0,0.07)", border: "1px solid #e2e8f0", borderTop: isOver ? "3px solid #1a1a1a" : "1px solid #e2e8f0", cursor: "pointer", transition: "box-shadow 0.15s", opacity: isDragging ? 0.4 : 1 }}
               onClick={() => onSelect(os.id)}
               onMouseEnter={e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.12)"}
               onMouseLeave={e => e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.07)"}
             >
               <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+                {canReorder && (
+                  <div
+                    title="Arraste para reordenar"
+                    onMouseDown={() => setDragArmed(os.id)}
+                    onMouseUp={() => setDragArmed(null)}
+                    onClick={e => e.stopPropagation()}
+                    style={{ alignSelf: "center", color: "#94a3b8", fontSize: 20, lineHeight: 1, cursor: "grab", padding: "0 4px", userSelect: "none" }}
+                  >☰</div>
+                )}
                 <div style={{ background: "#1a1a1a", color: "#fff", borderRadius: 8, padding: "6px 14px", fontWeight: 800, fontSize: 18, minWidth: 60, textAlign: "center" }}>
                   #{os.numero}
                 </div>
@@ -1512,7 +1545,11 @@ export default function App() {
       try {
         const [obs, eqs, ords] = await Promise.all([fetchObras(), fetchEquipes(), fetchOrdens()]);
         if (cancel) return;
-        setObras(obs.map(normObra).sort((a, b) => (Number(a.numero) || 0) - (Number(b.numero) || 0)));
+        setObras(obs.map(normObra).sort((a, b) => {
+          const ao = Number.isFinite(a.ordem) ? a.ordem : 1e9 + (Number(a.numero) || 0);
+          const bo = Number.isFinite(b.ordem) ? b.ordem : 1e9 + (Number(b.numero) || 0);
+          return ao - bo;
+        }));
         setEquipes(eqs);
         setOrdens(ords);
       } catch (err) {
@@ -1555,6 +1592,16 @@ export default function App() {
       const next = prev.map(o => o.id === id ? { ...o, status } : o);
       const changed = next.find(o => o.id === id);
       if (changed) persistObra(changed);
+      return next;
+    });
+  }, [persistObra]);
+
+  // Reordenação manual das obras (arrastar): grava o índice em `ordem` e persiste os que mudaram
+  const handleReorder = useCallback((orderedIds) => {
+    setObras(prev => {
+      const byId = Object.fromEntries(prev.map(o => [o.id, o]));
+      const next = orderedIds.map((id, idx) => ({ ...byId[id], ordem: idx }));
+      next.forEach(o => { if (byId[o.id] && byId[o.id].ordem !== o.ordem) persistObra(o); });
       return next;
     });
   }, [persistObra]);
@@ -1698,7 +1745,7 @@ export default function App() {
               ? <EquipesView equipes={equipes} onChange={handleEquipesChange} obras={obras} />
               : screen === "ordens"
                 ? <OrdensView equipes={equipes} obras={obras} ordens={ordens} onSaveOrdem={handleSaveOrdem} onDeleteOrdem={handleDeleteOrdem} onPrintOrdem={setOrdemPrint} />
-                : <Dashboard obras={obras} onSelect={setSelectedId} onStatusChange={handleStatusChange} equipes={equipes} />
+                : <Dashboard obras={obras} onSelect={setSelectedId} onStatusChange={handleStatusChange} onReorder={handleReorder} equipes={equipes} />
       }
 
       {/* pdf.js CDN (for PDF import in browser) */}
