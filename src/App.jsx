@@ -1701,7 +1701,7 @@ function CronogramaEditor({ cronograma, onChange, obras }) {
   }
 
   const inp = { border: "1px solid #e2e8f0", borderRadius: 5, padding: "2px 5px", fontSize: 12, boxSizing: "border-box" };
-  const COL = { id: 34, nome: 240, dur: 92, pct: 46, ini: 122, term: 118, pred: 58 };
+  const COL = { id: 34, nome: 240, dur: 116, pct: 46, ini: 122, term: 118, pred: 58 };
   const GRID_W = Object.values(COL).reduce((a, b) => a + b, 0);
   const btn = { background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 10px", fontWeight: 700, fontSize: 12, cursor: "pointer" };
 
@@ -1754,9 +1754,9 @@ function CronogramaEditor({ cronograma, onChange, obras }) {
                 <div style={{ width: COL.dur, textAlign: "center" }}>
                   {sc.isSummary
                     ? <span style={{ color: "#64748b", fontWeight: 600 }}>{textoDuracao(t, sc)}</span>
-                    : <span onClick={e => e.stopPropagation()} style={{ display: "inline-flex", gap: 2 }}>
-                        <input type="number" min={0} step="0.5" value={t.durValor} onChange={e => updTask(t.id, { durValor: Number(e.target.value) })} style={{ ...inp, width: 40, textAlign: "right" }} />
-                        <select value={t.durUnid} onChange={e => updTask(t.id, { durUnid: e.target.value })} style={{ ...inp, width: 44 }}>
+                    : <span onClick={e => e.stopPropagation()} style={{ display: "inline-flex", gap: 3 }}>
+                        <input type="number" min={0} step="0.5" value={t.durValor} onChange={e => updTask(t.id, { durValor: Number(e.target.value) })} style={{ ...inp, width: 50, textAlign: "right" }} />
+                        <select value={t.durUnid} onChange={e => updTask(t.id, { durUnid: e.target.value })} style={{ ...inp, width: 56, paddingRight: 2 }}>
                           <option value="dias">dias</option><option value="hrs">hrs</option>
                         </select>
                       </span>}
