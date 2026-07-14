@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
-import { fetchObras, upsertObra, fetchEquipes, saveEquipes as dbSaveEquipes, fetchOrdens, upsertOrdem, deleteOrdem as dbDeleteOrdem } from "./api";
+import { fetchObras, upsertObra, fetchEquipes, saveEquipes as dbSaveEquipes, fetchOrdens, upsertOrdem, deleteOrdem as dbDeleteOrdem, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma } from "./api";
+import { agendar, CONFIG_PADRAO, fmtDataHora, textoDuracao, MESES_ABBR, DOW1, ehDiaUtil } from "./cronograma";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 // Brand color (was navy #1a1a1a) — now charcoal black
@@ -1469,6 +1470,7 @@ function SideMenu({ open, onClose, onNav, onImport, current }) {
     { key: "calendar", label: "Calendário", icon: "📅" },
     { key: "equipes", label: "Equipes", icon: "👷" },
     { key: "ordens", label: "Ordem de Serviço", icon: "📋" },
+    { key: "cronogramas", label: "Cronograma Comercial", icon: "📊" },
     { key: "financeiro", label: "Financeiro", icon: "🔒" },
   ];
   return (
@@ -1557,6 +1559,299 @@ function FinanceiroView({ obras, unlocked, onUnlock }) {
   );
 }
 
+// ─── CRONOGRAMA COMERCIAL (mini MS Project) ──────────────────────────────────
+function novoCronograma(titulo, obra) {
+  const hoje = new Date().toISOString().split("T")[0];
+  return {
+    id: "cr_" + Date.now(),
+    titulo: titulo || "Novo Cronograma",
+    obraId: obra ? obra.id : null,
+    cliente: obra ? obra.cliente : "",
+    config: { ...CONFIG_PADRAO, dataBase: hoje },
+    tasks: [{ id: 1, nivel: 0, nome: titulo || "Projeto", durValor: 1, durUnid: "dias", percent: 0, predecessoras: [], inicioManual: "" }],
+  };
+}
+function toLocalInput(date) {
+  if (!date) return "";
+  const p = n => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
+}
+
+function CronogramasView({ cronogramas, obras, onNovo, onAbrir, onExcluir }) {
+  const [criando, setCriando] = useState(false);
+  const [titulo, setTitulo] = useState("");
+  const [obraId, setObraId] = useState("");
+
+  function criar() {
+    if (!titulo.trim()) return;
+    const obra = obras.find(o => o.id === obraId) || null;
+    onNovo(titulo.trim(), obra);
+    setCriando(false); setTitulo(""); setObraId("");
+  }
+
+  return (
+    <div style={{ padding: "24px 28px", maxWidth: 1000, margin: "0 auto" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+        <h2 style={{ fontSize: 20, fontWeight: 800, color: BRAND, margin: 0 }}>Cronograma Comercial</h2>
+        <button onClick={() => setCriando(v => !v)} style={{ marginLeft: "auto", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>+ Novo cronograma</button>
+      </div>
+
+      {criando && (
+        <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 18, marginBottom: 18, display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Título</div>
+            <input value={titulo} onChange={e => setTitulo(e.target.value)} autoFocus placeholder="Ex: Ampliação GRIII"
+              onKeyDown={e => { if (e.key === "Enter") criar(); }}
+              style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", fontSize: 14, boxSizing: "border-box" }} />
+          </div>
+          <div style={{ minWidth: 220 }}>
+            <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Vincular a uma obra (opcional)</div>
+            <select value={obraId} onChange={e => setObraId(e.target.value)}
+              style={{ border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", fontSize: 14, background: "#fff", minWidth: 220 }}>
+              <option value="">— Avulso —</option>
+              {obras.map(o => <option key={o.id} value={o.id}>#{o.numero} {o.cliente}</option>)}
+            </select>
+          </div>
+          <button onClick={criar} style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Criar</button>
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {cronogramas.length === 0 && <div style={{ color: "#94a3b8", fontSize: 13, padding: 24, textAlign: "center" }}>Nenhum cronograma ainda.</div>}
+        {cronogramas.map(c => {
+          const obra = obras.find(o => o.id === c.obraId);
+          return (
+            <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 12, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, padding: "12px 16px", flexWrap: "wrap" }}>
+              <span style={{ fontSize: 20 }}>📊</span>
+              <div style={{ flex: 1, minWidth: 180 }}>
+                <div style={{ fontWeight: 700, color: BRAND }}>{c.titulo}</div>
+                <div style={{ fontSize: 12, color: "#64748b" }}>{obra ? `Obra #${obra.numero} · ${obra.cliente}` : "Avulso"} · {c.tasks.length} tarefa(s)</div>
+              </div>
+              <button onClick={() => onAbrir(c.id)} style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Abrir</button>
+              <button onClick={() => { if (confirm("Excluir este cronograma?")) onExcluir(c.id); }} style={{ background: "#fee2e2", color: "#dc2626", border: "none", borderRadius: 7, padding: "7px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Excluir</button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+const CR_ROW_H = 28;
+const CR_DAY_MS = 86400000;
+
+function CronogramaEditor({ cronograma, onChange, obras }) {
+  const [c, setC] = useState(cronograma);
+  const [sel, setSel] = useState(null);
+  const [zoom, setZoom] = useState("dia"); // dia | semana
+
+  useEffect(() => { setC(cronograma); }, [cronograma]);
+  const update = (next) => { setC(next); onChange(next); };
+
+  const DAY_W = zoom === "dia" ? 26 : 12;
+  const sched = agendar(c.tasks, c.config);
+
+  // faixa da timeline
+  let tStart = null, tEnd = null;
+  for (const t of c.tasks) {
+    const s = sched[t.id]; if (!s) continue;
+    if (!tStart || s.inicio < tStart) tStart = s.inicio;
+    if (!tEnd || s.termino > tEnd) tEnd = s.termino;
+  }
+  if (!tStart) { tStart = new Date(); tEnd = new Date(); }
+  tStart = new Date(tStart.getFullYear(), tStart.getMonth(), tStart.getDate());       // 00:00 do dia
+  tStart = new Date(tStart.getTime() - 2 * CR_DAY_MS);
+  const totalDays = Math.max(14, Math.ceil((tEnd - tStart) / CR_DAY_MS) + 4);
+  const dias = Array.from({ length: totalDays }, (_, i) => new Date(tStart.getTime() + i * CR_DAY_MS));
+  const TL_W = totalDays * DAY_W;
+
+  // ── edições ──
+  const setTasks = (tasks) => update({ ...c, tasks });
+  const updTask = (id, patch) => setTasks(c.tasks.map(t => t.id === id ? { ...t, ...patch } : t));
+  const selIdx = c.tasks.findIndex(t => t.id === sel);
+
+  function addTarefa() {
+    const idx = selIdx >= 0 ? selIdx : c.tasks.length - 1;
+    const nivel = idx >= 0 ? c.tasks[idx].nivel : 0;
+    const novoId = Math.max(0, ...c.tasks.map(t => t.id)) + 1;
+    const nova = { id: novoId, nivel, nome: "Nova tarefa", durValor: 1, durUnid: "dias", percent: 0, predecessoras: [], inicioManual: "" };
+    const arr = [...c.tasks];
+    arr.splice(idx + 1, 0, nova);
+    setTasks(arr);
+    setSel(novoId);
+  }
+  function indent(dir) {
+    if (selIdx < 1) return; // primeira tarefa não indenta
+    const t = c.tasks[selIdx];
+    const max = c.tasks[selIdx - 1].nivel + 1;
+    const nivel = Math.min(Math.max(0, t.nivel + dir), max);
+    updTask(t.id, { nivel });
+  }
+  function mover(dir) {
+    const j = selIdx + dir;
+    if (selIdx < 0 || j < 0 || j >= c.tasks.length) return;
+    const arr = [...c.tasks];
+    [arr[selIdx], arr[j]] = [arr[j], arr[selIdx]];
+    setTasks(arr);
+  }
+  function excluir() {
+    if (selIdx < 0 || c.tasks.length <= 1) return;
+    setTasks(c.tasks.filter((_, i) => i !== selIdx));
+    setSel(null);
+  }
+
+  const inp = { border: "1px solid #e2e8f0", borderRadius: 5, padding: "2px 5px", fontSize: 12, boxSizing: "border-box" };
+  const COL = { id: 34, nome: 240, dur: 92, pct: 46, ini: 122, term: 118, pred: 58 };
+  const GRID_W = Object.values(COL).reduce((a, b) => a + b, 0);
+  const btn = { background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 10px", fontWeight: 700, fontSize: 12, cursor: "pointer" };
+
+  return (
+    <div style={{ fontFamily: "'Segoe UI', sans-serif", color: "#1e293b" }}>
+      {/* Toolbar */}
+      <div style={{ background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "10px 16px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <input value={c.titulo} onChange={e => update({ ...c, titulo: e.target.value })}
+          style={{ fontWeight: 800, fontSize: 15, color: BRAND, border: "1px solid transparent", borderRadius: 6, padding: "4px 8px", minWidth: 220 }}
+          onFocus={e => e.target.style.border = "1px solid #e2e8f0"} onBlur={e => e.target.style.border = "1px solid transparent"} />
+        {c.obraId && <span style={{ fontSize: 12, color: "#64748b" }}>· {obras.find(o => o.id === c.obraId)?.cliente || "obra"}</span>}
+        <div style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button onClick={addTarefa} style={btn}>+ Tarefa</button>
+          <button onClick={() => indent(1)} style={btn} title="Indentar">→</button>
+          <button onClick={() => indent(-1)} style={btn} title="Desindentar">←</button>
+          <button onClick={() => mover(-1)} style={btn} title="Mover para cima">↑</button>
+          <button onClick={() => mover(1)} style={btn} title="Mover para baixo">↓</button>
+          <button onClick={excluir} style={{ ...btn, color: "#dc2626", borderColor: "#fecaca" }} title="Excluir">🗑</button>
+          <button onClick={() => setZoom(z => z === "dia" ? "semana" : "dia")} style={btn} title="Zoom">{zoom === "dia" ? "🔍 Semana" : "🔍 Dia"}</button>
+        </div>
+      </div>
+
+      {/* Split: grade + gantt */}
+      <div style={{ display: "flex", alignItems: "flex-start", overflowX: "auto" }}>
+        {/* GRADE */}
+        <div style={{ width: GRID_W, minWidth: GRID_W, borderRight: "2px solid #cbd5e1", background: "#fff" }}>
+          {/* header grade */}
+          <div style={{ display: "flex", background: "#1a1a1a", color: "#fff", height: CR_ROW_H * 2, alignItems: "center", fontSize: 11, fontWeight: 700 }}>
+            <div style={{ width: COL.id, textAlign: "center" }}>Id</div>
+            <div style={{ width: COL.nome, paddingLeft: 6 }}>Nome da tarefa</div>
+            <div style={{ width: COL.dur, textAlign: "center" }}>Duração</div>
+            <div style={{ width: COL.pct, textAlign: "center" }}>%</div>
+            <div style={{ width: COL.ini, textAlign: "center" }}>Início</div>
+            <div style={{ width: COL.term, textAlign: "center" }}>Término</div>
+            <div style={{ width: COL.pred, textAlign: "center" }}>Pred.</div>
+          </div>
+          {/* linhas */}
+          {c.tasks.map((t, i) => {
+            const sc = sched[t.id] || {};
+            const selRow = sel === t.id;
+            const cor = t.nivel === 0 ? "#dc2626" : sc.isSummary ? BRAND : "#1e293b";
+            return (
+              <div key={t.id} onClick={() => setSel(t.id)}
+                style={{ display: "flex", alignItems: "center", height: CR_ROW_H, borderBottom: "1px solid #f1f5f9", background: selRow ? "#eff6ff" : (i % 2 ? "#fafafa" : "#fff"), fontSize: 12, cursor: "pointer" }}>
+                <div style={{ width: COL.id, textAlign: "center", color: "#94a3b8" }}>{t.id}</div>
+                <div style={{ width: COL.nome, paddingLeft: 6 + t.nivel * 14, overflow: "hidden" }}>
+                  <input value={t.nome} onChange={e => updTask(t.id, { nome: e.target.value })} onClick={e => e.stopPropagation()}
+                    style={{ ...inp, border: "1px solid transparent", background: "transparent", width: "100%", fontWeight: (sc.isSummary || t.nivel === 0) ? 700 : 400, color: cor }} />
+                </div>
+                <div style={{ width: COL.dur, textAlign: "center" }}>
+                  {sc.isSummary
+                    ? <span style={{ color: "#64748b", fontWeight: 600 }}>{textoDuracao(t, sc)}</span>
+                    : <span onClick={e => e.stopPropagation()} style={{ display: "inline-flex", gap: 2 }}>
+                        <input type="number" min={0} step="0.5" value={t.durValor} onChange={e => updTask(t.id, { durValor: Number(e.target.value) })} style={{ ...inp, width: 40, textAlign: "right" }} />
+                        <select value={t.durUnid} onChange={e => updTask(t.id, { durUnid: e.target.value })} style={{ ...inp, width: 44 }}>
+                          <option value="dias">dias</option><option value="hrs">hrs</option>
+                        </select>
+                      </span>}
+                </div>
+                <div style={{ width: COL.pct, textAlign: "center" }}>
+                  {sc.isSummary ? <b>{sc.percent}%</b>
+                    : <input type="number" min={0} max={100} value={t.percent} onClick={e => e.stopPropagation()} onChange={e => updTask(t.id, { percent: Number(e.target.value) })} style={{ ...inp, width: 40, textAlign: "center" }} />}
+                </div>
+                <div style={{ width: COL.ini, textAlign: "center", fontSize: 11 }}>
+                  {t.inicioManual
+                    ? <span onClick={e => e.stopPropagation()} style={{ display: "inline-flex", gap: 2, alignItems: "center" }}>
+                        <input type="datetime-local" value={t.inicioManual} onChange={e => updTask(t.id, { inicioManual: e.target.value })} style={{ ...inp, width: 96 }} />
+                        <button onClick={() => updTask(t.id, { inicioManual: "" })} title="Auto" style={{ border: "none", background: "transparent", cursor: "pointer", color: "#94a3b8" }}>×</button>
+                      </span>
+                    : <span onClick={e => { e.stopPropagation(); if (!sc.isSummary) updTask(t.id, { inicioManual: toLocalInput(sc.inicio) }); }} title={sc.isSummary ? "" : "Fixar início"} style={{ cursor: sc.isSummary ? "default" : "pointer" }}>
+                        {fmtDataHora(sc.inicio)}{!sc.isSummary && <span style={{ color: "#cbd5e1" }}> 📌</span>}
+                      </span>}
+                </div>
+                <div style={{ width: COL.term, textAlign: "center", fontSize: 11, color: "#64748b" }}>{fmtDataHora(sc.termino)}</div>
+                <div style={{ width: COL.pred, textAlign: "center" }}>
+                  <input value={(t.predecessoras || []).join(",")} onClick={e => e.stopPropagation()}
+                    onChange={e => updTask(t.id, { predecessoras: e.target.value.split(",").map(x => parseInt(x.trim(), 10)).filter(Boolean) })}
+                    style={{ ...inp, width: 48, textAlign: "center" }} placeholder="—" />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* GANTT */}
+        <div style={{ position: "relative", minWidth: TL_W }}>
+          {/* header timeline */}
+          <div style={{ height: CR_ROW_H * 2, position: "relative", background: "#1a1a1a", color: "#fff" }}>
+            {dias.map((d, i) => (
+              <div key={i} style={{ position: "absolute", left: i * DAY_W, top: 0, width: DAY_W, height: "100%", borderLeft: "1px solid #333", boxSizing: "border-box" }}>
+                {i % 7 === 0 && <div style={{ position: "absolute", top: 4, left: 3, fontSize: 10, whiteSpace: "nowrap", color: "#9ca3af" }}>{String(d.getDate()).padStart(2, "0")}/{MESES_ABBR[d.getMonth()]}</div>}
+                <div style={{ position: "absolute", bottom: 4, width: "100%", textAlign: "center", fontSize: 9, color: ehDiaUtil(d, c.config) ? "#cbd5e1" : "#6b7280" }}>{DOW1[d.getDay()]}</div>
+              </div>
+            ))}
+          </div>
+          {/* corpo */}
+          <div style={{ position: "relative" }}>
+            {/* colunas / sombreado */}
+            {dias.map((d, i) => (
+              <div key={i} style={{ position: "absolute", left: i * DAY_W, top: 0, bottom: 0, width: DAY_W, borderLeft: "1px solid #f1f5f9", background: ehDiaUtil(d, c.config) ? "transparent" : "#f1f5f9", boxSizing: "border-box" }} />
+            ))}
+            {/* setas de dependência */}
+            <svg style={{ position: "absolute", top: 0, left: 0, width: TL_W, height: c.tasks.length * CR_ROW_H, pointerEvents: "none" }}>
+              {c.tasks.map((t, i) => (t.predecessoras || []).map(pid => {
+                const pi = c.tasks.findIndex(x => x.id === pid);
+                const ps = sched[pid], ss = sched[t.id];
+                if (pi < 0 || !ps || !ss) return null;
+                const x1 = ((ps.termino - tStart) / CR_DAY_MS) * DAY_W;
+                const y1 = pi * CR_ROW_H + CR_ROW_H / 2;
+                const x2 = ((ss.inicio - tStart) / CR_DAY_MS) * DAY_W;
+                const y2 = i * CR_ROW_H + CR_ROW_H / 2;
+                const mx = x1 + 6;
+                return <polyline key={pid + "-" + t.id} points={`${x1},${y1} ${mx},${y1} ${mx},${y2} ${x2},${y2}`} fill="none" stroke="#94a3b8" strokeWidth="1" markerEnd="url(#arr)" />;
+              }))}
+              <defs><marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#94a3b8" /></marker></defs>
+            </svg>
+            {/* barras */}
+            {c.tasks.map((t) => {
+              const sc = sched[t.id]; if (!sc) return null;
+              const x = ((sc.inicio - tStart) / CR_DAY_MS) * DAY_W;
+              const w = Math.max(((sc.termino - sc.inicio) / CR_DAY_MS) * DAY_W, 4);
+              const y = c.tasks.indexOf(t) * CR_ROW_H;
+              if (sc.isSummary) {
+                return (
+                  <div key={t.id} style={{ position: "absolute", left: x, top: y + CR_ROW_H / 2 - 4, width: w, height: 8 }}>
+                    <div style={{ position: "absolute", top: 2, left: 0, right: 0, height: 4, background: "#1a1a1a" }} />
+                    <div style={{ position: "absolute", top: 0, left: 0, width: 3, height: 8, background: "#1a1a1a" }} />
+                    <div style={{ position: "absolute", top: 0, right: 0, width: 3, height: 8, background: "#1a1a1a" }} />
+                  </div>
+                );
+              }
+              return (
+                <div key={t.id} title={`${t.nome}\n${fmtDataHora(sc.inicio)} → ${fmtDataHora(sc.termino)}`}
+                  style={{ position: "absolute", left: x, top: y + CR_ROW_H / 2 - 6, width: w, height: 12, background: "#5eead4", border: "1px solid #0d9488", borderRadius: 2, overflow: "hidden" }}>
+                  <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${sc.percent}%`, background: "#0d9488" }} />
+                </div>
+              );
+            })}
+            {/* linhas de grade horizontais */}
+            {c.tasks.map((t, i) => (
+              <div key={t.id} style={{ position: "absolute", left: 0, top: i * CR_ROW_H, width: TL_W, height: CR_ROW_H, borderBottom: "1px solid #f1f5f9", boxSizing: "border-box", pointerEvents: "none" }} />
+            ))}
+            <div style={{ height: c.tasks.length * CR_ROW_H }} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── LOADING / LOGIN ──────────────────────────────────────────────────────────
 function CenteredMsg({ children }) {
   return (
@@ -1622,6 +1917,7 @@ export default function App() {
   const [obras, setObras] = useState([]);
   const [equipes, setEquipes] = useState([]);
   const [ordens, setOrdens] = useState([]);
+  const [cronogramas, setCronogramas] = useState([]);
   // Navegação: view atual + pilha de histórico (botão voltar universal)
   const [view, setView] = useState({ type: "dashboard" });
   const [history, setHistory] = useState([]);
@@ -1641,12 +1937,12 @@ export default function App() {
 
   // Carrega dados do banco após login
   useEffect(() => {
-    if (!session) { setObras([]); setEquipes([]); setOrdens([]); return; }
+    if (!session) { setObras([]); setEquipes([]); setOrdens([]); setCronogramas([]); return; }
     let cancel = false;
     setLoading(true);
     (async () => {
       try {
-        const [obs, eqs, ords] = await Promise.all([fetchObras(), fetchEquipes(), fetchOrdens()]);
+        const [obs, eqs, ords, crons] = await Promise.all([fetchObras(), fetchEquipes(), fetchOrdens(), fetchCronogramas()]);
         if (cancel) return;
         setObras(obs.map(normObra).sort((a, b) => {
           const ao = Number.isFinite(a.ordem) ? a.ordem : 1e9 + (Number(a.numero) || 0);
@@ -1655,6 +1951,7 @@ export default function App() {
         }));
         setEquipes(eqs);
         setOrdens(ords);
+        setCronogramas(crons);
       } catch (err) {
         console.error(err);
         if (!cancel) showError("Erro ao carregar dados: " + err.message);
@@ -1736,6 +2033,23 @@ export default function App() {
     dbDeleteOrdem(id).catch(err => showError("Erro ao excluir O.S.: " + err.message));
   }, []);
 
+  const cronoTimer = useRef({});
+  const handleSaveCronograma = useCallback((cr) => {
+    setCronogramas(prev => {
+      const exists = prev.find(x => x.id === cr.id);
+      return exists ? prev.map(x => x.id === cr.id ? cr : x) : [cr, ...prev];
+    });
+    const t = cronoTimer.current;
+    if (t[cr.id]) clearTimeout(t[cr.id]);
+    t[cr.id] = setTimeout(() => {
+      upsertCronograma(cr).catch(err => showError("Erro ao salvar cronograma: " + err.message));
+    }, 700);
+  }, []);
+  const handleDeleteCronograma = useCallback((id) => {
+    setCronogramas(prev => prev.filter(x => x.id !== id));
+    dbDeleteCronograma(id).catch(err => showError("Erro ao excluir cronograma: " + err.message));
+  }, []);
+
   const handleImport = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -1775,7 +2089,7 @@ export default function App() {
   const userEmail = session.user?.email || "";
   const selectedObra = view.type === "gantt" ? obras.find(o => o.id === view.obraId) : null;
   const canGoBack = history.length > 0 || view.type !== "dashboard";
-  const tituloView = { dashboard: "Obras", calendar: "Calendário de Obras", equipes: "Equipes", ordens: "Ordem de Serviço", financeiro: "Financeiro", ordemBuilder: "Nova Ordem de Serviço" };
+  const tituloView = { dashboard: "Obras", calendar: "Calendário de Obras", equipes: "Equipes", ordens: "Ordem de Serviço", financeiro: "Financeiro", ordemBuilder: "Nova Ordem de Serviço", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
 
   return (
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
@@ -1835,9 +2149,18 @@ export default function App() {
                           onSave={(ord) => { handleSaveOrdem(ord); back(); }}
                           onPrint={(ord) => { handleSaveOrdem(ord); navReplace({ type: "ordemPrint", ordem: ord }); }} />
                       : <CenteredMsg>Equipe não encontrada</CenteredMsg>)
-                  : view.type === "financeiro"
-                    ? <FinanceiroView obras={obras} unlocked={financeiroUnlocked} onUnlock={() => setFinanceiroUnlocked(true)} />
-                    : <Dashboard obras={obras} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} equipes={equipes} />
+                  : view.type === "cronogramas"
+                    ? <CronogramasView cronogramas={cronogramas} obras={obras}
+                        onNovo={(titulo, obra) => { const cr = novoCronograma(titulo, obra); handleSaveCronograma(cr); navTo({ type: "cronograma", id: cr.id }); }}
+                        onAbrir={(id) => navTo({ type: "cronograma", id })}
+                        onExcluir={handleDeleteCronograma} />
+                    : view.type === "cronograma"
+                      ? (cronogramas.find(x => x.id === view.id)
+                          ? <CronogramaEditor cronograma={cronogramas.find(x => x.id === view.id)} obras={obras} onChange={handleSaveCronograma} />
+                          : <CenteredMsg>Cronograma não encontrado</CenteredMsg>)
+                      : view.type === "financeiro"
+                        ? <FinanceiroView obras={obras} unlocked={financeiroUnlocked} onUnlock={() => setFinanceiroUnlocked(true)} />
+                        : <Dashboard obras={obras} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} equipes={equipes} />
       }
 
       {/* pdf.js CDN (for PDF import in browser) */}

@@ -75,3 +75,25 @@ export async function deleteOrdem(id) {
   const { error } = await supabase.from("ordens").delete().eq("id", id);
   if (error) throw error;
 }
+
+// ─── CRONOGRAMAS ─────────────────────────────────────────────────────────────
+export async function fetchCronogramas() {
+  // Resiliente: se a tabela ainda não existe, não quebra o app.
+  const { data, error } = await supabase.from("cronogramas").select("data").order("updated_at", { ascending: false });
+  if (error) { console.warn("fetchCronogramas:", error.message); return []; }
+  return (data || []).map(r => r.data);
+}
+
+export async function upsertCronograma(c) {
+  const row = {
+    id: c.id, titulo: c.titulo, obra_id: c.obraId || null,
+    updated_at: new Date().toISOString(), data: c,
+  };
+  const { error } = await supabase.from("cronogramas").upsert(row);
+  if (error) throw error;
+}
+
+export async function deleteCronograma(id) {
+  const { error } = await supabase.from("cronogramas").delete().eq("id", id);
+  if (error) throw error;
+}
