@@ -961,9 +961,13 @@ function CalendarView({ obras, equipes, onSelectObra }) {
 function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState("Todos");
+  const [sortBy, setSortBy] = useState("ordem"); // ordem | numero | nome | pct | itens | pecas
   const [dragArmed, setDragArmed] = useState(null); // id com alça pressionada (pode arrastar)
   const [dragId, setDragId] = useState(null);       // id sendo arrastado
   const [overId, setOverId] = useState(null);       // id sob o cursor
+
+  const pctObra = (o) => o.itens.length ? Math.round(o.itens.reduce((a, i) => a + itemPercentual(i), 0) / o.itens.length) : 0;
+  const pecasObra = (o) => o.itens.reduce((a, i) => a + (i.qtd || 0), 0);
 
   const filtered = obras.filter(o => {
     const q = search.toLowerCase();
@@ -972,8 +976,20 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
     return matchText && matchStatus;
   });
 
-  // Reordenar só faz sentido na lista completa (sem busca/filtro)
-  const canReorder = !search && filterStatus === "Todos";
+  // Ordenação escolhida (não muda a lista base; "ordem" = ordem manual/arrastar)
+  const displayed = sortBy === "ordem" ? filtered : [...filtered].sort((a, b) => {
+    switch (sortBy) {
+      case "numero": return (Number(a.numero) || 0) - (Number(b.numero) || 0);
+      case "nome":   return a.cliente.localeCompare(b.cliente, "pt-BR");
+      case "pct":    return pctObra(b) - pctObra(a);
+      case "itens":  return b.itens.length - a.itens.length;
+      case "pecas":  return pecasObra(b) - pecasObra(a);
+      default: return 0;
+    }
+  });
+
+  // Reordenar (arrastar) só faz sentido na lista completa e na ordem manual
+  const canReorder = !search && filterStatus === "Todos" && sortBy === "ordem";
 
   function handleDrop(targetId) {
     if (!dragId || dragId === targetId) { setDragId(null); setOverId(null); setDragArmed(null); return; }
@@ -986,7 +1002,6 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
     setDragId(null); setOverId(null); setDragArmed(null);
   }
 
-  const totalGeral = obras.reduce((a, o) => a + (o.valorTotal || 0), 0);
   const totalPecas = obras.reduce((a, o) => a + o.itens.reduce((b, i) => b + (i.qtd || 0), 0), 0);
   const progMedio  = obras.length > 0
     ? Math.round(obras.reduce((a, o) => a + (o.itens.length > 0 ? o.itens.reduce((b, i) => b + itemPercentual(i), 0) / o.itens.length : 0), 0) / obras.length)
@@ -997,8 +1012,8 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
       {/* KPI cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginBottom: 24 }}>
         {[
-          { label: "Total em Obras", value: `R$ ${fmt(totalGeral)}`, sub: `${obras.length} pedidos`, accent: "#1a1a1a" },
-          { label: "Total de Peças", value: totalPecas, sub: `${obras.reduce((a,o)=>a+o.itens.length,0)} itens`, accent: "#c9a227" },
+          { label: "Total de Obras", value: obras.length, sub: `${obras.reduce((a,o)=>a+o.itens.length,0)} itens`, accent: "#1a1a1a" },
+          { label: "Total de Peças", value: totalPecas, sub: "em todas as obras", accent: "#c9a227" },
           { label: "Progresso Médio", value: `${progMedio}%`, sub: "de todas as obras", accent: "#10b981" },
         ].map(({ label, value, sub, accent }) => (
           <div key={label} style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", borderLeft: `4px solid ${accent}` }}>
@@ -1023,14 +1038,23 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
           <option value="Todos">Todos os status</option>
           {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
         </select>
+        <select value={sortBy} onChange={e => setSortBy(e.target.value)} title="Ordenar por"
+          style={{ border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 14px", fontSize: 13, background: "#fff", cursor: "pointer" }}>
+          <option value="ordem">↕ Ordem manual</option>
+          <option value="numero"># Número</option>
+          <option value="nome">Nome (A-Z)</option>
+          <option value="pct">% Execução</option>
+          <option value="itens">Itens</option>
+          <option value="pecas">Peças</option>
+        </select>
         <div style={{ fontSize: 13, color: "#94a3b8", display: "flex", alignItems: "center" }}>
-          {filtered.length} de {obras.length} obras
+          {displayed.length} de {obras.length} obras
         </div>
       </div>
 
       {/* Obra cards */}
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {filtered.map(os => {
+        {displayed.map(os => {
           const pct = os.itens.length > 0
             ? Math.round(os.itens.reduce((a, i) => a + itemPercentual(i), 0) / os.itens.length)
             : 0;
@@ -1099,12 +1123,11 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
                     <ProgressBar value={pct} height={8} />
                   </div>
                   <div style={{ textAlign: "right" }}>
-                    <div style={{ fontWeight: 800, fontSize: 15, color: "#c9a227" }}>R$ {fmt(os.valorTotal)}</div>
                     <select
                       value={os.status}
                       onClick={e => e.stopPropagation()}
                       onChange={e => { e.stopPropagation(); onStatusChange(os.id, e.target.value); }}
-                      style={{ background: statusColor + "22", color: statusColor, border: `1px solid ${statusColor}55`, borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", marginTop: 4 }}
+                      style={{ background: statusColor + "22", color: statusColor, border: `1px solid ${statusColor}55`, borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
                     >
                       {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
@@ -1114,7 +1137,7 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
             </div>
           );
         })}
-        {filtered.length === 0 && (
+        {displayed.length === 0 && (
           <div style={{ textAlign: "center", padding: 60, color: "#94a3b8", fontSize: 15 }}>
             Nenhuma obra encontrada
           </div>
@@ -1365,23 +1388,7 @@ function OrdemPrint({ ordem, obras, onBack }) {
   );
 }
 
-function OrdensView({ equipes, obras, ordens, onSaveOrdem, onDeleteOrdem, onPrintOrdem }) {
-  const [building, setBuilding] = useState(null);   // equipe para nova O.S.
-  const [editing, setEditing] = useState(null);     // ordem existente em edição
-
-  if (building || editing) {
-    const equipe = editing ? equipes.find(e => e.id === editing.equipeId) : building;
-    if (!equipe) { setBuilding(null); setEditing(null); return null; }
-    return (
-      <OrdemBuilder
-        equipe={equipe} obras={obras} ordens={ordens} ordemExistente={editing}
-        onCancel={() => { setBuilding(null); setEditing(null); }}
-        onSave={(ord) => { onSaveOrdem(ord); setBuilding(null); setEditing(null); }}
-        onPrint={(ord) => { onSaveOrdem(ord); onPrintOrdem(ord); setBuilding(null); setEditing(null); }}
-      />
-    );
-  }
-
+function OrdensView({ equipes, obras, ordens, onNewOrdem, onEditOrdem, onDeleteOrdem, onPrintOrdem }) {
   return (
     <div style={{ padding: "24px 28px", maxWidth: 1100, margin: "0 auto" }}>
       <h2 style={{ fontSize: 20, fontWeight: 800, color: BRAND, marginBottom: 4 }}>Ordem de Serviço por Equipe</h2>
@@ -1407,7 +1414,7 @@ function OrdensView({ equipes, obras, ordens, onSaveOrdem, onDeleteOrdem, onPrin
                 </div>
                 <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
                   <span style={{ fontSize: 12, color: "#94a3b8" }}>{obs.length} obra(s) · {ativas.length} ativa(s) hoje</span>
-                  <button onClick={() => setBuilding(eq)} style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>📋 Gerar O.S.</button>
+                  <button onClick={() => onNewOrdem(eq)} style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>📋 Gerar O.S.</button>
                 </div>
               </div>
               {obs.length > 0 && (
@@ -1445,12 +1452,107 @@ function OrdensView({ equipes, obras, ordens, onSaveOrdem, onDeleteOrdem, onPrin
             <span style={{ fontSize: 12, color: "#64748b" }}>{fmtDate(ord.periodoInicio)} a {fmtDate(ord.periodoFim)} · {ord.linhas.length} dia(s)</span>
             <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
               <button onClick={() => onPrintOrdem(ord)} style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 7, padding: "6px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Imprimir</button>
-              <button onClick={() => setEditing(ord)} style={{ background: "#eff6ff", color: BRAND, border: "none", borderRadius: 7, padding: "6px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Reabrir</button>
+              <button onClick={() => onEditOrdem(ord)} style={{ background: "#eff6ff", color: BRAND, border: "none", borderRadius: 7, padding: "6px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Reabrir</button>
               <button onClick={() => { if (confirm("Excluir esta O.S.?")) onDeleteOrdem(ord.id); }} style={{ background: "#fee2e2", color: "#dc2626", border: "none", borderRadius: 7, padding: "6px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Excluir</button>
             </div>
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ─── MENU LATERAL ─────────────────────────────────────────────────────────────
+function SideMenu({ open, onClose, onNav, onImport, current }) {
+  const items = [
+    { key: "dashboard", label: "Obras", icon: "🏠" },
+    { key: "calendar", label: "Calendário", icon: "📅" },
+    { key: "equipes", label: "Equipes", icon: "👷" },
+    { key: "ordens", label: "Ordem de Serviço", icon: "📋" },
+    { key: "financeiro", label: "Financeiro", icon: "🔒" },
+  ];
+  return (
+    <>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", opacity: open ? 1 : 0, pointerEvents: open ? "auto" : "none", transition: "opacity .2s", zIndex: 40 }} />
+      <div style={{ position: "fixed", top: 0, left: 0, bottom: 0, width: 264, background: "#1a1a1a", transform: open ? "translateX(0)" : "translateX(-100%)", transition: "transform .25s ease", zIndex: 41, display: "flex", flexDirection: "column", padding: "16px 0", boxShadow: open ? "4px 0 24px rgba(0,0,0,0.3)" : "none" }}>
+        <div style={{ padding: "0 20px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <img src={logoWhite} alt="Centauro" style={{ height: 28 }} />
+          <button onClick={onClose} style={{ background: "transparent", color: "#9ca3af", border: "none", fontSize: 24, lineHeight: 1, cursor: "pointer" }}>×</button>
+        </div>
+        <div style={{ borderTop: "1px solid #333", margin: "4px 0 8px" }} />
+        {items.map(it => (
+          <button key={it.key} onClick={() => onNav(it.key)}
+            style={{ textAlign: "left", background: current === it.key ? "#2a2a2a" : "transparent", color: current === it.key ? "#fff" : "#d1d5db", borderLeft: current === it.key ? "3px solid #c9a227" : "3px solid transparent", border: "none", borderLeftWidth: 3, borderLeftStyle: "solid", borderLeftColor: current === it.key ? "#c9a227" : "transparent", padding: "13px 22px", fontSize: 14, fontWeight: 600, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
+            <span style={{ fontSize: 16 }}>{it.icon}</span> {it.label}
+          </button>
+        ))}
+        <div style={{ borderTop: "1px solid #333", margin: "8px 0" }} />
+        <button onClick={onImport}
+          style={{ textAlign: "left", background: "transparent", color: "#c9a227", border: "none", padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
+          <span style={{ fontSize: 16 }}>📄</span> Importar PDF
+        </button>
+        <div style={{ marginTop: "auto", padding: "12px 22px", fontSize: 11, color: "#6b7280" }}>Centauro — Gestão de Obras</div>
+      </div>
+    </>
+  );
+}
+
+// ─── FINANCEIRO (protegido por senha) ─────────────────────────────────────────
+const SENHA_FINANCEIRO = "00centauro00";
+function FinanceiroView({ obras, unlocked, onUnlock }) {
+  const [pw, setPw] = useState("");
+  const [err, setErr] = useState("");
+
+  if (!unlocked) {
+    return (
+      <div style={{ padding: "60px 20px", display: "flex", justifyContent: "center" }}>
+        <form onSubmit={e => { e.preventDefault(); if (pw === SENHA_FINANCEIRO) onUnlock(); else { setErr("Senha incorreta."); setPw(""); } }}
+          style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 32, width: 340, maxWidth: "100%", boxShadow: "0 4px 20px rgba(0,0,0,0.08)" }}>
+          <div style={{ fontSize: 34, textAlign: "center", marginBottom: 6 }}>🔒</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: BRAND, textAlign: "center" }}>Área Financeira</div>
+          <div style={{ fontSize: 13, color: "#64748b", textAlign: "center", marginBottom: 20 }}>Digite a senha para acessar</div>
+          <input type="password" value={pw} onChange={e => setPw(e.target.value)} autoFocus placeholder="Senha"
+            style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 8, padding: "10px 12px", fontSize: 14, boxSizing: "border-box", marginBottom: 12 }} />
+          {err && <div style={{ background: "#fee2e2", color: "#dc2626", borderRadius: 8, padding: "8px 12px", fontSize: 13, marginBottom: 12 }}>{err}</div>}
+          <button type="submit" style={{ width: "100%", background: BRAND, color: "#fff", border: "none", borderRadius: 8, padding: 11, fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Acessar</button>
+        </form>
+      </div>
+    );
+  }
+
+  const total = obras.reduce((a, o) => a + (o.valorTotal || 0), 0);
+  const sorted = [...obras].sort((a, b) => (b.valorTotal || 0) - (a.valorTotal || 0));
+  return (
+    <div style={{ padding: "24px 28px", maxWidth: 900, margin: "0 auto" }}>
+      <h2 style={{ fontSize: 20, fontWeight: 800, color: BRAND, marginBottom: 16 }}>Financeiro</h2>
+      <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", borderLeft: "4px solid #c9a227", marginBottom: 20 }}>
+        <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Total em Obras</div>
+        <div style={{ fontSize: 28, fontWeight: 800, color: "#c9a227" }}>R$ {fmt(total)}</div>
+        <div style={{ fontSize: 12, color: "#64748b", marginTop: 4 }}>{obras.length} pedidos</div>
+      </div>
+      <div style={{ background: "#fff", borderRadius: 12, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", overflow: "hidden" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr style={{ background: BRAND, color: "#fff" }}>
+              {["#", "Cliente", "Cidade", "Valor", "% do total"].map(h => (
+                <th key={h} style={{ padding: "8px 12px", textAlign: h === "Valor" || h === "% do total" ? "right" : "left", fontWeight: 600, fontSize: 12 }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((o, i) => (
+              <tr key={o.id} style={{ background: i % 2 ? "#f8fafc" : "#fff", borderBottom: "1px solid #e2e8f0" }}>
+                <td style={{ padding: "7px 12px", fontWeight: 700 }}>#{o.numero}</td>
+                <td style={{ padding: "7px 12px" }}>{o.cliente}</td>
+                <td style={{ padding: "7px 12px", color: "#64748b" }}>{o.cidade}</td>
+                <td style={{ padding: "7px 12px", textAlign: "right", fontWeight: 700, color: "#c9a227" }}>R$ {fmt(o.valorTotal)}</td>
+                <td style={{ padding: "7px 12px", textAlign: "right", color: "#64748b" }}>{total ? ((o.valorTotal || 0) / total * 100).toFixed(1) : 0}%</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 12 }}>Mais recursos financeiros serão adicionados aqui.</div>
     </div>
   );
 }
@@ -1520,10 +1622,11 @@ export default function App() {
   const [obras, setObras] = useState([]);
   const [equipes, setEquipes] = useState([]);
   const [ordens, setOrdens] = useState([]);
-  const [ordemPrint, setOrdemPrint] = useState(null);
-  const [selectedId, setSelectedId] = useState(null);
-  const [printId, setPrintId] = useState(null);
-  const [screen, setScreen] = useState("home"); // home | calendar | equipes | ordens
+  // Navegação: view atual + pilha de histórico (botão voltar universal)
+  const [view, setView] = useState({ type: "dashboard" });
+  const [history, setHistory] = useState([]);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [financeiroUnlocked, setFinanceiroUnlocked] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState("");
   const fileRef = useRef();
@@ -1576,11 +1679,20 @@ export default function App() {
     }, 700);
   }, []);
 
-  const goHome = () => { setSelectedId(null); setScreen("home"); };
-  const openObra = (id) => { setSelectedId(id); setScreen("home"); };
-
-  const selectedObra = obras.find(o => o.id === selectedId);
-  const printObra    = obras.find(o => o.id === printId);
+  // Navega para uma nova view (empilha a atual no histórico)
+  const navTo = useCallback((v) => { setHistory(h => [...h, view]); setView(v); setMenuOpen(false); }, [view]);
+  // Substitui a view atual sem empilhar
+  const navReplace = useCallback((v) => { setView(v); setMenuOpen(false); }, []);
+  // Volta para a view anterior
+  const back = useCallback(() => {
+    setHistory(h => {
+      if (h.length === 0) { setView({ type: "dashboard" }); return h; }
+      setView(h[h.length - 1]);
+      return h.slice(0, -1);
+    });
+  }, []);
+  const goHome = useCallback(() => { setView({ type: "dashboard" }); setHistory([]); setMenuOpen(false); }, []);
+  const openObra = useCallback((id) => navTo({ type: "gantt", obraId: id }), [navTo]);
 
   const updateObra = useCallback((updated) => {
     setObras(prev => prev.map(o => o.id === updated.id ? updated : o));
@@ -1636,7 +1748,7 @@ export default function App() {
       const merged = exists ? { ...obra, status: exists.status, dataInicio: exists.dataInicio, equipes: exists.equipes } : obra;
       setObras(prev => exists ? prev.map(o => o.id === obra.id ? merged : o) : [...prev, merged]);
       await upsertObra(merged);
-      setSelectedId(obra.id);
+      navTo({ type: "gantt", obraId: obra.id });
     } catch (err) {
       showError("Erro ao importar: " + err.message);
     } finally {
@@ -1650,102 +1762,82 @@ export default function App() {
   // Portões de acesso
   if (!authReady) return <CenteredMsg>Carregando…</CenteredMsg>;
   if (!session)   return <LoginScreen />;
-  if (printObra)  return <PrintView obra={printObra} onBack={() => setPrintId(null)} />;
-  if (ordemPrint) return <OrdemPrint ordem={ordemPrint} obras={obras} onBack={() => setOrdemPrint(null)} />;
+
+  // Views de impressão ocupam a tela toda (sem o shell do app)
+  if (view.type === "print") {
+    const o = obras.find(x => x.id === view.obraId);
+    return o ? <PrintView obra={o} onBack={back} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>;
+  }
+  if (view.type === "ordemPrint") {
+    return <OrdemPrint ordem={view.ordem} obras={obras} onBack={back} />;
+  }
+
+  const userEmail = session.user?.email || "";
+  const selectedObra = view.type === "gantt" ? obras.find(o => o.id === view.obraId) : null;
+  const canGoBack = history.length > 0 || view.type !== "dashboard";
+  const tituloView = { dashboard: "Obras", calendar: "Calendário de Obras", equipes: "Equipes", ordens: "Ordem de Serviço", financeiro: "Financeiro", ordemBuilder: "Nova Ordem de Serviço" };
 
   return (
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
-      {/* Header */}
-      <div style={{ background: "#1a1a1a", padding: "14px 24px", display: "flex", alignItems: "center", gap: 16 }}>
+      <SideMenu open={menuOpen} onClose={() => setMenuOpen(false)} current={view.type}
+        onNav={(key) => navTo({ type: key })}
+        onImport={() => { setMenuOpen(false); fileRef.current.click(); }} />
+
+      {/* Top bar: menu · logo · voltar · título — usuário · sair */}
+      <div style={{ background: "#1a1a1a", padding: "12px 20px", display: "flex", alignItems: "center", gap: 14 }}>
+        <button onClick={() => setMenuOpen(true)} title="Menu"
+          style={{ background: "transparent", color: "#fff", border: "none", fontSize: 22, lineHeight: 1, cursor: "pointer", padding: 4 }}>☰</button>
         <div style={{ cursor: "pointer" }} onClick={goHome}>
-          <img src={logoWhite} alt="Centauro Esquadrias" style={{ height: 36, display: "block" }} />
+          <img src={logoWhite} alt="Centauro Esquadrias" style={{ height: 34, display: "block" }} />
+        </div>
+        {canGoBack && (
+          <button onClick={back} title="Voltar"
+            style={{ background: "transparent", color: "#e2e8f0", border: "1px solid #333", borderRadius: 8, padding: "6px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>← Voltar</button>
+        )}
+        <div style={{ color: "#9ca3af", fontSize: 13, fontWeight: 600, marginLeft: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {selectedObra ? `#${selectedObra.numero} — ${selectedObra.cliente}` : (tituloView[view.type] || "")}
         </div>
 
-        {selectedObra && (
-          <>
-            <div style={{ color: "#9ca3af", fontSize: 18, marginLeft: 4 }}>›</div>
-            <div style={{ color: "#e2e8f0", fontSize: 14, fontWeight: 600 }}>
-              #{selectedObra.numero} — {selectedObra.cliente}
-            </div>
-          </>
-        )}
-        {!selectedObra && screen !== "home" && (
-          <>
-            <div style={{ color: "#9ca3af", fontSize: 18, marginLeft: 4 }}>›</div>
-            <div style={{ color: "#e2e8f0", fontSize: 14, fontWeight: 600 }}>
-              {screen === "calendar" ? "Calendário de Obras" : screen === "ordens" ? "Ordem de Serviço" : "Equipes"}
-            </div>
-          </>
-        )}
-
-        <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 12, alignItems: "center" }}>
           {importError && (
-            <span style={{ background: "#fee2e2", color: "#dc2626", borderRadius: 6, padding: "5px 12px", fontSize: 12, fontWeight: 600 }}>
-              {importError}
-            </span>
-          )}
-          <button
-            onClick={() => fileRef.current.click()}
-            disabled={importing}
-            style={{ background: importing ? "#64748b" : "#c9a227", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: importing ? "wait" : "pointer" }}
-          >
-            {importing ? "Importando..." : "Importar PDF"}
-          </button>
-          <input ref={fileRef} type="file" accept=".pdf" style={{ display: "none" }} onChange={handleImport} />
-          {!selectedObra && (
-            <>
-              <button onClick={() => { setSelectedId(null); setScreen(screen === "calendar" ? "home" : "calendar"); }}
-                style={{ background: screen === "calendar" ? "#fff" : "transparent", color: screen === "calendar" ? "#1a1a1a" : "#9ca3af", border: "1px solid #333333", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
-                📅 Calendário
-              </button>
-              <button onClick={() => { setSelectedId(null); setScreen(screen === "equipes" ? "home" : "equipes"); }}
-                style={{ background: screen === "equipes" ? "#fff" : "transparent", color: screen === "equipes" ? "#1a1a1a" : "#9ca3af", border: "1px solid #333333", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
-                👷 Equipes
-              </button>
-              <button onClick={() => { setSelectedId(null); setScreen(screen === "ordens" ? "home" : "ordens"); }}
-                style={{ background: screen === "ordens" ? "#fff" : "transparent", color: screen === "ordens" ? "#1a1a1a" : "#9ca3af", border: "1px solid #333333", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
-                📋 O.S.
-              </button>
-            </>
+            <span style={{ background: "#fee2e2", color: "#dc2626", borderRadius: 6, padding: "5px 12px", fontSize: 12, fontWeight: 600 }}>{importError}</span>
           )}
           {selectedObra && (
-            <>
-              <button onClick={goHome}
-                style={{ background: "transparent", color: "#9ca3af", border: "1px solid #333333", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
-                Todas as Obras
-              </button>
-              <button onClick={() => setPrintId(selectedObra.id)}
-                style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
-                Nota de Serviço
-              </button>
-            </>
+            <button onClick={() => navTo({ type: "print", obraId: selectedObra.id })}
+              style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Nota de Serviço</button>
           )}
+          <span style={{ color: "#9ca3af", fontSize: 12, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={userEmail}>👤 {userEmail}</span>
           <button onClick={handleLogout} title="Sair"
-            style={{ background: "transparent", color: "#9ca3af", border: "1px solid #333333", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
-            Sair
-          </button>
+            style={{ background: "transparent", color: "#9ca3af", border: "1px solid #333", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Sair</button>
         </div>
       </div>
+      <input ref={fileRef} type="file" accept=".pdf" style={{ display: "none" }} onChange={handleImport} />
 
-      {/* Subtitle when inside an obra */}
-      {selectedObra && (
-        <div style={{ background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "8px 24px", fontSize: 12, color: "#64748b" }}>
-          Sistema de Gestão de Obras — Cronograma / Gantt
-        </div>
-      )}
-
-      {/* Main content */}
+      {/* Conteúdo */}
       {loading
         ? <div style={{ textAlign: "center", padding: 80, color: "#64748b", fontSize: 15 }}>Carregando obras…</div>
-        : selectedObra
-          ? <GanttView obra={selectedObra} onChange={updateObra} equipes={equipes} />
-          : screen === "calendar"
+        : view.type === "gantt"
+          ? (selectedObra ? <GanttView obra={selectedObra} onChange={updateObra} equipes={equipes} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>)
+          : view.type === "calendar"
             ? <CalendarView obras={obras} equipes={equipes} onSelectObra={openObra} />
-            : screen === "equipes"
+            : view.type === "equipes"
               ? <EquipesView equipes={equipes} onChange={handleEquipesChange} obras={obras} />
-              : screen === "ordens"
-                ? <OrdensView equipes={equipes} obras={obras} ordens={ordens} onSaveOrdem={handleSaveOrdem} onDeleteOrdem={handleDeleteOrdem} onPrintOrdem={setOrdemPrint} />
-                : <Dashboard obras={obras} onSelect={setSelectedId} onStatusChange={handleStatusChange} onReorder={handleReorder} equipes={equipes} />
+              : view.type === "ordens"
+                ? <OrdensView equipes={equipes} obras={obras} ordens={ordens}
+                    onNewOrdem={(eq) => navTo({ type: "ordemBuilder", equipeId: eq.id })}
+                    onEditOrdem={(ord) => navTo({ type: "ordemBuilder", equipeId: ord.equipeId, ordem: ord })}
+                    onDeleteOrdem={handleDeleteOrdem}
+                    onPrintOrdem={(ord) => navTo({ type: "ordemPrint", ordem: ord })} />
+                : view.type === "ordemBuilder"
+                  ? (equipes.find(e => e.id === view.equipeId)
+                      ? <OrdemBuilder equipe={equipes.find(e => e.id === view.equipeId)} obras={obras} ordens={ordens} ordemExistente={view.ordem}
+                          onCancel={back}
+                          onSave={(ord) => { handleSaveOrdem(ord); back(); }}
+                          onPrint={(ord) => { handleSaveOrdem(ord); navReplace({ type: "ordemPrint", ordem: ord }); }} />
+                      : <CenteredMsg>Equipe não encontrada</CenteredMsg>)
+                  : view.type === "financeiro"
+                    ? <FinanceiroView obras={obras} unlocked={financeiroUnlocked} onUnlock={() => setFinanceiroUnlocked(true)} />
+                    : <Dashboard obras={obras} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} equipes={equipes} />
       }
 
       {/* pdf.js CDN (for PDF import in browser) */}
