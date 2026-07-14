@@ -963,6 +963,7 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState("Todos");
   const [sortBy, setSortBy] = useState("ordem"); // ordem | numero | nome | pct | itens | pecas
+  const [sortDir, setSortDir] = useState("asc"); // asc | desc
   const [dragArmed, setDragArmed] = useState(null); // id com alça pressionada (pode arrastar)
   const [dragId, setDragId] = useState(null);       // id sendo arrastado
   const [overId, setOverId] = useState(null);       // id sob o cursor
@@ -977,16 +978,18 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
     return matchText && matchStatus;
   });
 
-  // Ordenação escolhida (não muda a lista base; "ordem" = ordem manual/arrastar)
+  // Ordenação escolhida (base crescente + direção). "ordem" = ordem manual/arrastar
+  const dirF = sortDir === "asc" ? 1 : -1;
   const displayed = sortBy === "ordem" ? filtered : [...filtered].sort((a, b) => {
+    let r = 0;
     switch (sortBy) {
-      case "numero": return (Number(a.numero) || 0) - (Number(b.numero) || 0);
-      case "nome":   return a.cliente.localeCompare(b.cliente, "pt-BR");
-      case "pct":    return pctObra(b) - pctObra(a);
-      case "itens":  return b.itens.length - a.itens.length;
-      case "pecas":  return pecasObra(b) - pecasObra(a);
-      default: return 0;
+      case "numero": r = (Number(a.numero) || 0) - (Number(b.numero) || 0); break;
+      case "nome":   r = a.cliente.localeCompare(b.cliente, "pt-BR"); break;
+      case "pct":    r = pctObra(a) - pctObra(b); break;
+      case "itens":  r = a.itens.length - b.itens.length; break;
+      case "pecas":  r = pecasObra(a) - pecasObra(b); break;
     }
+    return r * dirF;
   });
 
   // Reordenar (arrastar) só faz sentido na lista completa e na ordem manual
@@ -1048,6 +1051,13 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
           <option value="itens">Itens</option>
           <option value="pecas">Peças</option>
         </select>
+        {sortBy !== "ordem" && (
+          <button onClick={() => setSortDir(d => d === "asc" ? "desc" : "asc")}
+            title={sortDir === "asc" ? "Crescente (menor → maior)" : "Decrescente (maior → menor)"}
+            style={{ border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", fontSize: 13, background: "#fff", cursor: "pointer", fontWeight: 700, color: "#1a1a1a" }}>
+            {sortDir === "asc" ? "↑ Crescente" : "↓ Decrescente"}
+          </button>
+        )}
         <div style={{ fontSize: 13, color: "#94a3b8", display: "flex", alignItems: "center" }}>
           {displayed.length} de {obras.length} obras
         </div>
