@@ -1829,7 +1829,7 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora })
   }
 
   const inp = { border: "1px solid #e2e8f0", borderRadius: 5, padding: "2px 5px", fontSize: 12, boxSizing: "border-box" };
-  const COL = { id: 34, nome: 240, dur: 116, pct: 46, ini: 122, term: 118, pred: 58 };
+  const COL = { id: 34, nome: 240, dur: 116, pct: 60, ini: 122, term: 118, pred: 58 };
   const GRID_W = Object.values(COL).reduce((a, b) => a + b, 0);
   const btn = { background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 10px", fontWeight: 700, fontSize: 12, cursor: "pointer" };
   const obraVinculada = c.obraId ? obras.find(o => o.id === c.obraId) : null;
@@ -1908,7 +1908,7 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora })
                   {sc.isSummary
                     ? <span style={{ color: "#64748b", fontWeight: 600 }}>{textoDuracao(t, sc)}</span>
                     : <span onClick={e => e.stopPropagation()} style={{ display: "inline-flex", gap: 3 }}>
-                        <input type="number" min={0} max={999} step="0.5" value={t.durValor} onChange={e => updTask(t.id, { durValor: clampDuracao(e.target.value) }, "durValor")} style={{ ...inp, width: 50, textAlign: "right" }} />
+                        <input type="number" min={0} max={999} step="0.5" value={t.durValor} onChange={e => updTask(t.id, { durValor: clampDuracao(e.target.value) }, "durValor")} style={{ ...inp, width: 58, textAlign: "right" }} />
                         <select value={t.durUnid} onChange={e => updTask(t.id, { durUnid: e.target.value })} style={{ ...inp, width: 56, paddingRight: 2 }}>
                           <option value="dias">dias</option><option value="hrs">hrs</option>
                         </select>
@@ -1916,7 +1916,7 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora })
                 </div>
                 <div style={{ width: COL.pct, textAlign: "center" }}>
                   {sc.isSummary ? <b onClick={e => { e.stopPropagation(); setZerarAlvo(t.id); }} style={{ cursor: "pointer" }} title="Zerar percentual do grupo">{sc.percent}%</b>
-                    : <input type="number" min={0} max={100} value={t.percent} onClick={e => e.stopPropagation()} onChange={e => updTask(t.id, { percent: clampPercent(e.target.value) }, "percent")} style={{ ...inp, width: 40, textAlign: "center" }} />}
+                    : <input type="number" min={0} max={100} value={t.percent} onClick={e => e.stopPropagation()} onChange={e => updTask(t.id, { percent: clampPercent(e.target.value) }, "percent")} style={{ ...inp, width: 54, textAlign: "center" }} />}
                 </div>
                 <div style={{ width: COL.ini, textAlign: "center", fontSize: 11 }}>
                   {t.inicioManual
