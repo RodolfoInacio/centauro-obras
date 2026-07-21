@@ -118,6 +118,39 @@ function filhosIdx(tasks, i) {
   return r;
 }
 
+// Todos os descendentes (qualquer nível abaixo, não só filhos diretos) da task no índice i.
+export function descendentesDe(tasks, i) {
+  const r = [];
+  for (let j = i + 1; j < tasks.length && tasks[j].nivel > tasks[i].nivel; j++) r.push(j);
+  return r;
+}
+
+// Índices (no array completo) das tasks visíveis, considerando colapsamento de resumos ancestrais.
+export function indicesVisiveis(tasks) {
+  const idxs = [];
+  const stack = []; // níveis dos ancestrais colapsados ainda "ativos"
+  for (let i = 0; i < tasks.length; i++) {
+    const t = tasks[i];
+    while (stack.length && stack[stack.length - 1] >= t.nivel) stack.pop();
+    if (stack.length === 0) idxs.push(i);
+    if (t.colapsada && ehResumo(tasks, i)) stack.push(t.nivel);
+  }
+  return idxs;
+}
+
+// Renumera IDs para 1..N (na ordem do array) e remapeia/limpa predecessoras órfãs.
+export function renumerarIds(tasks) {
+  const mapa = {};
+  tasks.forEach((t, i) => { mapa[t.id] = i + 1; });
+  return tasks.map((t, i) => ({
+    ...t,
+    id: i + 1,
+    predecessoras: (t.predecessoras || [])
+      .filter(pid => mapa[pid] !== undefined)
+      .map(pid => mapa[pid]),
+  }));
+}
+
 // Retorna { [taskId]: { inicio, termino, percent, durDias, isSummary } }
 export function agendar(tasks, config) {
   const cfg = { ...CONFIG_PADRAO, ...(config || {}) };
@@ -169,7 +202,8 @@ export function agendar(tasks, config) {
       for (let j = i + 1; j < tasks.length && tasks[j].nivel > tasks[i].nivel; j++) if (!summary[j]) leaves.push(tasks[j]);
       const totH = leaves.reduce((a, k) => a + duracaoParaHoras(k, cfg), 0);
       percent = totH > 0 ? Math.round(leaves.reduce((a, k) => a + duracaoParaHoras(k, cfg) * (Number(k.percent) || 0), 0) / totH) : 0;
-    } else percent = Number(t.percent) || 0;
+      percent = Math.max(0, Math.min(100, percent));
+    } else percent = Math.max(0, Math.min(100, Math.round(Number(t.percent) || 0)));
     const durDias = Math.round(minutosUteisEntre(s.inicio, s.termino, cfg) / (cfg.horasDia * 60) * 100) / 100;
     out[t.id] = { inicio: s.inicio, termino: s.termino, percent, durDias, isSummary: summary[i] };
   }

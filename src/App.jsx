@@ -3,7 +3,8 @@ import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
 import { fetchObras, upsertObra, fetchEquipes, saveEquipes as dbSaveEquipes, fetchOrdens, upsertOrdem, deleteOrdem as dbDeleteOrdem, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma } from "./api";
-import { agendar, CONFIG_PADRAO, fmtDataHora, textoDuracao, MESES_ABBR, DOW1, ehDiaUtil } from "./cronograma";
+import { agendar, CONFIG_PADRAO, fmtDataHora, textoDuracao, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis } from "./cronograma";
+import Modal from "./Modal";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 // Brand color (was navy #1a1a1a) — now charcoal black
@@ -1570,6 +1571,9 @@ function FinanceiroView({ obras, unlocked, onUnlock }) {
 }
 
 // ─── CRONOGRAMA COMERCIAL (mini MS Project) ──────────────────────────────────
+function clampPercent(v) { return Math.max(0, Math.min(100, Math.round(Number(v) || 0))); }
+function clampDuracao(v) { return Math.max(0, Math.min(999, Math.round((Number(v) || 0) * 10) / 10)); }
+
 function novoCronograma(titulo, obra) {
   const hoje = new Date().toISOString().split("T")[0];
   return {
@@ -1581,22 +1585,80 @@ function novoCronograma(titulo, obra) {
     tasks: [{ id: 1, nivel: 0, nome: titulo || "Projeto", durValor: 1, durUnid: "dias", percent: 0, predecessoras: [], inicioManual: "" }],
   };
 }
+
+// Modelo padrão de cronograma gerado a partir dos itens já extraídos de uma obra.
+const GRUPOS_PRODUCAO = ["Corte", "Usinagem", "Montagem", "Expedição"];
+const GRUPOS_INSTALACAO = ["Transporte", "Instalação", "Regulagem", "Acabamento"];
+
+function nomeCurtoItem(item) {
+  const base = (item.descricao || item.tipo || "Item").split("|")[0].trim() || "Item";
+  return base.length > 60 ? base.slice(0, 57) + "…" : base;
+}
+
+function novoCronogramaComModelo(titulo, obra, temVidros) {
+  const hoje = new Date().toISOString().split("T")[0];
+  const nomeObra = (obra?.obra || "").trim() || titulo || "Projeto";
+  const itens = obra?.itens || [];
+  const tasks = [];
+  let nextId = 1;
+  const push = (nivel, nome, extra = {}) => {
+    tasks.push({ id: nextId++, nivel, nome, durValor: 1, durUnid: "dias", percent: 0, predecessoras: [], inicioManual: "", comentario: "", ...extra });
+  };
+
+  push(0, nomeObra);
+
+  push(1, "Suprimentos");
+  push(2, "Metais");
+  push(2, "Acessórios");
+  if (temVidros) push(2, "Vidros");
+
+  push(1, "Produção");
+  for (const grupo of GRUPOS_PRODUCAO) {
+    push(2, grupo);
+    for (const item of itens) push(3, nomeCurtoItem(item), { descricaoCompleta: item.descricao || "" });
+  }
+
+  push(1, "Instalação");
+  for (const grupo of GRUPOS_INSTALACAO) {
+    push(2, grupo);
+    for (const item of itens) push(3, nomeCurtoItem(item), { descricaoCompleta: item.descricao || "" });
+  }
+
+  return {
+    id: "cr_" + Date.now(),
+    titulo: titulo || nomeObra,
+    obraId: obra ? obra.id : null,
+    cliente: obra ? obra.cliente : "",
+    config: { ...CONFIG_PADRAO, dataBase: hoje },
+    tasks: renumerarIds(tasks),
+  };
+}
 function toLocalInput(date) {
   if (!date) return "";
   const p = n => String(n).padStart(2, "0");
   return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
 }
 
-function CronogramasView({ cronogramas, obras, onNovo, onAbrir, onExcluir }) {
+function CronogramasView({ cronogramas, obras, onNovo, onNovoComModelo, onAbrir, onExcluir }) {
   const [criando, setCriando] = useState(false);
   const [titulo, setTitulo] = useState("");
   const [obraId, setObraId] = useState("");
+  const [perguntarVidros, setPerguntarVidros] = useState(false);
+
+  const obraSelecionada = obras.find(o => o.id === obraId) || null;
 
   function criar() {
     if (!titulo.trim()) return;
-    const obra = obras.find(o => o.id === obraId) || null;
-    onNovo(titulo.trim(), obra);
+    onNovo(titulo.trim(), obraSelecionada);
     setCriando(false); setTitulo(""); setObraId("");
+  }
+  function criarComModelo() {
+    if (!titulo.trim() || !obraSelecionada) return;
+    setPerguntarVidros(true);
+  }
+  function confirmarModelo(temVidros) {
+    onNovoComModelo(titulo.trim(), obraSelecionada, temVidros);
+    setPerguntarVidros(false); setCriando(false); setTitulo(""); setObraId("");
   }
 
   return (
@@ -1623,8 +1685,23 @@ function CronogramasView({ cronogramas, obras, onNovo, onAbrir, onExcluir }) {
             </select>
           </div>
           <button onClick={criar} style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Criar</button>
+          <button onClick={criarComModelo} disabled={!obraSelecionada}
+            title={obraSelecionada ? "Gera automaticamente a árvore Suprimentos / Produção / Instalação a partir dos itens da obra" : "Selecione uma obra para usar o modelo"}
+            style={{ background: obraSelecionada ? "#0ea5e9" : "#e2e8f0", color: obraSelecionada ? "#fff" : "#94a3b8", border: "none", borderRadius: 8, padding: "9px 18px", fontWeight: 700, fontSize: 13, cursor: obraSelecionada ? "pointer" : "not-allowed" }}>
+            Criar com modelo da obra
+          </button>
         </div>
       )}
+
+      <Modal open={perguntarVidros} title="Esta obra contém vidros?" onClose={() => setPerguntarVidros(false)}>
+        <div style={{ fontSize: 13, color: "#475569", marginBottom: 18 }}>
+          Se sim, um grupo "Vidros" será criado dentro de Suprimentos, junto com Metais e Acessórios.
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button onClick={() => confirmarModelo(false)} style={{ background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Não</button>
+          <button onClick={() => confirmarModelo(true)} style={{ background: "#0ea5e9", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Sim</button>
+        </div>
+      </Modal>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {cronogramas.length === 0 && <div style={{ color: "#94a3b8", fontSize: 13, padding: 24, textAlign: "center" }}>Nenhum cronograma ainda.</div>}
@@ -1650,13 +1727,47 @@ function CronogramasView({ cronogramas, obras, onNovo, onAbrir, onExcluir }) {
 const CR_ROW_H = 28;
 const CR_DAY_MS = 86400000;
 
-function CronogramaEditor({ cronograma, onChange, obras }) {
+function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora }) {
   const [c, setC] = useState(cronograma);
   const [sel, setSel] = useState(null);
   const [zoom, setZoom] = useState("dia"); // dia | semana
+  const [zerarAlvo, setZerarAlvo] = useState(null); // id da task cujo % o usuário quer zerar em cascata
+  const [expandidoId, setExpandidoId] = useState(null); // id da task-item com detalhes abertos
+  const [comentarioDraft, setComentarioDraft] = useState("");
+  const undoStack = useRef([]); // snapshots de `c` para Ctrl+Z (~20 níveis)
+  const lastGroup = useRef({ key: null, time: 0 });
+  const GROUP_MS = 800; // edições seguidas no mesmo campo viram 1 undo só
 
   useEffect(() => { setC(cronograma); }, [cronograma]);
-  const update = (next) => { setC(next); onChange(next); };
+  useEffect(() => {
+    if (expandidoId == null) { setComentarioDraft(""); return; }
+    setComentarioDraft(c.tasks.find(t => t.id === expandidoId)?.comentario || "");
+  }, [expandidoId]);
+
+  // groupKey (opcional): edições seguidas com a mesma chave dentro de GROUP_MS não empilham undo extra.
+  const update = (next, groupKey) => {
+    const now = Date.now();
+    const sameGroup = groupKey && lastGroup.current.key === groupKey && (now - lastGroup.current.time) < GROUP_MS;
+    if (!sameGroup) {
+      undoStack.current.push(c);
+      if (undoStack.current.length > 20) undoStack.current.shift();
+    }
+    lastGroup.current = { key: groupKey || null, time: now };
+    setC(next);
+    onChange(next);
+  };
+
+  useEffect(() => {
+    function onKeyDown(e) {
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
+        e.preventDefault();
+        const prev = undoStack.current.pop();
+        if (prev) { lastGroup.current = { key: null, time: 0 }; setC(prev); onChange(prev); }
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onChange]);
 
   const DAY_W = zoom === "dia" ? 26 : 12;
   const sched = agendar(c.tasks, c.config);
@@ -1676,8 +1787,8 @@ function CronogramaEditor({ cronograma, onChange, obras }) {
   const TL_W = totalDays * DAY_W;
 
   // ── edições ──
-  const setTasks = (tasks) => update({ ...c, tasks });
-  const updTask = (id, patch) => setTasks(c.tasks.map(t => t.id === id ? { ...t, ...patch } : t));
+  const setTasks = (tasks, groupKey) => update({ ...c, tasks }, groupKey);
+  const updTask = (id, patch, groupKey) => setTasks(c.tasks.map(t => t.id === id ? { ...t, ...patch } : t), groupKey ? `${id}:${groupKey}` : undefined);
   const selIdx = c.tasks.findIndex(t => t.id === sel);
 
   function addTarefa() {
@@ -1706,23 +1817,37 @@ function CronogramaEditor({ cronograma, onChange, obras }) {
   }
   function excluir() {
     if (selIdx < 0 || c.tasks.length <= 1) return;
-    setTasks(c.tasks.filter((_, i) => i !== selIdx));
+    setTasks(renumerarIds(c.tasks.filter((_, i) => i !== selIdx)));
     setSel(null);
+  }
+  function zerarCascata(taskId) {
+    const idx = c.tasks.findIndex(t => t.id === taskId);
+    if (idx < 0) return;
+    const idsAlvo = new Set([taskId, ...descendentesDe(c.tasks, idx).map(j => c.tasks[j].id)]);
+    setTasks(c.tasks.map(t => idsAlvo.has(t.id) ? { ...t, percent: 0 } : t));
+    setZerarAlvo(null);
   }
 
   const inp = { border: "1px solid #e2e8f0", borderRadius: 5, padding: "2px 5px", fontSize: 12, boxSizing: "border-box" };
   const COL = { id: 34, nome: 240, dur: 116, pct: 46, ini: 122, term: 118, pred: 58 };
   const GRID_W = Object.values(COL).reduce((a, b) => a + b, 0);
   const btn = { background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 10px", fontWeight: 700, fontSize: 12, cursor: "pointer" };
+  const obraVinculada = c.obraId ? obras.find(o => o.id === c.obraId) : null;
+
+  // Linhas visíveis (respeitando pais colapsados) — grade e Gantt usam a mesma ordem/índice, para não desalinhar.
+  const visIdxs = indicesVisiveis(c.tasks);
+  const visIndexById = {};
+  visIdxs.forEach((origI, visI) => { visIndexById[c.tasks[origI].id] = visI; });
+  const ROWS_H = visIdxs.length * CR_ROW_H;
 
   return (
     <div style={{ fontFamily: "'Segoe UI', sans-serif", color: "#1e293b" }}>
       {/* Toolbar */}
       <div style={{ background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "10px 16px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <input value={c.titulo} onChange={e => update({ ...c, titulo: e.target.value })}
+        <input value={c.titulo} onChange={e => update({ ...c, titulo: e.target.value }, "titulo")}
           style={{ fontWeight: 800, fontSize: 15, color: BRAND, border: "1px solid transparent", borderRadius: 6, padding: "4px 8px", minWidth: 220 }}
           onFocus={e => e.target.style.border = "1px solid #e2e8f0"} onBlur={e => e.target.style.border = "1px solid transparent"} />
-        {c.obraId && <span style={{ fontSize: 12, color: "#64748b" }}>· {obras.find(o => o.id === c.obraId)?.cliente || "obra"}</span>}
+        {obraVinculada && <span style={{ fontSize: 12, color: "#64748b" }}>· Obra #{obraVinculada.numero} — {obraVinculada.cliente}</span>}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>
           <button onClick={addTarefa} style={btn}>+ Tarefa</button>
           <button onClick={() => indent(1)} style={btn} title="Indentar">→</button>
@@ -1731,13 +1856,18 @@ function CronogramaEditor({ cronograma, onChange, obras }) {
           <button onClick={() => mover(1)} style={btn} title="Mover para baixo">↓</button>
           <button onClick={excluir} style={{ ...btn, color: "#dc2626", borderColor: "#fecaca" }} title="Excluir">🗑</button>
           <button onClick={() => setZoom(z => z === "dia" ? "semana" : "dia")} style={btn} title="Zoom">{zoom === "dia" ? "🔍 Semana" : "🔍 Dia"}</button>
+          <button onClick={() => onSalvarAgora && onSalvarAgora(c)} disabled={!dirty}
+            title={dirty ? "Há alterações não salvas — clique para salvar agora" : "Tudo salvo"}
+            style={{ ...btn, background: dirty ? "#10b981" : "#fff", color: dirty ? "#fff" : "#94a3b8", borderColor: dirty ? "#10b981" : "#e2e8f0", cursor: dirty ? "pointer" : "default" }}>
+            {dirty ? "💾 Salvar" : "✓ Salvo"}
+          </button>
         </div>
       </div>
 
       {/* Split: grade + gantt */}
       <div style={{ display: "flex", alignItems: "flex-start", overflowX: "auto" }}>
         {/* GRADE */}
-        <div style={{ width: GRID_W, minWidth: GRID_W, borderRight: "2px solid #cbd5e1", background: "#fff" }}>
+        <div style={{ width: GRID_W, minWidth: GRID_W, borderRight: "2px solid #cbd5e1", background: "#fff", position: "relative" }}>
           {/* header grade */}
           <div style={{ display: "flex", background: "#1a1a1a", color: "#fff", height: CR_ROW_H * 2, alignItems: "center", fontSize: 11, fontWeight: 700 }}>
             <div style={{ width: COL.id, textAlign: "center" }}>Id</div>
@@ -1749,7 +1879,8 @@ function CronogramaEditor({ cronograma, onChange, obras }) {
             <div style={{ width: COL.pred, textAlign: "center" }}>Pred.</div>
           </div>
           {/* linhas */}
-          {c.tasks.map((t, i) => {
+          {visIdxs.map((origI, i) => {
+            const t = c.tasks[origI];
             const sc = sched[t.id] || {};
             const selRow = sel === t.id;
             const cor = t.nivel === 0 ? "#dc2626" : sc.isSummary ? BRAND : "#1e293b";
@@ -1757,28 +1888,40 @@ function CronogramaEditor({ cronograma, onChange, obras }) {
               <div key={t.id} onClick={() => setSel(t.id)}
                 style={{ display: "flex", alignItems: "center", height: CR_ROW_H, borderBottom: "1px solid #f1f5f9", background: selRow ? "#eff6ff" : (i % 2 ? "#fafafa" : "#fff"), fontSize: 12, cursor: "pointer" }}>
                 <div style={{ width: COL.id, textAlign: "center", color: "#94a3b8" }}>{t.id}</div>
-                <div style={{ width: COL.nome, paddingLeft: 6 + t.nivel * 14, overflow: "hidden" }}>
-                  <input value={t.nome} onChange={e => updTask(t.id, { nome: e.target.value })} onClick={e => e.stopPropagation()}
+                <div style={{ width: COL.nome, paddingLeft: 6 + t.nivel * 14, overflow: "hidden", display: "flex", alignItems: "center" }}>
+                  {sc.isSummary && (
+                    <button onClick={e => { e.stopPropagation(); updTask(t.id, { colapsada: !t.colapsada }); }}
+                      title={t.colapsada ? "Expandir" : "Colapsar"} style={{ flexShrink: 0, border: "none", background: "transparent", cursor: "pointer", color: "#64748b", fontSize: 11, padding: "0 4px 0 0", width: 14 }}>
+                      {t.colapsada ? "▸" : "▾"}
+                    </button>
+                  )}
+                  <input value={t.nome} onChange={e => updTask(t.id, { nome: e.target.value }, "nome")} onClick={e => e.stopPropagation()}
                     style={{ ...inp, border: "1px solid transparent", background: "transparent", width: "100%", fontWeight: (sc.isSummary || t.nivel === 0) ? 700 : 400, color: cor }} />
+                  {t.descricaoCompleta && (
+                    <button onClick={e => { e.stopPropagation(); setExpandidoId(id => id === t.id ? null : t.id); }}
+                      title="Ver detalhes e comentário" style={{ flexShrink: 0, border: "none", background: "transparent", cursor: "pointer", color: expandidoId === t.id ? BRAND : "#94a3b8", fontSize: 12, padding: "0 4px" }}>
+                      {expandidoId === t.id ? "▾" : "▸"}
+                    </button>
+                  )}
                 </div>
                 <div style={{ width: COL.dur, textAlign: "center" }}>
                   {sc.isSummary
                     ? <span style={{ color: "#64748b", fontWeight: 600 }}>{textoDuracao(t, sc)}</span>
                     : <span onClick={e => e.stopPropagation()} style={{ display: "inline-flex", gap: 3 }}>
-                        <input type="number" min={0} step="0.5" value={t.durValor} onChange={e => updTask(t.id, { durValor: Number(e.target.value) })} style={{ ...inp, width: 50, textAlign: "right" }} />
+                        <input type="number" min={0} max={999} step="0.5" value={t.durValor} onChange={e => updTask(t.id, { durValor: clampDuracao(e.target.value) }, "durValor")} style={{ ...inp, width: 50, textAlign: "right" }} />
                         <select value={t.durUnid} onChange={e => updTask(t.id, { durUnid: e.target.value })} style={{ ...inp, width: 56, paddingRight: 2 }}>
                           <option value="dias">dias</option><option value="hrs">hrs</option>
                         </select>
                       </span>}
                 </div>
                 <div style={{ width: COL.pct, textAlign: "center" }}>
-                  {sc.isSummary ? <b>{sc.percent}%</b>
-                    : <input type="number" min={0} max={100} value={t.percent} onClick={e => e.stopPropagation()} onChange={e => updTask(t.id, { percent: Number(e.target.value) })} style={{ ...inp, width: 40, textAlign: "center" }} />}
+                  {sc.isSummary ? <b onClick={e => { e.stopPropagation(); setZerarAlvo(t.id); }} style={{ cursor: "pointer" }} title="Zerar percentual do grupo">{sc.percent}%</b>
+                    : <input type="number" min={0} max={100} value={t.percent} onClick={e => e.stopPropagation()} onChange={e => updTask(t.id, { percent: clampPercent(e.target.value) }, "percent")} style={{ ...inp, width: 40, textAlign: "center" }} />}
                 </div>
                 <div style={{ width: COL.ini, textAlign: "center", fontSize: 11 }}>
                   {t.inicioManual
                     ? <span onClick={e => e.stopPropagation()} style={{ display: "inline-flex", gap: 2, alignItems: "center" }}>
-                        <input type="datetime-local" value={t.inicioManual} onChange={e => updTask(t.id, { inicioManual: e.target.value })} style={{ ...inp, width: 96 }} />
+                        <input type="datetime-local" value={t.inicioManual} onChange={e => updTask(t.id, { inicioManual: e.target.value }, "inicioManual")} style={{ ...inp, width: 96 }} />
                         <button onClick={() => updTask(t.id, { inicioManual: "" })} title="Auto" style={{ border: "none", background: "transparent", cursor: "pointer", color: "#94a3b8" }}>×</button>
                       </span>
                     : <span onClick={e => { e.stopPropagation(); if (!sc.isSummary) updTask(t.id, { inicioManual: toLocalInput(sc.inicio) }); }} title={sc.isSummary ? "" : "Fixar início"} style={{ cursor: sc.isSummary ? "default" : "pointer" }}>
@@ -1788,12 +1931,34 @@ function CronogramaEditor({ cronograma, onChange, obras }) {
                 <div style={{ width: COL.term, textAlign: "center", fontSize: 11, color: "#64748b" }}>{fmtDataHora(sc.termino)}</div>
                 <div style={{ width: COL.pred, textAlign: "center" }}>
                   <input value={(t.predecessoras || []).join(",")} onClick={e => e.stopPropagation()}
-                    onChange={e => updTask(t.id, { predecessoras: e.target.value.split(",").map(x => parseInt(x.trim(), 10)).filter(Boolean) })}
+                    onChange={e => updTask(t.id, { predecessoras: e.target.value.split(",").map(x => parseInt(x.trim(), 10)).filter(Boolean) }, "predecessoras")}
                     style={{ ...inp, width: 48, textAlign: "center" }} placeholder="—" />
                 </div>
               </div>
             );
           })}
+
+          {/* Painel de detalhes do item (overlay — não desloca a grade nem o Gantt) */}
+          {expandidoId !== null && visIndexById[expandidoId] !== undefined && (() => {
+            const t = c.tasks.find(x => x.id === expandidoId);
+            if (!t) return null;
+            return (
+              <div onClick={e => e.stopPropagation()} style={{
+                position: "absolute", left: 8, right: 8, top: (visIndexById[expandidoId] + 1) * CR_ROW_H + 4, zIndex: 30,
+                background: "#fff", border: "1px solid #cbd5e1", borderRadius: 8, boxShadow: "0 6px 20px rgba(0,0,0,0.15)", padding: 12,
+              }}>
+                <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Descrição completa</div>
+                <div style={{ fontSize: 13, color: "#1e293b", marginBottom: 10 }}>{t.descricaoCompleta || "—"}</div>
+                <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Comentário</div>
+                <textarea value={comentarioDraft} onChange={e => setComentarioDraft(e.target.value)} rows={3}
+                  style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 6, padding: 8, fontSize: 13, boxSizing: "border-box", fontFamily: "inherit", resize: "vertical" }} />
+                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 8 }}>
+                  <button onClick={() => setExpandidoId(null)} style={{ background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Fechar</button>
+                  <button onClick={() => { updTask(t.id, { comentario: comentarioDraft }); }} style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 7, padding: "6px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Salvar comentário</button>
+                </div>
+              </div>
+            );
+          })()}
         </div>
 
         {/* GANTT */}
@@ -1814,26 +1979,27 @@ function CronogramaEditor({ cronograma, onChange, obras }) {
               <div key={i} style={{ position: "absolute", left: i * DAY_W, top: 0, bottom: 0, width: DAY_W, borderLeft: "1px solid #f1f5f9", background: ehDiaUtil(d, c.config) ? "transparent" : "#f1f5f9", boxSizing: "border-box" }} />
             ))}
             {/* setas de dependência */}
-            <svg style={{ position: "absolute", top: 0, left: 0, width: TL_W, height: c.tasks.length * CR_ROW_H, pointerEvents: "none" }}>
-              {c.tasks.map((t, i) => (t.predecessoras || []).map(pid => {
-                const pi = c.tasks.findIndex(x => x.id === pid);
+            <svg style={{ position: "absolute", top: 0, left: 0, width: TL_W, height: ROWS_H, pointerEvents: "none" }}>
+              {visIdxs.map((origI, i) => { const t = c.tasks[origI]; return (t.predecessoras || []).map(pid => {
+                const pi = visIndexById[pid];
                 const ps = sched[pid], ss = sched[t.id];
-                if (pi < 0 || !ps || !ss) return null;
+                if (pi === undefined || !ps || !ss) return null;
                 const x1 = ((ps.termino - tStart) / CR_DAY_MS) * DAY_W;
                 const y1 = pi * CR_ROW_H + CR_ROW_H / 2;
                 const x2 = ((ss.inicio - tStart) / CR_DAY_MS) * DAY_W;
                 const y2 = i * CR_ROW_H + CR_ROW_H / 2;
                 const mx = x1 + 6;
                 return <polyline key={pid + "-" + t.id} points={`${x1},${y1} ${mx},${y1} ${mx},${y2} ${x2},${y2}`} fill="none" stroke="#94a3b8" strokeWidth="1" markerEnd="url(#arr)" />;
-              }))}
+              }); })}
               <defs><marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#94a3b8" /></marker></defs>
             </svg>
             {/* barras */}
-            {c.tasks.map((t) => {
+            {visIdxs.map((origI, i) => {
+              const t = c.tasks[origI];
               const sc = sched[t.id]; if (!sc) return null;
               const x = ((sc.inicio - tStart) / CR_DAY_MS) * DAY_W;
               const w = Math.max(((sc.termino - sc.inicio) / CR_DAY_MS) * DAY_W, 4);
-              const y = c.tasks.indexOf(t) * CR_ROW_H;
+              const y = i * CR_ROW_H;
               if (sc.isSummary) {
                 return (
                   <div key={t.id} style={{ position: "absolute", left: x, top: y + CR_ROW_H / 2 - 4, width: w, height: 8 }}>
@@ -1851,13 +2017,23 @@ function CronogramaEditor({ cronograma, onChange, obras }) {
               );
             })}
             {/* linhas de grade horizontais */}
-            {c.tasks.map((t, i) => (
-              <div key={t.id} style={{ position: "absolute", left: 0, top: i * CR_ROW_H, width: TL_W, height: CR_ROW_H, borderBottom: "1px solid #f1f5f9", boxSizing: "border-box", pointerEvents: "none" }} />
+            {visIdxs.map((origI, i) => (
+              <div key={c.tasks[origI].id} style={{ position: "absolute", left: 0, top: i * CR_ROW_H, width: TL_W, height: CR_ROW_H, borderBottom: "1px solid #f1f5f9", boxSizing: "border-box", pointerEvents: "none" }} />
             ))}
-            <div style={{ height: c.tasks.length * CR_ROW_H }} />
+            <div style={{ height: ROWS_H }} />
           </div>
         </div>
       </div>
+
+      <Modal open={zerarAlvo !== null} title="Zerar percentual" onClose={() => setZerarAlvo(null)}>
+        <div style={{ fontSize: 13, color: "#475569", marginBottom: 18 }}>
+          Isso vai zerar o percentual desta tarefa e de todas as subtarefas dentro dela. Confirma?
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button onClick={() => setZerarAlvo(null)} style={{ background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Cancelar</button>
+          <button onClick={() => zerarCascata(zerarAlvo)} style={{ background: "#dc2626", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Zerar tudo</button>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -1937,6 +2113,15 @@ export default function App() {
   const [importError, setImportError] = useState("");
   const fileRef = useRef();
   const saveTimers = useRef({});
+  const [dirtyCronoIds, setDirtyCronoIds] = useState(() => new Set()); // cronogramas com gravação pendente (debounce)
+  const [pendingExit, setPendingExit] = useState(null); // ação de navegação adiada até o usuário decidir sobre alterações não salvas
+
+  // Avisa antes de fechar a aba/navegador se houver cronograma com gravação pendente
+  useEffect(() => {
+    function handler(e) { if (dirtyCronoIds.size > 0) { e.preventDefault(); e.returnValue = ""; } }
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [dirtyCronoIds]);
 
   // Sessão de login
   useEffect(() => {
@@ -1986,19 +2171,24 @@ export default function App() {
     }, 700);
   }, []);
 
+  // Há um cronograma com gravação pendente e é justamente o que está aberto agora?
+  const isCronoDirty = view.type === "cronograma" && dirtyCronoIds.has(view.id);
+  // Roda a navegação direto, ou adia para depois de perguntar "salvar antes de sair?" se houver pendência.
+  const guardNav = useCallback((run) => { if (isCronoDirty) setPendingExit(() => run); else run(); }, [isCronoDirty]);
+
   // Navega para uma nova view (empilha a atual no histórico)
-  const navTo = useCallback((v) => { setHistory(h => [...h, view]); setView(v); setMenuOpen(false); }, [view]);
+  const navTo = useCallback((v) => guardNav(() => { setHistory(h => [...h, view]); setView(v); setMenuOpen(false); }), [view, guardNav]);
   // Substitui a view atual sem empilhar
-  const navReplace = useCallback((v) => { setView(v); setMenuOpen(false); }, []);
+  const navReplace = useCallback((v) => guardNav(() => { setView(v); setMenuOpen(false); }), [guardNav]);
   // Volta para a view anterior
-  const back = useCallback(() => {
+  const back = useCallback(() => guardNav(() => {
     setHistory(h => {
       if (h.length === 0) { setView({ type: "dashboard" }); return h; }
       setView(h[h.length - 1]);
       return h.slice(0, -1);
     });
-  }, []);
-  const goHome = useCallback(() => { setView({ type: "dashboard" }); setHistory([]); setMenuOpen(false); }, []);
+  }), [guardNav]);
+  const goHome = useCallback(() => guardNav(() => { setView({ type: "dashboard" }); setHistory([]); setMenuOpen(false); }), [guardNav]);
   const openObra = useCallback((id) => navTo({ type: "gantt", obraId: id }), [navTo]);
 
   const updateObra = useCallback((updated) => {
@@ -2049,11 +2239,25 @@ export default function App() {
       const exists = prev.find(x => x.id === cr.id);
       return exists ? prev.map(x => x.id === cr.id ? cr : x) : [cr, ...prev];
     });
+    setDirtyCronoIds(prev => prev.has(cr.id) ? prev : new Set(prev).add(cr.id));
     const t = cronoTimer.current;
     if (t[cr.id]) clearTimeout(t[cr.id]);
     t[cr.id] = setTimeout(() => {
-      upsertCronograma(cr).catch(err => showError("Erro ao salvar cronograma: " + err.message));
+      upsertCronograma(cr)
+        .then(() => setDirtyCronoIds(prev => { if (!prev.has(cr.id)) return prev; const n = new Set(prev); n.delete(cr.id); return n; }))
+        .catch(err => showError("Erro ao salvar cronograma: " + err.message));
     }, 700);
+  }, []);
+  // Força gravação imediata (botão "Salvar" do editor / confirmação ao sair), sem esperar o debounce.
+  const handleSaveCronogramaNow = useCallback(async (cr) => {
+    const t = cronoTimer.current;
+    if (t[cr.id]) { clearTimeout(t[cr.id]); delete t[cr.id]; }
+    try {
+      await upsertCronograma(cr);
+      setDirtyCronoIds(prev => { if (!prev.has(cr.id)) return prev; const n = new Set(prev); n.delete(cr.id); return n; });
+    } catch (err) {
+      showError("Erro ao salvar cronograma: " + err.message);
+    }
   }, []);
   const handleDeleteCronograma = useCallback((id) => {
     setCronogramas(prev => prev.filter(x => x.id !== id));
@@ -2162,11 +2366,13 @@ export default function App() {
                   : view.type === "cronogramas"
                     ? <CronogramasView cronogramas={cronogramas} obras={obras}
                         onNovo={(titulo, obra) => { const cr = novoCronograma(titulo, obra); handleSaveCronograma(cr); navTo({ type: "cronograma", id: cr.id }); }}
+                        onNovoComModelo={(titulo, obra, temVidros) => { const cr = novoCronogramaComModelo(titulo, obra, temVidros); handleSaveCronograma(cr); navTo({ type: "cronograma", id: cr.id }); }}
                         onAbrir={(id) => navTo({ type: "cronograma", id })}
                         onExcluir={handleDeleteCronograma} />
                     : view.type === "cronograma"
                       ? (cronogramas.find(x => x.id === view.id)
-                          ? <CronogramaEditor cronograma={cronogramas.find(x => x.id === view.id)} obras={obras} onChange={handleSaveCronograma} />
+                          ? <CronogramaEditor cronograma={cronogramas.find(x => x.id === view.id)} obras={obras} onChange={handleSaveCronograma}
+                              dirty={dirtyCronoIds.has(view.id)} onSalvarAgora={handleSaveCronogramaNow} />
                           : <CenteredMsg>Cronograma não encontrado</CenteredMsg>)
                       : view.type === "financeiro"
                         ? <FinanceiroView obras={obras} unlocked={financeiroUnlocked} onUnlock={() => setFinanceiroUnlocked(true)} />
@@ -2188,6 +2394,21 @@ export default function App() {
           `
         }}
       />
+
+      <Modal open={pendingExit !== null} title="Alterações não salvas" onClose={() => setPendingExit(null)}>
+        <div style={{ fontSize: 13, color: "#475569", marginBottom: 18 }}>
+          Este cronograma tem alterações que ainda não foram salvas. Deseja salvar antes de sair?
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+          <button onClick={() => setPendingExit(null)} style={{ background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Cancelar</button>
+          <button onClick={() => { const run = pendingExit; setPendingExit(null); run && run(); }} style={{ background: "#fff", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Sair sem salvar</button>
+          <button onClick={async () => {
+            const cr = cronogramas.find(x => x.id === view.id);
+            if (cr) await handleSaveCronogramaNow(cr);
+            const run = pendingExit; setPendingExit(null); run && run();
+          }} style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Salvar e sair</button>
+        </div>
+      </Modal>
     </div>
   );
 }
