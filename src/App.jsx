@@ -56,6 +56,16 @@ function statusEntrega(material) {
   return hoje <= m.previsaoEntrega ? "Em andamento" : "Atrasado";
 }
 
+// ─── PREFERÊNCIAS DE TELA (localStorage) ─────────────────────────────────────
+// Só preferências de exibição; nunca dados de obra. Falha em silêncio se o
+// navegador bloquear o armazenamento (aba anônima, cookies restritos).
+function lerPref(chave, padrao) {
+  try { return localStorage.getItem(chave) ?? padrao; } catch { return padrao; }
+}
+function gravarPref(chave, valor) {
+  try { localStorage.setItem(chave, valor); } catch { /* ignora */ }
+}
+
 // ─── PERSISTENCE ─────────────────────────────────────────────────────────────
 // Migrate an item's etapas to the current shape { nome: {feito, inicio, entrega} }
 function normEtapas(old) {
@@ -1009,8 +1019,11 @@ function CalendarView({ obras, equipes, onSelectObra }) {
 function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState("Todos");
-  const [sortBy, setSortBy] = useState("ordem"); // ordem | numero | nome | pct | itens | pecas
-  const [sortDir, setSortDir] = useState("asc"); // asc | desc
+  // Ordenação escolhida sobrevive ao recarregar a página (a busca e o filtro, não: começam limpos)
+  const [sortBy, setSortBy] = useState(() => lerPref("dash.sortBy", "ordem")); // ordem | numero | nome | pct | itens | pecas
+  const [sortDir, setSortDir] = useState(() => lerPref("dash.sortDir", "asc")); // asc | desc
+  useEffect(() => { gravarPref("dash.sortBy", sortBy); }, [sortBy]);
+  useEffect(() => { gravarPref("dash.sortDir", sortDir); }, [sortDir]);
   // Ref (não estado): o navegador decide se o arrasto pode começar no próprio mousedown,
   // antes de qualquer re-render do React — um estado aqui chegaria tarde demais.
   const dragArmed = useRef(null);                   // id com alça pressionada (pode arrastar)
