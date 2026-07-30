@@ -189,7 +189,8 @@ function StatusPill({ status }) {
 }
 
 // ─── PDF PARSER (browser) ─────────────────────────────────────────────────────
-async function parsePDFFile(file) {
+// Extrai o texto (linha a linha, já filtrado de rodapé/lixo) de todas as páginas do PDF via pdf.js.
+async function extractPdfLines(file) {
   const pdfjsLib = window.pdfjsLib;
   if (!pdfjsLib) throw new Error("pdf.js não carregado");
 
@@ -207,8 +208,53 @@ async function parsePDFFile(file) {
       if (trimmed && !isJunk(trimmed)) allLines.push(trimmed);
     }
   }
+  return allLines;
+}
 
+// Extração local por regex (usada hoje e como fallback do caminho com IA, abaixo).
+async function parsePDFFile(file) {
+  const allLines = await extractPdfLines(file);
   return parseObraLines(allLines, file.name);
+}
+
+// Monta o objeto "obra" completo (com defaults de app) a partir dos campos brutos
+// devolvidos pela Edge Function de IA (parse-obra-pdf) ou pelo parser local.
+function montarObraDeDados(dados, filename) {
+  const num = String(dados.numero || filename.replace(/\D/g, "") || "");
+  const itens = (dados.itens || []).map((it, i) => ({
+    id: i + 1,
+    tipo: it.tipo || "", descricao: it.descricao || "",
+    perfil: it.perfil || "", acessorios: it.acessorios || "", vidro: it.vidro || "", localizacao: it.localizacao || "",
+    qtd: Number(it.qtd) || 0, L: Number(it.L) || 0, H: Number(it.H) || 0,
+    vlrUnt: Number(it.vlrUnt) || 0, vlrTotal: Number(it.vlrTotal) || 0,
+    percentual: 0, obs: "", inicio: "", diasExec: 0, desenho: "", etapas: mkEtapas(),
+  }));
+  return {
+    id: num, numero: num,
+    cliente: dados.cliente || "", obra: dados.obra || "", cidade: dados.cidade || "",
+    vendedor: dados.vendedor || "", data: dados.data || "", valorTotal: Number(dados.valorTotal) || 0,
+    status: "Aguardando", dataInicio: "", dataLimiteEntrega: "",
+    material: { dataLimite: "", dataCompra: "", previsaoEntrega: "" }, equipes: [], itens,
+  };
+}
+
+// Caminho principal de importação: extrai o texto e manda pra Edge Function (IA) estruturar.
+// Se a IA falhar por qualquer motivo (rede, function fora do ar, custo etc.), cai pro parser local.
+async function parsePDFFileComIA(file) {
+  const allLines = await extractPdfLines(file);
+  try {
+    const { data, error } = await supabase.functions.invoke("parse-obra-pdf", { body: { lines: allLines, filename: file.name } });
+    if (error) throw error;
+    if (!data || data.error) throw new Error((data && data.error) || "resposta vazia da IA");
+    const obra = montarObraDeDados(data, file.name);
+    // Obra sem nenhum item quase sempre é resposta truncada/incompleta — melhor tentar o parser local.
+    if (obra.itens.length === 0) throw new Error("IA não retornou itens");
+    return obra;
+  } catch (err) {
+    console.warn("Importação via IA falhou, usando extração local:", err);
+    const obra = parseObraLines(allLines, file.name);
+    return { ...obra, _fallback: true };
+  }
 }
 
 const JUNK_RE = /©\sWvetro|https?:\/\/|comercial@|@esquadrias|\(41\)3442|^PEDIDO$|^CENTAURO ESQUADRIAS$|^\d+ \/ \d+$|^✉/i;
@@ -2130,6 +2176,16 @@ export default function App() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  // Carrega pdf.js via CDN (para importação de PDF no browser). Injeção via DOM puro —
+  // um <script> renderizado pelo React (dangerouslySetInnerHTML) não é executado pelo navegador.
+  useEffect(() => {
+    if (window.pdfjsLib) return;
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    s.onload = () => { window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"; };
+    document.head.appendChild(s);
+  }, []);
+
   // Carrega dados do banco após login
   useEffect(() => {
     if (!session) { setObras([]); setEquipes([]); setOrdens([]); setCronogramas([]); return; }
@@ -2270,12 +2326,13 @@ export default function App() {
     setImporting(true);
     setImportError("");
     try {
-      const obra = await parsePDFFile(file);
+      const { _fallback, ...obra } = await parsePDFFileComIA(file);
       if (!obra.numero) throw new Error("Número da proposta não encontrado");
       const exists = obras.find(o => o.id === obra.id);
       const merged = exists ? { ...obra, status: exists.status, dataInicio: exists.dataInicio, equipes: exists.equipes } : obra;
       setObras(prev => exists ? prev.map(o => o.id === obra.id ? merged : o) : [...prev, merged]);
       await upsertObra(merged);
+      if (_fallback) showError("Obra importada com extração local (IA indisponível) — confira os itens.");
       navTo({ type: "gantt", obraId: obra.id });
     } catch (err) {
       showError("Erro ao importar: " + err.message);
@@ -2378,22 +2435,6 @@ export default function App() {
                         ? <FinanceiroView obras={obras} unlocked={financeiroUnlocked} onUnlock={() => setFinanceiroUnlocked(true)} />
                         : <Dashboard obras={obras} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} equipes={equipes} />
       }
-
-      {/* pdf.js CDN (for PDF import in browser) */}
-      <script
-        dangerouslySetInnerHTML={{
-          __html: `
-            if (!window.pdfjsLib) {
-              var s = document.createElement('script');
-              s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
-              s.onload = function() {
-                window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-              };
-              document.head.appendChild(s);
-            }
-          `
-        }}
-      />
 
       <Modal open={pendingExit !== null} title="Alterações não salvas" onClose={() => setPendingExit(null)}>
         <div style={{ fontSize: 13, color: "#475569", marginBottom: 18 }}>
