@@ -1011,7 +1011,9 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
   const [filterStatus, setFilterStatus] = useState("Todos");
   const [sortBy, setSortBy] = useState("ordem"); // ordem | numero | nome | pct | itens | pecas
   const [sortDir, setSortDir] = useState("asc"); // asc | desc
-  const [dragArmed, setDragArmed] = useState(null); // id com alça pressionada (pode arrastar)
+  // Ref (não estado): o navegador decide se o arrasto pode começar no próprio mousedown,
+  // antes de qualquer re-render do React — um estado aqui chegaria tarde demais.
+  const dragArmed = useRef(null);                   // id com alça pressionada (pode arrastar)
   const [dragId, setDragId] = useState(null);       // id sendo arrastado
   const [overId, setOverId] = useState(null);       // id sob o cursor
 
@@ -1042,15 +1044,17 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
   // Reordenar (arrastar) só faz sentido na lista completa e na ordem manual
   const canReorder = !search && filterStatus === "Todos" && sortBy === "ordem";
 
+  function limparDrag() { setDragId(null); setOverId(null); dragArmed.current = null; }
+
   function handleDrop(targetId) {
-    if (!dragId || dragId === targetId) { setDragId(null); setOverId(null); setDragArmed(null); return; }
-    const ids = obras.map(o => o.id);
-    const from = ids.indexOf(dragId);
+    if (!dragId || dragId === targetId) { limparDrag(); return; }
+    // Insere sempre ANTES do alvo, igual à linha preta que marca o ponto de soltura.
+    const ids = obras.map(o => o.id).filter(id => id !== dragId);
     const to = ids.indexOf(targetId);
-    if (from < 0 || to < 0) return;
-    ids.splice(to, 0, ids.splice(from, 1)[0]);
+    if (to < 0) { limparDrag(); return; }
+    ids.splice(to, 0, dragId);
     onReorder(ids);
-    setDragId(null); setOverId(null); setDragArmed(null);
+    limparDrag();
   }
 
   const totalPecas = obras.reduce((a, o) => a + o.itens.reduce((b, i) => b + (i.qtd || 0), 0), 0);
@@ -1121,11 +1125,16 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
           const isOver = overId === os.id && dragId && dragId !== os.id;
           return (
             <div key={os.id}
-              draggable={dragArmed === os.id}
-              onDragStart={e => { setDragId(os.id); if (e.dataTransfer) e.dataTransfer.effectAllowed = "move"; }}
+              draggable={canReorder}
+              onDragStart={e => {
+                // Só arrasta se o gesto começou na alça ☰ (evita arrastar clicando no card inteiro)
+                if (dragArmed.current !== os.id) { e.preventDefault(); return; }
+                setDragId(os.id);
+                if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", os.id); }
+              }}
               onDragOver={e => { if (canReorder && dragId) { e.preventDefault(); setOverId(os.id); } }}
               onDrop={e => { e.preventDefault(); handleDrop(os.id); }}
-              onDragEnd={() => { setDragId(null); setOverId(null); setDragArmed(null); }}
+              onDragEnd={limparDrag}
               style={{ background: "#fff", borderRadius: 12, padding: "18px 22px", boxShadow: "0 1px 4px rgba(0,0,0,0.07)", border: "1px solid #e2e8f0", borderTop: isOver ? "3px solid #1a1a1a" : "1px solid #e2e8f0", cursor: "pointer", transition: "box-shadow 0.15s", opacity: isDragging ? 0.4 : 1 }}
               onClick={() => onSelect(os.id)}
               onMouseEnter={e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.12)"}
@@ -1135,8 +1144,8 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
                 {canReorder && (
                   <div
                     title="Arraste para reordenar"
-                    onMouseDown={() => setDragArmed(os.id)}
-                    onMouseUp={() => setDragArmed(null)}
+                    onMouseDown={() => { dragArmed.current = os.id; }}
+                    onMouseUp={() => { dragArmed.current = null; }}
                     onClick={e => e.stopPropagation()}
                     style={{ alignSelf: "center", color: "#94a3b8", fontSize: 20, lineHeight: 1, cursor: "grab", padding: "0 4px", userSelect: "none" }}
                   >☰</div>
