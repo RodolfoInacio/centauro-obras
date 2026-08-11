@@ -106,6 +106,12 @@ function normObra(o) {
     equipes: o.equipes || [],
     dataLimiteEntrega: o.dataLimiteEntrega || "",
     material: o.material || { dataLimite: "", dataCompra: "", previsaoEntrega: "" },
+    // Financeiro por obra: por enquanto preenchido a mão (planilha), depois vem do ERP.
+    dataContrato: o.dataContrato || "",
+    valorRecebido: Number.isFinite(o.valorRecebido) ? o.valorRecebido : 0,
+    statusCompras: o.statusCompras || "Aguardando",
+    statusFabricacao: o.statusFabricacao || "Aguardando",
+    statusInstalacao: o.statusInstalacao || "Aguardando",
     itens: o.itens.map(normItem),
   };
 }
@@ -195,6 +201,38 @@ function StatusPill({ status }) {
     <span style={{ background: c + "22", color: c, border: `1px solid ${c}55`, borderRadius: 999, padding: "1px 8px", fontSize: 10, fontWeight: 800, textTransform: "none" }}>
       {status}
     </span>
+  );
+}
+
+// Gráfico de pizza/rosca em SVG puro (sem lib — o projeto não tem nenhuma). `data`: [{ value, color }].
+// `centro`: conteúdo livre desenhado no meio do anel (ex: valor total).
+function PieChart({ data, size = 120, strokeWidth = 18, centro }) {
+  const total = data.reduce((a, d) => a + (Number(d.value) || 0), 0);
+  const r = (size - strokeWidth) / 2;
+  const c = 2 * Math.PI * r;
+  let offset = 0;
+  return (
+    <div style={{ position: "relative", width: size, height: size, flexShrink: 0 }}>
+      <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
+        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#e2e8f0" strokeWidth={strokeWidth} />
+        {total > 0 && data.map((d, i) => {
+          const frac = (Number(d.value) || 0) / total;
+          if (frac <= 0) return null;
+          const dash = frac * c;
+          const el = (
+            <circle key={i} cx={size / 2} cy={size / 2} r={r} fill="none" stroke={d.color} strokeWidth={strokeWidth}
+              strokeDasharray={`${dash} ${c - dash}`} strokeDashoffset={-offset} />
+          );
+          offset += dash;
+          return el;
+        })}
+      </svg>
+      {centro && (
+        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", textAlign: "center" }}>
+          {centro}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -435,6 +473,8 @@ function GanttView({ obra, onChange, equipes }) {
 
   const stCompra = statusCompra(localObra.material);
   const stEntrega = statusEntrega(localObra.material);
+  // "A Receber" nunca é gravado — sempre recalculado, pra nunca ficar inconsistente com os outros dois.
+  const valorAReceber = Math.max(0, (localObra.valorTotal || 0) - (localObra.valorRecebido || 0));
 
   const LEFT_COL = 340;
   const DAY_W = 18;
@@ -514,6 +554,66 @@ function GanttView({ obra, onChange, equipes }) {
               onChange={e => update({ ...localObra, dataLimiteEntrega: e.target.value })}
               style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: "#1e293b" }} />
           </div>
+        </div>
+      </div>
+
+      {/* Resumo Financeiro */}
+      <div style={{ background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "16px 20px", display: "flex", gap: 28, alignItems: "center", flexWrap: "wrap" }}>
+        <PieChart
+          size={104} strokeWidth={15}
+          data={[
+            { value: localObra.valorRecebido || 0, color: "#10b981" },
+            { value: valorAReceber, color: "#f59e0b" },
+          ]}
+          centro={
+            <>
+              <div style={{ fontSize: 9, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Total</div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#1e293b" }}>R$ {fmt(localObra.valorTotal)}</div>
+            </>
+          }
+        />
+
+        <div style={{ display: "flex", gap: 22, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 10, color: "#10b981", fontWeight: 700, textTransform: "uppercase" }}>● Recebido</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#10b981" }}>R$ {fmt(localObra.valorRecebido || 0)}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: "#f59e0b", fontWeight: 700, textTransform: "uppercase" }}>● A Receber</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#f59e0b" }}>R$ {fmt(valorAReceber)}</div>
+          </div>
+          <div>
+            <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 2 }}>Data do Contrato</label>
+            <input type="date" value={localObra.dataContrato || ""}
+              onChange={e => update({ ...localObra, dataContrato: e.target.value })}
+              style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: "#1e293b" }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 2 }}>Valor Recebido</label>
+            <input type="number" min={0} step="0.01" value={localObra.valorRecebido || 0}
+              onChange={e => update({ ...localObra, valorRecebido: Math.max(0, Number(e.target.value) || 0) })}
+              style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: "#1e293b", width: 120 }} />
+          </div>
+        </div>
+
+        <div style={{ marginLeft: "auto", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 20px" }}>
+          {[
+            { label: "Compras", field: "statusCompras" },
+            { label: "Fabricação", field: "statusFabricacao" },
+            { label: "Instalação", field: "statusInstalacao" },
+            { label: "Geral", field: "status" },
+          ].map(({ label, field }) => {
+            const cor = STATUS_COLORS[localObra[field]] || "#94a3b8";
+            return (
+              <div key={field} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 11, color: "#64748b", width: 72 }}>{label}</span>
+                <select value={localObra[field]} onChange={e => update({ ...localObra, [field]: e.target.value })}
+                  style={{ background: cor + "22", color: cor, border: `1px solid ${cor}55`, borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                  {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+            );
+          })}
         </div>
       </div>
 
