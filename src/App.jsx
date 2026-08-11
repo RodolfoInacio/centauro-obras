@@ -1016,7 +1016,12 @@ function CalendarView({ obras, equipes, onSelectObra }) {
 }
 
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
-function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
+// Tela de uma pasta (Em Andamento / Concluídas): lista completa daquele grupo, com busca, filtro,
+// ordenação e arrastar — igual ao Dashboard de antes, só que operando num subconjunto por status.
+// KPIs recalculados aqui em cima do subconjunto é o que dá o "percentual real de execução".
+function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, equipes }) {
+  const obras = todas.filter(o => pasta === "concluidas" ? o.status === "Concluído" : o.status !== "Concluído");
+
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState("Todos");
   // Ordenação escolhida sobrevive ao recarregar a página (a busca e o filtro, não: começam limpos)
@@ -1040,9 +1045,12 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
     return matchText && matchStatus;
   });
 
-  // Ordenação escolhida (base crescente + direção). "ordem" = ordem manual/arrastar
+  // Ordenação escolhida (base crescente + direção). "ordem" = ordem manual/arrastar.
+  // Sempre ordena explicitamente pelo campo `ordem` (com o mesmo fallback usado na carga inicial)
+  // em vez de confiar na posição do array — assim funciona não importa como o estado foi atualizado.
   const dirF = sortDir === "asc" ? 1 : -1;
-  const displayed = sortBy === "ordem" ? filtered : [...filtered].sort((a, b) => {
+  const ordemDe = (o) => Number.isFinite(o.ordem) ? o.ordem : 1e9 + (Number(o.numero) || 0);
+  const displayed = sortBy === "ordem" ? [...filtered].sort((a, b) => ordemDe(a) - ordemDe(b)) : [...filtered].sort((a, b) => {
     let r = 0;
     switch (sortBy) {
       case "numero": r = (Number(a.numero) || 0) - (Number(b.numero) || 0); break;
@@ -1222,6 +1230,54 @@ function Dashboard({ obras, onSelect, onStatusChange, onReorder, equipes }) {
             Nenhuma obra encontrada
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Tela inicial de Obras: só os KPIs de tudo (sem separar por status) + as duas pastas.
+// A lista de obras em si mora dentro de cada pasta (ObrasPasta, acima).
+function Dashboard({ obras, onAbrirPasta }) {
+  const totalPecas = obras.reduce((a, o) => a + o.itens.reduce((b, i) => b + (i.qtd || 0), 0), 0);
+  const progMedio  = obras.length > 0
+    ? Math.round(obras.reduce((a, o) => a + (o.itens.length > 0 ? o.itens.reduce((b, i) => b + itemPercentual(i), 0) / o.itens.length : 0), 0) / obras.length)
+    : 0;
+  const emAndamento = obras.filter(o => o.status !== "Concluído").length;
+  const concluidas = obras.length - emAndamento;
+
+  return (
+    <div style={{ padding: "24px 28px" }}>
+      {/* KPI cards — todas as obras, sem filtro por pasta */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginBottom: 24 }}>
+        {[
+          { label: "Total de Obras", value: obras.length, sub: `${obras.reduce((a,o)=>a+o.itens.length,0)} itens`, accent: "#1a1a1a" },
+          { label: "Total de Peças", value: totalPecas, sub: "em todas as obras", accent: "#c9a227" },
+          { label: "Progresso Médio", value: `${progMedio}%`, sub: "de todas as obras", accent: "#10b981" },
+        ].map(({ label, value, sub, accent }) => (
+          <div key={label} style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", borderLeft: `4px solid ${accent}` }}>
+            <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>{label}</div>
+            <div style={{ fontSize: 26, fontWeight: 800, color: accent }}>{value}</div>
+            <div style={{ fontSize: 12, color: "#64748b", marginTop: 4 }}>{sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Pastas */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 16 }}>
+        {[
+          { key: "andamento", label: "Em Andamento", count: emAndamento, sub: "obras ativas — aguardando, em andamento e atrasadas", accent: "#3b82f6" },
+          { key: "concluidas", label: "Concluídas", count: concluidas, sub: "obras finalizadas — arquivo", accent: "#10b981" },
+        ].map(({ key, label, count, sub, accent }) => (
+          <div key={key} onClick={() => onAbrirPasta(key)}
+            style={{ background: "#fff", borderRadius: 12, padding: 24, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", borderLeft: `4px solid ${accent}`, cursor: "pointer", transition: "box-shadow 0.15s" }}
+            onMouseEnter={e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.12)"}
+            onMouseLeave={e => e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.07)"}>
+            <div style={{ fontSize: 32 }}>📁</div>
+            <div style={{ fontWeight: 800, fontSize: 18, color: "#1e293b", marginTop: 8 }}>{label}</div>
+            <div style={{ fontSize: 13, color: "#64748b", marginTop: 2 }}>{sub}</div>
+            <div style={{ fontSize: 28, fontWeight: 800, color: accent, marginTop: 10 }}>{count}</div>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -2284,11 +2340,13 @@ export default function App() {
   }, [persistObra]);
 
   // Reordenação manual das obras (arrastar): grava o índice em `ordem` e persiste os que mudaram
+  // Atualiza só o `ordem` dos ids recebidos, preservando o resto do array — importante porque
+  // agora quem chama pode ser uma pasta (subconjunto), não só a lista completa.
   const handleReorder = useCallback((orderedIds) => {
     setObras(prev => {
-      const byId = Object.fromEntries(prev.map(o => [o.id, o]));
-      const next = orderedIds.map((id, idx) => ({ ...byId[id], ordem: idx }));
-      next.forEach(o => { if (byId[o.id] && byId[o.id].ordem !== o.ordem) persistObra(o); });
+      const novaOrdem = new Map(orderedIds.map((id, idx) => [id, idx]));
+      const next = prev.map(o => novaOrdem.has(o.id) ? { ...o, ordem: novaOrdem.get(o.id) } : o);
+      next.forEach(o => { const antes = prev.find(p => p.id === o.id); if (antes && antes.ordem !== o.ordem) persistObra(o); });
       return next;
     });
   }, [persistObra]);
@@ -2402,7 +2460,11 @@ export default function App() {
             style={{ background: "transparent", color: "#e2e8f0", border: "1px solid #333", borderRadius: 8, padding: "6px 14px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>← Voltar</button>
         )}
         <div style={{ color: "#9ca3af", fontSize: 13, fontWeight: 600, marginLeft: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-          {selectedObra ? `#${selectedObra.numero} — ${selectedObra.cliente}` : (tituloView[view.type] || "")}
+          {selectedObra
+            ? `#${selectedObra.numero} — ${selectedObra.cliente}`
+            : view.type === "obrasPasta"
+              ? (view.pasta === "concluidas" ? "📁 Obras Concluídas" : "📁 Obras em Andamento")
+              : (tituloView[view.type] || "")}
         </div>
 
         <div style={{ marginLeft: "auto", display: "flex", gap: 12, alignItems: "center" }}>
@@ -2455,7 +2517,9 @@ export default function App() {
                           : <CenteredMsg>Cronograma não encontrado</CenteredMsg>)
                       : view.type === "financeiro"
                         ? <FinanceiroView obras={obras} unlocked={financeiroUnlocked} onUnlock={() => setFinanceiroUnlocked(true)} />
-                        : <Dashboard obras={obras} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} equipes={equipes} />
+                        : view.type === "obrasPasta"
+                          ? <ObrasPasta obras={obras} pasta={view.pasta} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} equipes={equipes} />
+                          : <Dashboard obras={obras} onAbrirPasta={(pasta) => navTo({ type: "obrasPasta", pasta })} />
       }
 
       <Modal open={pendingExit !== null} title="Alterações não salvas" onClose={() => setPendingExit(null)}>
