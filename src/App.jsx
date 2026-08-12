@@ -30,6 +30,28 @@ const STATUS_COLORS = {
 };
 const STATUS_OPTIONS = ["Aguardando", "Em andamento", "Concluído", "Atrasado"];
 
+// Compras por categoria (Perfil/Pintura/Acessório/Vidro) — previsto x realizado em R$.
+const CATEGORIAS_COMPRA = ["perfil", "pintura", "acessorio", "vidro"];
+const CATEGORIA_LABEL = { perfil: "Perfil", pintura: "Pintura", acessorio: "Acessório", vidro: "Vidro" };
+
+// Soma previsto/realizado das 4 categorias. "A comprar" = o que falta gastar em material.
+function comprasTotais(obra) {
+  const compras = obra.compras || {};
+  let previsto = 0, realizado = 0;
+  for (const cat of CATEGORIAS_COMPRA) {
+    const v = compras[cat] || {};
+    previsto += Number(v.previsto) || 0;
+    realizado += Number(v.realizado) || 0;
+  }
+  return { previsto, realizado, aComprar: Math.max(0, previsto - realizado) };
+}
+// Flag vermelha: o que ainda falta comprar é maior do que o que ainda vai entrar de caixa dessa obra.
+function precisaAlertaCompras(obra) {
+  const { aComprar } = comprasTotais(obra);
+  const aReceber = Math.max(0, (obra.valorTotal || 0) - (obra.valorRecebido || 0));
+  return aComprar > aReceber;
+}
+
 function mkEtapas() {
   return Object.fromEntries(ETAPAS.map(e => [e, { feito: false, inicio: "", entrega: "" }]));
 }
@@ -112,6 +134,12 @@ function normObra(o) {
     statusCompras: o.statusCompras || "Aguardando",
     statusFabricacao: o.statusFabricacao || "Aguardando",
     statusInstalacao: o.statusInstalacao || "Aguardando",
+    // Compras por categoria (previsto x realizado, R$) — o que falta comprar = previsto - realizado.
+    compras: CATEGORIAS_COMPRA.reduce((acc, cat) => {
+      const v = (o.compras || {})[cat] || {};
+      acc[cat] = { previsto: Number(v.previsto) || 0, realizado: Number(v.realizado) || 0 };
+      return acc;
+    }, {}),
     itens: o.itens.map(normItem),
   };
 }
@@ -475,6 +503,12 @@ function GanttView({ obra, onChange, equipes }) {
   const stEntrega = statusEntrega(localObra.material);
   // "A Receber" nunca é gravado — sempre recalculado, pra nunca ficar inconsistente com os outros dois.
   const valorAReceber = Math.max(0, (localObra.valorTotal || 0) - (localObra.valorRecebido || 0));
+  const compras = comprasTotais(localObra);
+  const alertaCompras = precisaAlertaCompras(localObra);
+  function updCompraCategoria(cat, campo, valor) {
+    const atual = localObra.compras?.[cat] || { previsto: 0, realizado: 0 };
+    update({ ...localObra, compras: { ...localObra.compras, [cat]: { ...atual, [campo]: Math.max(0, Number(valor) || 0) } } });
+  }
 
   const LEFT_COL = 340;
   const DAY_W = 18;
@@ -614,6 +648,60 @@ function GanttView({ obra, onChange, equipes }) {
               </div>
             );
           })}
+        </div>
+      </div>
+
+      {/* Compras por categoria */}
+      <div style={{ background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "12px 20px 16px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Compras por Categoria</span>
+          {alertaCompras && (
+            <span style={{ background: "#fee2e2", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 800 }}>
+              🚩 Falta comprar (R$ {fmt(compras.aComprar)}) mais do que ainda vai receber (R$ {fmt(valorAReceber)})
+            </span>
+          )}
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: 460 }}>
+            <thead>
+              <tr style={{ color: "#94a3b8", textAlign: "left" }}>
+                <th style={{ padding: "2px 12px 4px 0", fontWeight: 700 }}>Categoria</th>
+                <th style={{ padding: "2px 12px 4px", fontWeight: 700, textAlign: "right" }}>Previsto</th>
+                <th style={{ padding: "2px 12px 4px", fontWeight: 700, textAlign: "right" }}>Realizado</th>
+                <th style={{ padding: "2px 0 4px", fontWeight: 700, textAlign: "right" }}>A Comprar</th>
+              </tr>
+            </thead>
+            <tbody>
+              {CATEGORIAS_COMPRA.map(cat => {
+                const v = localObra.compras?.[cat] || { previsto: 0, realizado: 0 };
+                const aComprarCat = Math.max(0, v.previsto - v.realizado);
+                return (
+                  <tr key={cat}>
+                    <td style={{ padding: "3px 12px 3px 0", fontWeight: 600, color: "#1e293b" }}>{CATEGORIA_LABEL[cat]}</td>
+                    <td style={{ padding: "3px 12px" }}>
+                      <input type="number" min={0} step="0.01" value={v.previsto}
+                        onChange={e => updCompraCategoria(cat, "previsto", e.target.value)}
+                        style={{ width: 92, textAlign: "right", border: "1px solid #e2e8f0", borderRadius: 5, padding: "3px 6px", fontSize: 12 }} />
+                    </td>
+                    <td style={{ padding: "3px 12px" }}>
+                      <input type="number" min={0} step="0.01" value={v.realizado}
+                        onChange={e => updCompraCategoria(cat, "realizado", e.target.value)}
+                        style={{ width: 92, textAlign: "right", border: "1px solid #e2e8f0", borderRadius: 5, padding: "3px 6px", fontSize: 12 }} />
+                    </td>
+                    <td style={{ padding: "3px 0", textAlign: "right", fontWeight: 700, color: aComprarCat > 0 ? "#dc2626" : "#94a3b8" }}>R$ {fmt(aComprarCat)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot>
+              <tr style={{ borderTop: "1px solid #e2e8f0" }}>
+                <td style={{ padding: "6px 12px 0 0", fontWeight: 800, color: "#1e293b" }}>Total</td>
+                <td style={{ padding: "6px 12px 0", textAlign: "right", fontWeight: 800 }}>R$ {fmt(compras.previsto)}</td>
+                <td style={{ padding: "6px 12px 0", textAlign: "right", fontWeight: 800 }}>R$ {fmt(compras.realizado)}</td>
+                <td style={{ padding: "6px 0 0", textAlign: "right", fontWeight: 800, color: alertaCompras ? "#dc2626" : "#1e293b" }}>R$ {fmt(compras.aComprar)}</td>
+              </tr>
+            </tfoot>
+          </table>
         </div>
       </div>
 
@@ -1274,6 +1362,9 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
                 <div style={{ background: "#1a1a1a", color: "#fff", borderRadius: 8, padding: "6px 14px", fontWeight: 800, fontSize: 18, minWidth: 60, textAlign: "center" }}>
                   #{os.numero}
                 </div>
+                {precisaAlertaCompras(os) && (
+                  <span title="Falta comprar mais do que ainda vai receber dessa obra" style={{ alignSelf: "center", fontSize: 20, lineHeight: 1 }}>🚩</span>
+                )}
                 <div style={{ flex: 1, minWidth: 180 }}>
                   <div style={{ fontWeight: 700, fontSize: 15, color: "#1e293b" }}>{os.cliente}</div>
                   <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{os.obra || "—"} · {os.cidade}</div>
