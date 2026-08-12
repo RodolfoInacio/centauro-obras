@@ -25,7 +25,6 @@ const STATUS_COLORS = {
   "Em andamento": "#3b82f6",
   "Aguardando":   "#f59e0b",
   "Concluído":    "#10b981",
-  "Comprado":     "#10b981",
   "Atrasado":     "#ef4444",
 };
 const STATUS_OPTIONS = ["Aguardando", "Em andamento", "Concluído", "Atrasado"];
@@ -34,16 +33,19 @@ const STATUS_OPTIONS = ["Aguardando", "Em andamento", "Concluído", "Atrasado"];
 const CATEGORIAS_COMPRA = ["perfil", "pintura", "acessorio", "vidro"];
 const CATEGORIA_LABEL = { perfil: "Perfil", pintura: "Pintura", acessorio: "Acessório", vidro: "Vidro" };
 
-// Soma previsto/realizado das 4 categorias. "A comprar" = o que falta gastar em material.
+// Previsto e realizado são grandezas independentes: previsto é a estimativa de gasto daquele
+// material, realizado é o que de fato saiu. Nunca se somam nem se subtraem — o que está no
+// previsto e ainda não foi comprado É o próprio previsto, e é ele que falta comprar.
 function comprasTotais(obra) {
   const compras = obra.compras || {};
   let previsto = 0, realizado = 0;
   for (const cat of CATEGORIAS_COMPRA) {
     const v = compras[cat] || {};
+    if (v.naoSeAplica) continue;   // categoria riscada não entra em nenhum total
     previsto += Number(v.previsto) || 0;
     realizado += Number(v.realizado) || 0;
   }
-  return { previsto, realizado, aComprar: Math.max(0, previsto - realizado) };
+  return { previsto, realizado, aComprar: previsto };
 }
 // Flag vermelha: o que ainda falta comprar é maior do que o que ainda vai entrar de caixa dessa obra.
 function precisaAlertaCompras(obra) {
@@ -60,22 +62,6 @@ function mkEtapas() {
 function itemPercentual(item) {
   const et = item.etapas || {};
   return ETAPAS.reduce((a, e) => a + (et[e] && et[e].feito ? PESOS[e] : 0), 0);
-}
-
-// Status automático da compra de material (por data)
-function statusCompra(material) {
-  const m = material || {};
-  if (m.dataCompra) return "Comprado";
-  if (!m.dataLimite) return "Aguardando";
-  const hoje = new Date().toISOString().split("T")[0];
-  return hoje <= m.dataLimite ? "Em andamento" : "Atrasado";
-}
-// Status automático da entrega de material (por previsão)
-function statusEntrega(material) {
-  const m = material || {};
-  if (!m.previsaoEntrega) return "Aguardando";
-  const hoje = new Date().toISOString().split("T")[0];
-  return hoje <= m.previsaoEntrega ? "Em andamento" : "Atrasado";
 }
 
 // ─── PREFERÊNCIAS DE TELA (localStorage) ─────────────────────────────────────
@@ -134,10 +120,16 @@ function normObra(o) {
     statusCompras: o.statusCompras || "Aguardando",
     statusFabricacao: o.statusFabricacao || "Aguardando",
     statusInstalacao: o.statusInstalacao || "Aguardando",
-    // Compras por categoria (previsto x realizado, R$) — o que falta comprar = previsto - realizado.
+    // Compras por categoria: valores (R$), datas e marcação de "não se aplica".
     compras: CATEGORIAS_COMPRA.reduce((acc, cat) => {
       const v = (o.compras || {})[cat] || {};
-      acc[cat] = { previsto: Number(v.previsto) || 0, realizado: Number(v.realizado) || 0 };
+      acc[cat] = {
+        previsto: Number(v.previsto) || 0,
+        realizado: Number(v.realizado) || 0,
+        dataCompra: v.dataCompra || "",
+        previsaoEntrega: v.previsaoEntrega || "",
+        naoSeAplica: !!v.naoSeAplica,
+      };
       return acc;
     }, {}),
     itens: o.itens.map(normItem),
@@ -219,16 +211,6 @@ function ProgressBar({ value, height = 6 }) {
     <div style={{ background: "#e2e8f0", borderRadius: 999, height, overflow: "hidden" }}>
       <div style={{ width: `${Math.min(value, 100)}%`, background: color, height: "100%", borderRadius: 999, transition: "width 0.4s" }} />
     </div>
-  );
-}
-
-// Small colored status badge (auto statuses for material / delivery)
-function StatusPill({ status }) {
-  const c = STATUS_COLORS[status] || "#94a3b8";
-  return (
-    <span style={{ background: c + "22", color: c, border: `1px solid ${c}55`, borderRadius: 999, padding: "1px 8px", fontSize: 10, fontWeight: 800, textTransform: "none" }}>
-      {status}
-    </span>
   );
 }
 
@@ -491,23 +473,20 @@ function GanttView({ obra, onChange, equipes }) {
       : i) };
     update(updated);
   }
-  function updateMaterial(field, value) {
-    update({ ...localObra, material: { ...(localObra.material || {}), [field]: value } });
-  }
 
   const totalPct = localObra.itens.length > 0
     ? Math.round(localObra.itens.reduce((a, i) => a + itemPercentual(i), 0) / localObra.itens.length)
     : 0;
 
-  const stCompra = statusCompra(localObra.material);
-  const stEntrega = statusEntrega(localObra.material);
   // "A Receber" nunca é gravado — sempre recalculado, pra nunca ficar inconsistente com os outros dois.
   const valorAReceber = Math.max(0, (localObra.valorTotal || 0) - (localObra.valorRecebido || 0));
   const compras = comprasTotais(localObra);
   const alertaCompras = precisaAlertaCompras(localObra);
   function updCompraCategoria(cat, campo, valor) {
     const atual = localObra.compras?.[cat] || { previsto: 0, realizado: 0 };
-    update({ ...localObra, compras: { ...localObra.compras, [cat]: { ...atual, [campo]: Math.max(0, Number(valor) || 0) } } });
+    // Só previsto/realizado são dinheiro; datas são texto e naoSeAplica é booleano.
+    const v = (campo === "previsto" || campo === "realizado") ? Math.max(0, Number(valor) || 0) : valor;
+    update({ ...localObra, compras: { ...localObra.compras, [cat]: { ...atual, [campo]: v } } });
   }
 
   const LEFT_COL = 340;
@@ -522,42 +501,6 @@ function GanttView({ obra, onChange, equipes }) {
           <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Pedido #{localObra.numero}</div>
           <div style={{ fontWeight: 800, fontSize: 15, color: BRAND }}>{localObra.cliente}</div>
           <div style={{ fontSize: 12, color: "#64748b" }}>{localObra.obra || localObra.cidade}</div>
-        </div>
-
-        {/* Material da obra */}
-        <div style={{ display: "flex", gap: 14, alignItems: "flex-start", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: "8px 14px" }}>
-          <div>
-            <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 4, display: "flex", gap: 8, alignItems: "center" }}>
-              Compra de Material
-              <StatusPill status={stCompra} />
-            </div>
-            <div style={{ display: "flex", gap: 10 }}>
-              <div>
-                <label style={{ fontSize: 10, color: "#94a3b8", display: "block" }}>Data limite</label>
-                <input type="date" value={(localObra.material || {}).dataLimite || ""}
-                  onChange={e => updateMaterial("dataLimite", e.target.value)}
-                  style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "3px 6px", fontSize: 12 }} />
-              </div>
-              <div>
-                <label style={{ fontSize: 10, color: "#94a3b8", display: "block" }}>Data da compra</label>
-                <input type="date" value={(localObra.material || {}).dataCompra || ""}
-                  onChange={e => updateMaterial("dataCompra", e.target.value)}
-                  style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "3px 6px", fontSize: 12 }} />
-              </div>
-            </div>
-          </div>
-          <div style={{ borderLeft: "1px solid #e2e8f0", paddingLeft: 14 }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 4, display: "flex", gap: 8, alignItems: "center" }}>
-              Entrega
-              <StatusPill status={stEntrega} />
-            </div>
-            <div>
-              <label style={{ fontSize: 10, color: "#94a3b8", display: "block" }}>Previsão de entrega</label>
-              <input type="date" value={(localObra.material || {}).previsaoEntrega || ""}
-                onChange={e => updateMaterial("previsaoEntrega", e.target.value)}
-                style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "3px 6px", fontSize: 12 }} />
-            </div>
-          </div>
         </div>
 
         <div style={{ marginLeft: "auto", display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
@@ -662,33 +605,50 @@ function GanttView({ obra, onChange, equipes }) {
           )}
         </div>
         <div style={{ overflowX: "auto" }}>
-          <table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: 460 }}>
+          <table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: 640 }}>
             <thead>
               <tr style={{ color: "#94a3b8", textAlign: "left" }}>
                 <th style={{ padding: "2px 12px 4px 0", fontWeight: 700 }}>Categoria</th>
-                <th style={{ padding: "2px 12px 4px", fontWeight: 700, textAlign: "right" }}>Previsto</th>
+                <th style={{ padding: "2px 12px 4px", fontWeight: 700, textAlign: "right" }}>Previsto (falta comprar)</th>
                 <th style={{ padding: "2px 12px 4px", fontWeight: 700, textAlign: "right" }}>Realizado</th>
-                <th style={{ padding: "2px 0 4px", fontWeight: 700, textAlign: "right" }}>A Comprar</th>
+                <th style={{ padding: "2px 12px 4px", fontWeight: 700 }}>Data da compra</th>
+                <th style={{ padding: "2px 12px 4px", fontWeight: 700 }}>Previsão entrega</th>
+                <th style={{ padding: "2px 0 4px", fontWeight: 700, textAlign: "center" }}>N/A</th>
               </tr>
             </thead>
             <tbody>
               {CATEGORIAS_COMPRA.map(cat => {
                 const v = localObra.compras?.[cat] || { previsto: 0, realizado: 0 };
-                const aComprarCat = Math.max(0, v.previsto - v.realizado);
+                const na = !!v.naoSeAplica;
+                const inp = { border: "1px solid #e2e8f0", borderRadius: 5, padding: "3px 6px", fontSize: 12 };
                 return (
-                  <tr key={cat}>
+                  <tr key={cat} style={na ? { opacity: 0.45, textDecoration: "line-through" } : undefined}>
                     <td style={{ padding: "3px 12px 3px 0", fontWeight: 600, color: "#1e293b" }}>{CATEGORIA_LABEL[cat]}</td>
                     <td style={{ padding: "3px 12px" }}>
-                      <input type="number" min={0} step="0.01" value={v.previsto}
+                      <input type="number" min={0} step="0.01" value={v.previsto} disabled={na}
                         onChange={e => updCompraCategoria(cat, "previsto", e.target.value)}
-                        style={{ width: 92, textAlign: "right", border: "1px solid #e2e8f0", borderRadius: 5, padding: "3px 6px", fontSize: 12 }} />
+                        style={{ ...inp, width: 92, textAlign: "right", color: (!na && v.previsto > 0) ? "#dc2626" : "#1e293b", fontWeight: (!na && v.previsto > 0) ? 700 : 400 }} />
                     </td>
                     <td style={{ padding: "3px 12px" }}>
-                      <input type="number" min={0} step="0.01" value={v.realizado}
+                      <input type="number" min={0} step="0.01" value={v.realizado} disabled={na}
                         onChange={e => updCompraCategoria(cat, "realizado", e.target.value)}
-                        style={{ width: 92, textAlign: "right", border: "1px solid #e2e8f0", borderRadius: 5, padding: "3px 6px", fontSize: 12 }} />
+                        style={{ ...inp, width: 92, textAlign: "right" }} />
                     </td>
-                    <td style={{ padding: "3px 0", textAlign: "right", fontWeight: 700, color: aComprarCat > 0 ? "#dc2626" : "#94a3b8" }}>R$ {fmt(aComprarCat)}</td>
+                    <td style={{ padding: "3px 12px" }}>
+                      <input type="date" value={v.dataCompra || ""} disabled={na}
+                        onChange={e => updCompraCategoria(cat, "dataCompra", e.target.value)}
+                        style={inp} />
+                    </td>
+                    <td style={{ padding: "3px 12px" }}>
+                      <input type="date" value={v.previsaoEntrega || ""} disabled={na}
+                        onChange={e => updCompraCategoria(cat, "previsaoEntrega", e.target.value)}
+                        style={inp} />
+                    </td>
+                    <td style={{ padding: "3px 0", textAlign: "center" }}>
+                      <input type="checkbox" checked={na} title="Não se aplica a esta obra"
+                        onChange={e => updCompraCategoria(cat, "naoSeAplica", e.target.checked)}
+                        style={{ cursor: "pointer" }} />
+                    </td>
                   </tr>
                 );
               })}
@@ -696,9 +656,9 @@ function GanttView({ obra, onChange, equipes }) {
             <tfoot>
               <tr style={{ borderTop: "1px solid #e2e8f0" }}>
                 <td style={{ padding: "6px 12px 0 0", fontWeight: 800, color: "#1e293b" }}>Total</td>
-                <td style={{ padding: "6px 12px 0", textAlign: "right", fontWeight: 800 }}>R$ {fmt(compras.previsto)}</td>
+                <td style={{ padding: "6px 12px 0", textAlign: "right", fontWeight: 800, color: compras.aComprar > 0 ? "#dc2626" : "#1e293b" }}>R$ {fmt(compras.aComprar)}</td>
                 <td style={{ padding: "6px 12px 0", textAlign: "right", fontWeight: 800 }}>R$ {fmt(compras.realizado)}</td>
-                <td style={{ padding: "6px 0 0", textAlign: "right", fontWeight: 800, color: alertaCompras ? "#dc2626" : "#1e293b" }}>R$ {fmt(compras.aComprar)}</td>
+                <td colSpan={3} />
               </tr>
             </tfoot>
           </table>
