@@ -1258,7 +1258,9 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
   function handleDrop(targetId) {
     if (!dragId || dragId === targetId) { limparDrag(); return; }
     // Insere sempre ANTES do alvo, igual à linha preta que marca o ponto de soltura.
-    const ids = obras.map(o => o.id).filter(id => id !== dragId);
+    // Usa `displayed` (já ordenado pelo campo `ordem`) — não `obras` cru, que preserva a ordem
+    // de carregamento e fica dessincronizado da tela assim que algum `ordem` muda.
+    const ids = displayed.map(o => o.id).filter(id => id !== dragId);
     const to = ids.indexOf(targetId);
     if (to < 0) { limparDrag(); return; }
     ids.splice(to, 0, dragId);
