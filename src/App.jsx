@@ -54,6 +54,52 @@ function precisaAlertaCompras(obra) {
   return aComprar > aReceber;
 }
 
+// ─── BANDEIRAS MANUAIS ───────────────────────────────────────────────────────
+// Além da bandeira automática de compras (acima), o escritório pendura bandeiras à mão na obra:
+// vermelha (problema), azul (atenção/observação) e verde (liberado/ok).
+const FLAG_CORES = {
+  vermelha: { emoji: "🚩", label: "Vermelha", cor: "#dc2626" },
+  azul:     { emoji: "🔵", label: "Azul",     cor: "#2563eb" },
+  verde:    { emoji: "🟢", label: "Verde",    cor: "#16a34a" },
+};
+function novaFlag(cor) {
+  return { id: "fl_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), cor, criadaEm: hoje() };
+}
+
+// ─── FINANCEIRO CONSOLIDADO ──────────────────────────────────────────────────
+// O que ainda entra (a receber) e o que ainda sai (a pagar = previsto de compras, ver
+// comprasTotais). `aEntregar` é o valor de obra ainda não executado — o saldo físico.
+function finObra(o) {
+  const itens = o.itens || [];
+  const total = Number(o.valorTotal) || 0;
+  const recebido = Number(o.valorRecebido) || 0;
+  const pct = itens.length ? itens.reduce((a, i) => a + itemPercentual(i), 0) / itens.length : 0;
+  return {
+    total,
+    recebido,
+    aReceber: Math.max(0, total - recebido),
+    aPagar: comprasTotais(o).aComprar,
+    aEntregar: total * (1 - pct / 100),
+  };
+}
+// Soma o financeiro de uma lista de obras (recalcula sempre — muda valor, muda o painel).
+function finTotais(obras) {
+  return obras.reduce((acc, o) => {
+    const f = finObra(o);
+    acc.total += f.total; acc.recebido += f.recebido; acc.aReceber += f.aReceber;
+    acc.aPagar += f.aPagar; acc.aEntregar += f.aEntregar;
+    if (precisaAlertaCompras(o)) acc.emAlerta += 1;
+    return acc;
+  }, { total: 0, recebido: 0, aReceber: 0, aPagar: 0, aEntregar: 0, emAlerta: 0 });
+}
+
+// Dias corridos entre a assinatura do contrato e hoje (a coluna TEMPO da planilha do escritório).
+function diasDesdeContrato(o) {
+  if (!o.dataContrato) return null;
+  return Math.max(0, daysBetween(o.dataContrato, hoje()));
+}
+function corDias(d) { return d >= 90 ? "#dc2626" : d >= 30 ? "#f59e0b" : "#64748b"; }
+
 function mkEtapas() {
   return Object.fromEntries(ETAPAS.map(e => [e, { feito: false, inicio: "", entrega: "" }]));
 }
@@ -116,6 +162,10 @@ function normObra(o) {
     material: o.material || { dataLimite: "", dataCompra: "", previsaoEntrega: "" },
     // Financeiro por obra: por enquanto preenchido a mão (planilha), depois vem do ERP.
     dataContrato: o.dataContrato || "",
+    // Bandeiras penduradas à mão (a automática de compras não fica aqui — é calculada)
+    flags: (Array.isArray(o.flags) ? o.flags : [])
+      .filter(f => f && FLAG_CORES[f.cor])
+      .map(f => ({ id: f.id || novaFlag(f.cor).id, cor: f.cor, criadaEm: f.criadaEm || "" })),
     valorRecebido: Number.isFinite(o.valorRecebido) ? o.valorRecebido : 0,
     statusCompras: o.statusCompras || "Aguardando",
     statusFabricacao: o.statusFabricacao || "Aguardando",
@@ -240,6 +290,86 @@ function PieChart({ data, size = 120, strokeWidth = 18, centro }) {
       {centro && (
         <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", textAlign: "center" }}>
           {centro}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── BANDEIRAS DA OBRA ───────────────────────────────────────────────────────
+// Mostra as bandeiras manuais (× remove) e um "+" que abre as três cores disponíveis.
+// Fica dentro de cards clicáveis, por isso engole o clique.
+function FlagsObra({ flags, onChange, size = 13 }) {
+  const [escolhendo, setEscolhendo] = useState(false);
+  const lista = flags || [];
+  const add = (cor) => { onChange([...lista, novaFlag(cor)]); setEscolhendo(false); };
+  const del = (id) => onChange(lista.filter(f => f.id !== id));
+  const btn = { cursor: "pointer", borderRadius: 999, lineHeight: 1.4, fontSize: size, padding: "1px 7px", background: "#fff" };
+  return (
+    <div onClick={e => e.stopPropagation()} style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+      {lista.map(f => {
+        const c = FLAG_CORES[f.cor] || FLAG_CORES.vermelha;
+        return (
+          <span key={f.id} title={`Bandeira ${c.label}${f.criadaEm ? " · desde " + fmtDate(f.criadaEm) : ""}`}
+            style={{ display: "inline-flex", alignItems: "center", gap: 2, background: c.cor + "14", border: `1px solid ${c.cor}44`, borderRadius: 999, padding: "1px 3px 1px 7px", fontSize: size, lineHeight: 1.4 }}>
+            {c.emoji}
+            <button onClick={() => del(f.id)} title="Remover bandeira"
+              style={{ background: "none", border: "none", color: c.cor, cursor: "pointer", fontSize: size, lineHeight: 1, padding: "0 3px", fontWeight: 800 }}>×</button>
+          </span>
+        );
+      })}
+      {escolhendo ? (
+        <>
+          {Object.entries(FLAG_CORES).map(([cor, c]) => (
+            <button key={cor} onClick={() => add(cor)} title={`Adicionar bandeira ${c.label}`}
+              style={{ ...btn, border: `1px solid ${c.cor}66` }}>{c.emoji}</button>
+          ))}
+          <button onClick={() => setEscolhendo(false)} title="Cancelar"
+            style={{ ...btn, border: "1px solid #e2e8f0", color: "#94a3b8", fontWeight: 800 }}>×</button>
+        </>
+      ) : (
+        <button onClick={() => setEscolhendo(true)} title="Adicionar bandeira (vermelha, azul ou verde)"
+          style={{ ...btn, border: "1px dashed #cbd5e1", color: "#94a3b8", fontWeight: 800 }}>+ ⚑</button>
+      )}
+    </div>
+  );
+}
+
+// ─── PANORAMA FINANCEIRO ─────────────────────────────────────────────────────
+// Consolidado das obras recebidas: quanto ainda entra, quanto ainda sai e quanto falta
+// entregar em valor de obra. Recalcula a cada render — mudou um valor, muda aqui.
+function PanoramaFinanceiro({ obras }) {
+  const t = finTotais(obras);
+  const blocos = [
+    { label: "● Recebido",  value: t.recebido,  cor: "#10b981", sub: t.total ? `${Math.round(t.recebido / t.total * 100)}% do contratado` : "—" },
+    { label: "● A Receber", value: t.aReceber,  cor: "#f59e0b", sub: "ainda entra no caixa" },
+    { label: "● A Pagar",   value: t.aPagar,    cor: "#dc2626", sub: "compras previstas" },
+    { label: "A Entregar",  value: t.aEntregar, cor: "#3b82f6", sub: "valor de obra não executado" },
+  ];
+  return (
+    <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", borderLeft: "4px solid #c9a227", marginBottom: 24, display: "flex", gap: 28, alignItems: "center", flexWrap: "wrap" }}>
+      <PieChart
+        size={104} strokeWidth={15}
+        data={[{ value: t.recebido, color: "#10b981" }, { value: t.aReceber, color: "#f59e0b" }]}
+        centro={
+          <>
+            <div style={{ fontSize: 9, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Contratado</div>
+            <div style={{ fontSize: 12, fontWeight: 800, color: "#1e293b" }}>R$ {fmt(t.total)}</div>
+          </>
+        }
+      />
+      <div style={{ display: "flex", gap: 26, flexWrap: "wrap", flex: 1 }}>
+        {blocos.map(b => (
+          <div key={b.label}>
+            <div style={{ fontSize: 10, color: b.cor, fontWeight: 700, textTransform: "uppercase" }}>{b.label}</div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: b.cor }}>R$ {fmt(b.value)}</div>
+            <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>{b.sub}</div>
+          </div>
+        ))}
+      </div>
+      {t.emAlerta > 0 && (
+        <div style={{ background: "#fee2e2", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 999, padding: "4px 12px", fontSize: 12, fontWeight: 800 }}>
+          🚩 {t.emAlerta} obra{t.emAlerta > 1 ? "s" : ""} com compras acima do que ainda vai receber
         </div>
       )}
     </div>
@@ -480,6 +610,7 @@ function GanttView({ obra, onChange, equipes }) {
 
   // "A Receber" nunca é gravado — sempre recalculado, pra nunca ficar inconsistente com os outros dois.
   const valorAReceber = Math.max(0, (localObra.valorTotal || 0) - (localObra.valorRecebido || 0));
+  const diasContrato = diasDesdeContrato(localObra);
   const compras = comprasTotais(localObra);
   const alertaCompras = precisaAlertaCompras(localObra);
   function updCompraCategoria(cat, campo, valor) {
@@ -560,16 +691,28 @@ function GanttView({ obra, onChange, equipes }) {
             <div style={{ fontSize: 16, fontWeight: 800, color: "#f59e0b" }}>R$ {fmt(valorAReceber)}</div>
           </div>
           <div>
+            <div style={{ fontSize: 10, color: "#dc2626", fontWeight: 700, textTransform: "uppercase" }}>● A Pagar</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#dc2626" }}>R$ {fmt(compras.aComprar)}</div>
+          </div>
+          <div>
             <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 2 }}>Data do Contrato</label>
             <input type="date" value={localObra.dataContrato || ""}
               onChange={e => update({ ...localObra, dataContrato: e.target.value })}
               style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: "#1e293b" }} />
+            <div style={{ fontSize: 11, fontWeight: 800, marginTop: 3, color: diasContrato === null ? "#94a3b8" : corDias(diasContrato) }}
+              title="Dias corridos desde a data do contrato">
+              {diasContrato === null ? "— sem data de contrato" : `⏱ ${diasContrato} dia${diasContrato === 1 ? "" : "s"} desde o contrato`}
+            </div>
           </div>
           <div>
             <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 2 }}>Valor Recebido</label>
             <input type="number" min={0} step="0.01" value={localObra.valorRecebido || 0}
               onChange={e => update({ ...localObra, valorRecebido: Math.max(0, Number(e.target.value) || 0) })}
               style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: "#1e293b", width: 120 }} />
+          </div>
+          <div>
+            <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 4 }}>Bandeiras</label>
+            <FlagsObra flags={localObra.flags} onChange={fs => update({ ...localObra, flags: fs })} />
           </div>
         </div>
 
@@ -1167,7 +1310,7 @@ function CalendarView({ obras, equipes, onSelectObra }) {
 // Tela de uma pasta (Em Andamento / Concluídas): lista completa daquele grupo, com busca, filtro,
 // ordenação e arrastar — igual ao Dashboard de antes, só que operando num subconjunto por status.
 // KPIs recalculados aqui em cima do subconjunto é o que dá o "percentual real de execução".
-function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, equipes }) {
+function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, onFlagsChange, equipes }) {
   const obras = todas.filter(o => pasta === "concluidas" ? o.status === "Concluído" : o.status !== "Concluído");
 
   const [search, setSearch] = useState("");
@@ -1250,6 +1393,9 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
         ))}
       </div>
 
+      {/* Panorama financeiro desta pasta */}
+      <PanoramaFinanceiro obras={obras} />
+
       {/* Search + filter bar */}
       <div style={{ display: "flex", gap: 12, marginBottom: 18, flexWrap: "wrap" }}>
         <input
@@ -1292,6 +1438,8 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
             ? Math.round(os.itens.reduce((a, i) => a + itemPercentual(i), 0) / os.itens.length)
             : 0;
           const statusColor = STATUS_COLORS[os.status] || "#94a3b8";
+          const fin = finObra(os);
+          const dias = diasDesdeContrato(os);
           const isDragging = dragId === os.id;
           const isOver = overId === os.id && dragId && dragId !== os.id;
           return (
@@ -1346,6 +1494,28 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
                       })}
                     </div>
                   )}
+                </div>
+                {/* Informativo: o que ainda entra e o que ainda sai desta obra + contrato + bandeiras */}
+                <div style={{ minWidth: 230, display: "flex", flexDirection: "column", gap: 6 }}>
+                  <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+                    <div>
+                      <div style={{ fontSize: 10, color: "#f59e0b", fontWeight: 700, textTransform: "uppercase" }}>● A Receber</div>
+                      <div style={{ fontSize: 15, fontWeight: 800, color: "#f59e0b" }}>R$ {fmt(fin.aReceber)}</div>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: 10, color: "#dc2626", fontWeight: 700, textTransform: "uppercase" }}>● A Pagar</div>
+                      <div style={{ fontSize: 15, fontWeight: 800, color: "#dc2626" }}>R$ {fmt(fin.aPagar)}</div>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: "#94a3b8", display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <span>Contrato: {os.dataContrato ? fmtDate(os.dataContrato) : "a definir"}</span>
+                    {dias !== null && (
+                      <span title="Dias corridos desde a data do contrato" style={{ color: corDias(dias), fontWeight: 800 }}>
+                        ⏱ {dias} dia{dias === 1 ? "" : "s"}
+                      </span>
+                    )}
+                  </div>
+                  <FlagsObra flags={os.flags} onChange={fs => onFlagsChange(os.id, fs)} size={12} />
                 </div>
                 <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
                   <div style={{ textAlign: "center" }}>
@@ -1414,6 +1584,9 @@ function Dashboard({ obras, onAbrirPasta }) {
           </div>
         ))}
       </div>
+
+      {/* Panorama financeiro — todas as obras */}
+      <PanoramaFinanceiro obras={obras} />
 
       {/* Pastas */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 16 }}>
@@ -2492,6 +2665,16 @@ export default function App() {
     });
   }, [persistObra]);
 
+  // Bandeiras manuais da obra, alteradas direto no card da lista
+  const handleFlagsChange = useCallback((id, flags) => {
+    setObras(prev => {
+      const next = prev.map(o => o.id === id ? { ...o, flags } : o);
+      const changed = next.find(o => o.id === id);
+      if (changed) persistObra(changed);
+      return next;
+    });
+  }, [persistObra]);
+
   // Reordenação manual das obras (arrastar): grava o índice em `ordem` e persiste os que mudaram
   // Atualiza só o `ordem` dos ids recebidos, preservando o resto do array — importante porque
   // agora quem chama pode ser uma pasta (subconjunto), não só a lista completa.
@@ -2671,7 +2854,7 @@ export default function App() {
                       : view.type === "financeiro"
                         ? <FinanceiroView obras={obras} unlocked={financeiroUnlocked} onUnlock={() => setFinanceiroUnlocked(true)} />
                         : view.type === "obrasPasta"
-                          ? <ObrasPasta obras={obras} pasta={view.pasta} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} equipes={equipes} />
+                          ? <ObrasPasta obras={obras} pasta={view.pasta} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} onFlagsChange={handleFlagsChange} equipes={equipes} />
                           : <Dashboard obras={obras} onAbrirPasta={(pasta) => navTo({ type: "obrasPasta", pasta })} />
       }
 
