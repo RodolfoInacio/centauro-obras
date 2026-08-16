@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
-import { fetchObras, upsertObra, fetchEquipes, saveEquipes as dbSaveEquipes, fetchOrdens, upsertOrdem, deleteOrdem as dbDeleteOrdem, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma } from "./api";
+import { fetchObras, upsertObra, fetchEquipes, saveEquipes as dbSaveEquipes, fetchOrdens, upsertOrdem, deleteOrdem as dbDeleteOrdem, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento } from "./api";
 import { agendar, CONFIG_PADRAO, fmtDataHora, textoDuracao, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis } from "./cronograma";
 import Modal from "./Modal";
 
@@ -1220,13 +1220,311 @@ function EquipesView({ equipes, onChange, obras }) {
 const MESES = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
 const DIAS_SEMANA = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
 
-function CalendarView({ obras, equipes, onSelectObra }) {
+const DIAS_SEMANA_LONGO = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"];
+
+// ─── AGENDA DO DIA ───────────────────────────────────────────────────────────
+// Um agendamento é um serviço do dia: obra (ou atividade avulsa) + equipe + período.
+// Substitui a planilha "rotina trabalhos": lá cada dia é uma coluna e cada equipe um bloco com
+// OBRA / ENDEREÇO / REFERÊNCIA / HORÁRIO / DESCRIÇÃO — os mesmos campos daqui.
+// A execução do dia é sempre manual: o calendário não deduz nada das datas da obra.
+const PERIODOS = ["Dia todo", "Manhã", "Tarde", "1h", "2h", "3h", "4h"];
+const PERIODO_COR = { "Dia todo": "#1a1a1a", "Manhã": "#0ea5e9", "Tarde": "#f97316" };
+
+function idAgendamento() {
+  return "ag_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+function novoAgendamento({ dia, equipeId, obra = null }) {
+  return {
+    id: idAgendamento(),
+    dia,
+    equipeId,
+    obraId: obra ? obra.id : null,
+    titulo: obra ? "" : "",                             // só para atividade fora das obras
+    endereco: obra ? [obra.obra, obra.cidade].filter(Boolean).join(" · ") : "",
+    referencia: "",
+    periodo: "Dia todo",
+    horaObs: "",                                        // complemento livre: "saída 5h30"
+    descricao: "",
+    ordem: Date.now(),
+  };
+}
+// Undefined-safe, no mesmo espírito de normObra: registro antigo continua abrindo.
+function normAgendamento(a) {
+  return {
+    ...a,
+    obraId: a.obraId || null,
+    titulo: a.titulo || "",
+    endereco: a.endereco || "",
+    referencia: a.referencia || "",
+    periodo: PERIODOS.includes(a.periodo) ? a.periodo : "Dia todo",
+    horaObs: a.horaObs || "",
+    descricao: a.descricao || "",
+    ordem: Number.isFinite(a.ordem) ? a.ordem : 0,
+  };
+}
+// Nome curto do serviço: a obra, ou o título da atividade avulsa.
+function tituloAgendamento(ag, obras) {
+  if (!ag.obraId) return ag.titulo || "Atividade avulsa";
+  const o = obras.find(x => x.id === ag.obraId);
+  return o ? `#${o.numero} ${o.cliente}` : "(obra removida)";
+}
+// Dia da semana de "YYYY-MM-DD" sem cair na armadilha de fuso do new Date(string), que é UTC.
+function dowDe(dStr) {
+  const [y, m, d] = dStr.split("-");
+  return new Date(+y, +m - 1, +d).getDay();
+}
+// Dias úteis (seg-sex) de `de` até `ate`, inclusive
+function diasUteisEntre(de, ate) {
+  const out = [];
+  let cur = de;
+  let guard = 0;
+  while (cur <= ate && guard < 400) {
+    const dow = dowDe(cur);
+    if (dow !== 0 && dow !== 6) out.push(cur);
+    cur = addDays(cur, 1);
+    guard++;
+  }
+  return out;
+}
+
+// Um serviço já agendado. Campos iguais aos da planilha, mais o botão de repetir nos próximos dias.
+function CardAgendamento({ ag, obras, cor, onChange, onExcluir, onRepetir, onAbrirObra, onArrastar }) {
+  const [ate, setAte] = useState("");
+  const obra = ag.obraId ? obras.find(o => o.id === ag.obraId) : null;
+  const inp = { border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 12, color: "#1e293b", width: "100%", boxSizing: "border-box" };
+  return (
+    <div draggable
+      onDragStart={e => { onArrastar(); if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", ag.id); } }}
+      style={{ background: "#fff", border: "1px solid " + cor + "44", borderLeft: "4px solid " + cor, borderRadius: 8, padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span title="Arraste para outra equipe" style={{ color: "#cbd5e1", cursor: "grab", fontSize: 14, lineHeight: 1 }}>☰</span>
+        {obra ? (
+          <button onClick={() => onAbrirObra(obra.id)} title="Abrir a obra"
+            style={{ background: "none", border: "none", padding: 0, cursor: "pointer", fontWeight: 800, fontSize: 13, color: "#1e293b", textAlign: "left" }}>
+            #{obra.numero} {obra.cliente}
+          </button>
+        ) : (
+          <input value={ag.titulo} placeholder="Atividade (ex: manutenção, verificação)"
+            onChange={e => onChange({ ...ag, titulo: e.target.value })}
+            style={{ ...inp, fontWeight: 800, fontSize: 13, border: "1px dashed #c9a227", background: "#fffbeb", flex: 1 }} />
+        )}
+        <button onClick={() => onExcluir(ag.id)} title="Remover do dia"
+          style={{ marginLeft: "auto", background: "#fee2e2", color: "#dc2626", border: "none", borderRadius: 6, padding: "2px 9px", fontWeight: 800, fontSize: 13, cursor: "pointer" }}>×</button>
+      </div>
+
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
+        {PERIODOS.map(pe => {
+          const on = ag.periodo === pe;
+          const c = PERIODO_COR[pe] || "#64748b";
+          return (
+            <button key={pe} onClick={() => onChange({ ...ag, periodo: pe })}
+              style={{ background: on ? c : "#fff", color: on ? "#fff" : "#64748b", border: "1px solid " + (on ? c : "#e2e8f0"), borderRadius: 999, padding: "2px 9px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>{pe}</button>
+          );
+        })}
+        <input value={ag.horaObs} placeholder="complemento (ex: saída 5h30)"
+          onChange={e => onChange({ ...ag, horaObs: e.target.value })}
+          style={{ ...inp, width: 180, fontSize: 11 }} />
+      </div>
+
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <input value={ag.endereco} placeholder="Endereço" onChange={e => onChange({ ...ag, endereco: e.target.value })}
+          style={{ ...inp, flex: 2, minWidth: 150 }} />
+        <input value={ag.referencia} placeholder="Referência" onChange={e => onChange({ ...ag, referencia: e.target.value })}
+          style={{ ...inp, flex: 1, minWidth: 110 }} />
+      </div>
+
+      <textarea value={ag.descricao} placeholder="Descrição do serviço / anotações" rows={2}
+        onChange={e => onChange({ ...ag, descricao: e.target.value })}
+        style={{ ...inp, resize: "vertical", fontFamily: "inherit" }} />
+
+      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, color: "#94a3b8" }}>Repetir até</span>
+        <input type="date" value={ate} min={addDays(ag.dia, 1)} onChange={e => setAte(e.target.value)}
+          style={{ ...inp, width: 140 }} />
+        <button disabled={!ate || ate <= ag.dia} onClick={() => { onRepetir(ag, ate); setAte(""); }}
+          title="Cria este mesmo serviço nos dias úteis até a data escolhida"
+          style={{ background: (!ate || ate <= ag.dia) ? "#f1f5f9" : "#1a1a1a", color: (!ate || ate <= ag.dia) ? "#94a3b8" : "#fff", border: "none", borderRadius: 6, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: (!ate || ate <= ag.dia) ? "default" : "pointer" }}>
+          Repetir
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Tela do dia expandido: obras à esquerda, equipes à direita, arrasta e solta pra combinar.
+function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar, onAbrirObra }) {
+  const [busca, setBusca] = useState("");
+  // Ref, não estado: o navegador lê no dragstart, antes de qualquer re-render (mesma razão do
+  // arrastar da lista de obras).
+  const arrastando = useRef(null);          // { obraId } | { avulso } | { agId }
+  const [alvo, setAlvo] = useState(null);   // equipe sob o cursor
+
+  const [y, m, d] = dia.split("-");
+  const dow = DIAS_SEMANA_LONGO[dowDe(dia)];
+
+  const agendaDoDia = agenda.filter(a => a.dia === dia);
+  const ativas = obras.filter(o => o.status !== "Concluído");
+  const q = busca.trim().toLowerCase();
+  const listaObras = q
+    ? ativas.filter(o => o.cliente.toLowerCase().includes(q) || o.numero.includes(q) || (o.obra || "").toLowerCase().includes(q) || (o.cidade || "").toLowerCase().includes(q))
+    : ativas;
+
+  const doEquipe = (eqId) => agendaDoDia.filter(a => a.equipeId === eqId).sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
+  const semEquipe = agendaDoDia.filter(a => !equipes.some(e => e.id === a.equipeId));
+
+  // Último dia antes deste que tem alguma coisa marcada — é o que "copiar do dia anterior" traz.
+  const diaAnterior = agenda.filter(a => a.dia < dia).map(a => a.dia).sort().pop() || null;
+
+  function limpar() { arrastando.current = null; setAlvo(null); }
+
+  function soltarEm(equipeId) {
+    const drag = arrastando.current;
+    limpar();
+    if (!drag) return;
+    if (drag.agId) {                                    // mover serviço já criado para outra equipe
+      const ag = agendaDoDia.find(a => a.id === drag.agId);
+      if (ag && ag.equipeId !== equipeId) onSalvar({ ...ag, equipeId });
+      return;
+    }
+    const obra = drag.obraId ? obras.find(o => o.id === drag.obraId) : null;
+    onSalvar(novoAgendamento({ dia, equipeId, obra }));
+  }
+
+  function copiarDoDiaAnterior() {
+    if (!diaAnterior) return;
+    agenda.filter(a => a.dia === diaAnterior)
+      .forEach((a, i) => onSalvar({ ...a, id: idAgendamento(), dia, ordem: Date.now() + i }));
+  }
+
+  // Repete o serviço nos dias úteis seguintes, até a data escolhida
+  function repetir(ag, ate) {
+    diasUteisEntre(addDays(ag.dia, 1), ate)
+      .forEach((d2, i) => onSalvar({ ...ag, id: idAgendamento(), dia: d2, ordem: Date.now() + i }));
+  }
+
+  return (
+    <div style={{ padding: "20px 24px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16, flexWrap: "wrap" }}>
+        <button onClick={onVoltar}
+          style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>‹ Voltar ao mês</button>
+        <div>
+          <div style={{ fontSize: 19, fontWeight: 800, color: "#1a1a1a" }}>{d}/{m}/{y} — {dow}</div>
+          <div style={{ fontSize: 12, color: "#64748b" }}>
+            {agendaDoDia.length === 0 ? "Nenhum serviço definido" : agendaDoDia.length + " serviço(s) distribuído(s)"}
+          </div>
+        </div>
+        {diaAnterior && (
+          <button onClick={copiarDoDiaAnterior} title={"Traz tudo que estava marcado em " + fmtDate(diaAnterior)}
+            style={{ marginLeft: "auto", background: "#fffbeb", color: "#92400e", border: "1px solid #fde68a", borderRadius: 8, padding: "8px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+            ⧉ Copiar do dia anterior ({fmtDate(diaAnterior)})
+          </button>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+        {/* ── Esquerda: obras + atividade avulsa ── */}
+        <div style={{ width: 290, flexShrink: 0, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 14 }}>
+          <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", marginBottom: 8 }}>Arraste para uma equipe →</div>
+
+          <div draggable
+            onDragStart={e => { arrastando.current = { avulso: true }; if (e.dataTransfer) e.dataTransfer.setData("text/plain", "avulso"); }}
+            onDragEnd={limpar}
+            style={{ background: "#fffbeb", border: "1px dashed #c9a227", color: "#92400e", borderRadius: 8, padding: "8px 10px", fontSize: 12, fontWeight: 800, cursor: "grab", marginBottom: 10 }}>
+            🔧 Atividade avulsa <span style={{ fontWeight: 500 }}>(fora das obras)</span>
+          </div>
+
+          <input type="search" value={busca} onChange={e => setBusca(e.target.value)} placeholder="Buscar obra..."
+            style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 8, padding: "7px 10px", fontSize: 12, boxSizing: "border-box", marginBottom: 8 }} />
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 5, maxHeight: 520, overflowY: "auto" }}>
+            {listaObras.map(o => (
+              <div key={o.id} draggable
+                onDragStart={e => { arrastando.current = { obraId: o.id }; if (e.dataTransfer) { e.dataTransfer.effectAllowed = "copy"; e.dataTransfer.setData("text/plain", o.id); } }}
+                onDragEnd={limpar}
+                title={(o.obra || "") + " " + (o.cidade || "")}
+                style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: "6px 9px", cursor: "grab" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#1e293b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>#{o.numero} {o.cliente}</div>
+                <div style={{ fontSize: 10, color: "#94a3b8", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{o.cidade || "—"}</div>
+              </div>
+            ))}
+            {listaObras.length === 0 && <div style={{ fontSize: 12, color: "#94a3b8", padding: 8 }}>Nenhuma obra encontrada</div>}
+          </div>
+        </div>
+
+        {/* ── Direita: uma faixa por equipe (área de soltura) ── */}
+        <div style={{ flex: 1, minWidth: 320, display: "flex", flexDirection: "column", gap: 12 }}>
+          {equipes.length === 0 && (
+            <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 10, padding: "14px 18px", fontSize: 13, color: "#92400e" }}>
+              Cadastre as equipes em <b>Equipes</b> para distribuir os serviços do dia.
+            </div>
+          )}
+          {equipes.map(eq => {
+            const lista = doEquipe(eq.id);
+            const sobre = alvo === eq.id;
+            return (
+              <div key={eq.id}
+                onDragOver={e => { e.preventDefault(); setAlvo(eq.id); }}
+                onDragLeave={() => setAlvo(a => a === eq.id ? null : a)}
+                onDrop={e => { e.preventDefault(); soltarEm(eq.id); }}
+                style={{ background: sobre ? eq.cor + "10" : "#fff", border: "1px " + (sobre ? "dashed " : "solid ") + (sobre ? eq.cor : "#e2e8f0"), borderRadius: 12, padding: 12 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                  <span style={{ width: 10, height: 10, borderRadius: "50%", background: eq.cor, display: "inline-block" }} />
+                  <span style={{ fontWeight: 800, fontSize: 14, color: "#1e293b" }}>{eq.nome}</span>
+                  {eq.integrantes.length > 0 && <span style={{ fontSize: 12, color: "#64748b" }}>— {eq.integrantes.join(" + ")}</span>}
+                  <span style={{ fontSize: 11, color: "#94a3b8" }}>{lista.length} serviço(s)</span>
+                  <select value="" onChange={e => {
+                      const v = e.target.value;
+                      if (!v) return;
+                      const obra = v === "__avulso" ? null : obras.find(o => o.id === v);
+                      onSalvar(novoAgendamento({ dia, equipeId: eq.id, obra }));
+                    }}
+                    style={{ marginLeft: "auto", border: "1px dashed #c9a227", color: "#c9a227", background: "#fffbeb", borderRadius: 8, padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                    <option value="">+ Adicionar</option>
+                    <option value="__avulso">🔧 Atividade avulsa</option>
+                    {ativas.map(o => <option key={o.id} value={o.id}>#{o.numero} {o.cliente}</option>)}
+                  </select>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {lista.map(ag => (
+                    <CardAgendamento key={ag.id} ag={ag} obras={obras} cor={eq.cor}
+                      onChange={onSalvar} onExcluir={onExcluir} onRepetir={repetir} onAbrirObra={onAbrirObra}
+                      onArrastar={() => { arrastando.current = { agId: ag.id }; }} />
+                  ))}
+                  {lista.length === 0 && (
+                    <div style={{ fontSize: 12, color: "#94a3b8", fontStyle: "italic" }}>
+                      Solte uma obra aqui para dar serviço a esta equipe.
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Serviços cuja equipe foi excluída depois — não somem, ficam aqui para remanejar */}
+          {semEquipe.length > 0 && (
+            <div style={{ background: "#fff", border: "1px solid #fecaca", borderRadius: 12, padding: 12 }}>
+              <div style={{ fontWeight: 800, fontSize: 13, color: "#dc2626", marginBottom: 8 }}>Sem equipe (equipe removida)</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {semEquipe.map(ag => (
+                  <CardAgendamento key={ag.id} ag={ag} obras={obras} cor="#dc2626"
+                    onChange={onSalvar} onExcluir={onExcluir} onRepetir={repetir} onAbrirObra={onAbrirObra}
+                    onArrastar={() => { arrastando.current = { agId: ag.id }; }} />
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CalendarView({ obras, equipes, agenda, onSalvarAgendamento, onExcluirAgendamento, onSelectObra }) {
   const hoje = new Date();
   const [ano, setAno] = useState(hoje.getFullYear());
   const [mes, setMes] = useState(hoje.getMonth()); // 0-11
-
-  // obras that have a start date defined (eligible to appear on the calendar)
-  const agendadas = obras.filter(o => o.dataInicio);
+  const [diaAberto, setDiaAberto] = useState(null); // "YYYY-MM-DD" — dia expandido, sem router
 
   function prevMes() { if (mes === 0) { setMes(11); setAno(a => a - 1); } else setMes(m => m - 1); }
   function nextMes() { if (mes === 11) { setMes(0); setAno(a => a + 1); } else setMes(m => m + 1); }
@@ -1240,18 +1538,25 @@ function CalendarView({ obras, equipes, onSelectObra }) {
   for (let d = 1; d <= diasNoMes; d++) celulas.push(d);
   while (celulas.length % 7 !== 0) celulas.push(null);
 
-  function corObra(o) {
-    const eqId = (o.equipes || [])[0];
-    const eq = eqId && equipes.find(e => e.id === eqId);
-    return eq ? eq.cor : (STATUS_COLORS[o.status] || "#64748b");
+  const diaStr = (dia) => `${ano}-${String(mes + 1).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
+  // Serviços distribuídos naquele dia. É a única coisa que o calendário mostra: nada é deduzido
+  // das datas da obra — a execução do dia é definida a mão aqui dentro.
+  function agendaNoDia(dia) {
+    const d = diaStr(dia);
+    return agenda.filter(a => a.dia === d).sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
   }
-  // returns obras active on a given day-of-month
-  function obrasNoDia(dia) {
-    const dStr = `${ano}-${String(mes + 1).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
-    return agendadas.filter(o => obraAtivaNoDia(o, dStr));
-  }
+  const corEquipe = (eqId) => (equipes.find(e => e.id === eqId) || {}).cor || "#64748b";
+  const nomeEquipe = (eqId) => (equipes.find(e => e.id === eqId) || {}).nome || "Sem equipe";
 
   const ehHoje = (dia) => dia && ano === hoje.getFullYear() && mes === hoje.getMonth() && dia === hoje.getDate();
+
+  if (diaAberto) {
+    return (
+      <DiaAgenda dia={diaAberto} obras={obras} equipes={equipes} agenda={agenda}
+        onSalvar={onSalvarAgendamento} onExcluir={onExcluirAgendamento}
+        onVoltar={() => setDiaAberto(null)} onAbrirObra={onSelectObra} />
+    );
+  }
 
   return (
     <div style={{ padding: "24px 28px", maxWidth: 1200, margin: "0 auto" }}>
@@ -1266,32 +1571,35 @@ function CalendarView({ obras, equipes, onSelectObra }) {
         </div>
       </div>
 
-      {agendadas.length === 0 && (
-        <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 10, padding: "14px 18px", fontSize: 13, color: "#92400e", marginBottom: 16 }}>
-          Nenhuma obra agendada ainda. Abra uma obra e defina a <b>data de início</b> para ela aparecer no calendário.
-        </div>
-      )}
+      <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: "10px 16px", fontSize: 12, color: "#64748b", marginBottom: 16 }}>
+        Clique num dia para distribuir os serviços: arraste a obra para a equipe, defina o período e escreva a descrição.
+      </div>
 
       {/* Weekday header */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6, marginBottom: 6 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 6, marginBottom: 6 }}>
         {DIAS_SEMANA.map(d => (
           <div key={d} style={{ textAlign: "center", fontSize: 12, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase" }}>{d}</div>
         ))}
       </div>
       {/* Day cells */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 6 }}>
         {celulas.map((dia, i) => {
-          const lista = dia ? obrasNoDia(dia) : [];
+          const lista = dia ? agendaNoDia(dia) : [];
           return (
-            <div key={i} style={{ minHeight: 110, background: dia ? "#fff" : "transparent", borderRadius: 8, border: dia ? "1px solid #e2e8f0" : "none", padding: dia ? 6 : 0, boxShadow: ehHoje(dia) ? "0 0 0 2px #c9a227" : "none" }}>
+            <div key={i}
+              onClick={() => dia && setDiaAberto(diaStr(dia))}
+              title={dia ? "Clique para definir os serviços do dia" : undefined}
+              style={{ minHeight: 110, minWidth: 0, background: dia ? "#fff" : "transparent", borderRadius: 8, border: dia ? "1px solid #e2e8f0" : "none", padding: dia ? 6 : 0, boxShadow: ehHoje(dia) ? "0 0 0 2px #c9a227" : "none", cursor: dia ? "pointer" : "default" }}>
               {dia && (
                 <>
                   <div style={{ fontSize: 12, fontWeight: 700, color: ehHoje(dia) ? "#c9a227" : "#64748b", marginBottom: 4, textAlign: "right" }}>{dia}</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                    {lista.slice(0, 4).map(o => (
-                      <div key={o.id} onClick={() => onSelectObra(o.id)} title={`#${o.numero} — ${o.cliente}`}
-                        style={{ background: corObra(o), color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        #{o.numero} {o.cliente}
+                    {lista.slice(0, 4).map(ag => (
+                      <div key={ag.id}
+                        onClick={e => { if (ag.obraId) { e.stopPropagation(); onSelectObra(ag.obraId); } }}
+                        title={`${nomeEquipe(ag.equipeId)} — ${tituloAgendamento(ag, obras)} · ${ag.periodo}${ag.descricao ? " · " + ag.descricao : ""}`}
+                        style={{ background: corEquipe(ag.equipeId), color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        {tituloAgendamento(ag, obras)}
                       </div>
                     ))}
                     {lista.length > 4 && <div style={{ fontSize: 10, color: "#94a3b8", fontWeight: 700 }}>+{lista.length - 4} mais</div>}
@@ -2554,6 +2862,7 @@ export default function App() {
   const [equipes, setEquipes] = useState([]);
   const [ordens, setOrdens] = useState([]);
   const [cronogramas, setCronogramas] = useState([]);
+  const [agenda, setAgenda] = useState([]);   // serviços do dia (obra x equipe)
   // Navegação: view atual + pilha de histórico (botão voltar universal)
   const [view, setView] = useState({ type: "dashboard" });
   const [history, setHistory] = useState([]);
@@ -2592,12 +2901,12 @@ export default function App() {
 
   // Carrega dados do banco após login
   useEffect(() => {
-    if (!session) { setObras([]); setEquipes([]); setOrdens([]); setCronogramas([]); return; }
+    if (!session) { setObras([]); setEquipes([]); setOrdens([]); setCronogramas([]); setAgenda([]); return; }
     let cancel = false;
     setLoading(true);
     (async () => {
       try {
-        const [obs, eqs, ords, crons] = await Promise.all([fetchObras(), fetchEquipes(), fetchOrdens(), fetchCronogramas()]);
+        const [obs, eqs, ords, crons, ags] = await Promise.all([fetchObras(), fetchEquipes(), fetchOrdens(), fetchCronogramas(), fetchAgenda()]);
         if (cancel) return;
         setObras(obs.map(normObra).sort((a, b) => {
           const ao = Number.isFinite(a.ordem) ? a.ordem : 1e9 + (Number(a.numero) || 0);
@@ -2607,6 +2916,7 @@ export default function App() {
         setEquipes(eqs);
         setOrdens(ords);
         setCronogramas(crons);
+        setAgenda(ags.map(normAgendamento));
       } catch (err) {
         console.error(err);
         if (!cancel) showError("Erro ao carregar dados: " + err.message);
@@ -2629,6 +2939,24 @@ export default function App() {
     t[obra.id] = setTimeout(() => {
       upsertObra(obra).catch(err => showError("Erro ao salvar: " + err.message));
     }, 700);
+  }, []);
+
+  // Agenda: o estado muda na hora e a gravação é debounced por serviço (a descrição é digitada,
+  // não vale um upsert por tecla). Mesmo padrão de persistObra.
+  const handleSaveAgendamento = useCallback((ag) => {
+    setAgenda(prev => prev.some(a => a.id === ag.id) ? prev.map(a => a.id === ag.id ? ag : a) : [...prev, ag]);
+    const t = saveTimers.current;
+    if (t[ag.id]) clearTimeout(t[ag.id]);
+    t[ag.id] = setTimeout(() => {
+      upsertAgendamento(ag).catch(err => showError("Erro ao salvar a agenda (rodou a migration_agenda.sql?): " + err.message));
+    }, 700);
+  }, []);
+
+  const handleDeleteAgendamento = useCallback((id) => {
+    const t = saveTimers.current;
+    if (t[id]) { clearTimeout(t[id]); delete t[id]; }
+    setAgenda(prev => prev.filter(a => a.id !== id));
+    dbDeleteAgendamento(id).catch(err => showError("Erro ao remover da agenda: " + err.message));
   }, []);
 
   // Há um cronograma com gravação pendente e é justamente o que está aberto agora?
@@ -2824,7 +3152,9 @@ export default function App() {
         : view.type === "gantt"
           ? (selectedObra ? <GanttView obra={selectedObra} onChange={updateObra} equipes={equipes} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>)
           : view.type === "calendar"
-            ? <CalendarView obras={obras} equipes={equipes} onSelectObra={openObra} />
+            ? <CalendarView obras={obras} equipes={equipes} agenda={agenda}
+                onSalvarAgendamento={handleSaveAgendamento} onExcluirAgendamento={handleDeleteAgendamento}
+                onSelectObra={openObra} />
             : view.type === "equipes"
               ? <EquipesView equipes={equipes} onChange={handleEquipesChange} obras={obras} />
               : view.type === "ordens"
