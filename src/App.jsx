@@ -2402,21 +2402,33 @@ function CronogramasView({ cronogramas, obras, onNovo, onNovoComModelo, onAbrir,
   const [titulo, setTitulo] = useState("");
   const [obraId, setObraId] = useState("");
   const [perguntarVidros, setPerguntarVidros] = useState(false);
+  const [aviso, setAviso] = useState("");
 
   const obraSelecionada = obras.find(o => o.id === obraId) || null;
 
+  // Com obra vinculada o título é opcional: assume "Proposta <nº>", que já era a
+  // convenção dos cronogramas existentes. Sem obra e sem título não há o que criar.
+  const tituloPadrao = obraSelecionada ? `Proposta ${obraSelecionada.numero}` : "";
+  function tituloFinal() { return titulo.trim() || tituloPadrao; }
+
+  function limpar() {
+    setPerguntarVidros(false); setCriando(false);
+    setTitulo(""); setObraId(""); setAviso("");
+  }
+
   function criar() {
-    if (!titulo.trim()) return;
-    onNovo(titulo.trim(), obraSelecionada);
-    setCriando(false); setTitulo(""); setObraId("");
+    const t = tituloFinal();
+    if (!t) { setAviso("Dê um título ao cronograma, ou vincule uma obra para ele herdar o nome."); return; }
+    onNovo(t, obraSelecionada);
+    limpar();
   }
   function criarComModelo() {
-    if (!titulo.trim() || !obraSelecionada) return;
-    setPerguntarVidros(true);
+    if (!obraSelecionada) { setAviso("Escolha a obra: o modelo é gerado a partir dos itens dela."); return; }
+    setAviso(""); setPerguntarVidros(true);
   }
   function confirmarModelo(temVidros) {
-    onNovoComModelo(titulo.trim(), obraSelecionada, temVidros);
-    setPerguntarVidros(false); setCriando(false); setTitulo(""); setObraId("");
+    onNovoComModelo(tituloFinal(), obraSelecionada, temVidros);
+    limpar();
   }
 
   return (
@@ -2430,13 +2442,14 @@ function CronogramasView({ cronogramas, obras, onNovo, onNovoComModelo, onAbrir,
         <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 18, marginBottom: 18, display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 220 }}>
             <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Título</div>
-            <input value={titulo} onChange={e => setTitulo(e.target.value)} autoFocus placeholder="Ex: Ampliação GRIII"
+            <input value={titulo} onChange={e => { setTitulo(e.target.value); setAviso(""); }} autoFocus
+              placeholder={tituloPadrao ? `${tituloPadrao} (opcional)` : "Ex: Ampliação GRIII"}
               onKeyDown={e => { if (e.key === "Enter") criar(); }}
               style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", fontSize: 14, boxSizing: "border-box" }} />
           </div>
           <div style={{ minWidth: 220 }}>
             <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Vincular a uma obra (opcional)</div>
-            <select value={obraId} onChange={e => setObraId(e.target.value)}
+            <select value={obraId} onChange={e => { setObraId(e.target.value); setAviso(""); }}
               style={{ border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", fontSize: 14, background: "#fff", minWidth: 220 }}>
               <option value="">— Avulso —</option>
               {obras.map(o => <option key={o.id} value={o.id}>#{o.numero} {o.cliente}</option>)}
@@ -2444,10 +2457,15 @@ function CronogramasView({ cronogramas, obras, onNovo, onNovoComModelo, onAbrir,
           </div>
           <button onClick={criar} style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>Criar</button>
           <button onClick={criarComModelo} disabled={!obraSelecionada}
-            title={obraSelecionada ? "Gera automaticamente a árvore Suprimentos / Produção / Instalação a partir dos itens da obra" : "Selecione uma obra para usar o modelo"}
+            title={obraSelecionada ? "Gera automaticamente a árvore Suprimentos / Produção / Instalação a partir dos itens da obra" : "Escolha a obra: o modelo sai dos itens dela"}
             style={{ background: obraSelecionada ? "#0ea5e9" : "#e2e8f0", color: obraSelecionada ? "#fff" : "#94a3b8", border: "none", borderRadius: 8, padding: "9px 18px", fontWeight: 700, fontSize: 13, cursor: obraSelecionada ? "pointer" : "not-allowed" }}>
             Criar com modelo da obra
           </button>
+          {aviso && (
+            <div style={{ flexBasis: "100%", background: "#fef2f2", border: "1px solid #fecaca", color: "#b91c1c", borderRadius: 8, padding: "8px 12px", fontSize: 12.5, fontWeight: 600 }}>
+              {aviso}
+            </div>
+          )}
         </div>
       )}
 
