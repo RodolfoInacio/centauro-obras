@@ -3,7 +3,8 @@
 ## O que é
 
 App web interno para acompanhar obras de esquadrias de alumínio e vidro: importa o orçamento em
-PDF, controla itens/etapas/equipes, gera Ordens de Serviço, monta cronograma estilo MS Project e
+PDF, controla itens/etapas/equipes, distribui obra × equipe no calendário e imprime a O.S. dali,
+monta cronograma estilo MS Project e
 acompanha o financeiro por obra (recebido, a receber, compras por categoria).
 Uso interno do escritório — sem cadastro público, login criado manualmente no Supabase.
 Produção: <https://obras.centauroesquadrias.com.br>
@@ -26,7 +27,7 @@ Sem framework de teste, sem linter, sem router, sem lib de gráfico, sem lib de 
 ```
 src/
   App.jsx          ~2.700 linhas — TODOS os componentes e telas. É o app inteiro.
-  api.js           CRUD do Supabase (obras, equipes, ordens, cronogramas).
+  api.js           CRUD do Supabase (obras, equipes, agenda, cronogramas).
   supabase.js      Cria o client a partir das env vars.
   cronograma.js    Motor de agendamento do Cronograma Comercial (dias úteis, dependências).
   Modal.jsx        Único componente extraído: modal genérico com backdrop.
@@ -34,7 +35,7 @@ src/
   assets/          Logos.
 supabase/
   schema.sql                 Tabelas base + RLS + bucket de Storage.
-  migration_ordens.sql       Tabela `ordens` (rodar separado).
+  migration_ordens.sql       Tabela `ordens` — histórica, sem tela (ver Decisões).
   migration_cronogramas.sql  Tabela `cronogramas` (rodar separado).
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF.
   SETUP.md                   Passo a passo de criação do projeto Supabase.
@@ -86,7 +87,8 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 |---|---|---|---|
 | `obras` | `id` (= nº da proposta, texto) | `numero`, `cliente`, `updated_at`, `data` | a obra inteira (itens, etapas, financeiro, compras) |
 | `equipes` | `id` | `nome`, `integrantes` (jsonb), `cor` | — (essa não usa `data`) |
-| `ordens` | `id` | `numero`, `equipe_id`, `periodo_inicio`, `periodo_fim`, `data` | a O.S. inteira |
+| `ordens` | `id` | `numero`, `equipe_id`, `periodo_inicio`, `periodo_fim`, `data` | **histórica** — nenhum código lê ou grava (ver Decisões) |
+| `agenda` | `id` | `dia`, `equipe_id`, `obra_id`, `updated_at`, `data` | o serviço do dia (obra × equipe × período) |
 | `cronogramas` | `id` | `titulo`, `obra_id`, `updated_at`, `data` | o cronograma inteiro (tasks) |
 | `profiles` | `id` (= auth.users) | `nome`, `papel` | — |
 | `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (**vazia**, fundação para o futuro) |
@@ -95,8 +97,8 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
   policies que dariam acesso a eles estão comentadas em `schema.sql`. Hoje só `admin` acessa.
 - Todo usuário novo vira `admin` automaticamente (trigger `handle_new_user`).
 - Storage: bucket público `desenhos` (leitura pública, escrita autenticada).
-- `ordens` e `cronogramas` **não estão no `schema.sql`** — são migrations separadas. Se esquecer
-  de rodar, o app não quebra: `fetchOrdens`/`fetchCronogramas` capturam o erro e devolvem `[]`.
+- `agenda` e `cronogramas` **não estão no `schema.sql`** — são migrations separadas. Se esquecer
+  de rodar, o app não quebra: `fetchAgenda`/`fetchCronogramas` capturam o erro e devolvem `[]`.
 
 ## Backend
 
@@ -132,15 +134,16 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   `navTo` empilha, `navReplace` troca, `back` desempilha, `goHome` limpa. Todos passam por
   `guardNav`, que intercepta a saída se houver cronograma com gravação pendente.
   Tipos de view: `dashboard`, `obrasPasta` (`pasta: "andamento"|"concluidas"`), `gantt` (`obraId`),
-  `print` (`obraId`), `calendar`, `equipes`, `ordens`, `ordemBuilder` (`equipeId`, `ordem?`),
-  `ordemPrint` (`ordem`), `cronogramas`, `cronograma` (`id`), `financeiro`.
+  `print` (`obraId`), `calendar`, `equipes`, `osPrint` (`inicio`, `fim`),
+  `cronogramas`, `cronograma` (`id`), `financeiro`.
 - **Persistência**: o estado local muda na hora; a gravação é **debounced em 700 ms por entidade**
-  (`persistObra`, `handleSaveCronograma`). Ordens e equipes gravam imediatamente. O cronograma é
-  o único com indicador de "não salvo" (`dirtyCronoIds`), botão Salvar e aviso ao sair.
+  (`persistObra`, `handleSaveCronograma`, `handleSaveAgendamento`). Equipes gravam imediatamente,
+  uma por vez (`upsertEquipe`/`deleteEquipe`). O cronograma é o único com indicador de "não salvo"
+  (`dirtyCronoIds`), botão Salvar e aviso ao sair.
 - **Migração de schema**: nunca migrar o banco — os campos novos entram com default em `normObra`
   / `normItem`, sempre undefined-safe. Registro antigo continua abrindo.
 - **Erros**: `api.js` faz `throw` no que é essencial (obras, equipes) e `console.warn` + `[]` no
-  que é opcional (ordens, cronogramas). Na UI, erro vira faixa vermelha temporária via `showError`.
+  que é opcional (agenda, cronogramas). Na UI, erro vira faixa vermelha temporária via `showError`.
 - **Autenticação**: `supabase.auth.signInWithPassword`. Sem cadastro público — usuários são
   criados à mão no painel do Supabase.
 
@@ -177,6 +180,21 @@ donut de duas fatias que precisamos.
 
 **Sem router.** ~12 telas num app interno não pagam a dependência; o estado `view` + pilha resolve,
 inclusive o "voltar" universal.
+
+**A O.S. sai da agenda, não das datas da obra.** Havia duas fontes de verdade para "quem faz o
+quê em que dia": o `OrdemBuilder` deduzia as linhas das datas dos itens (`obraAtivaNoDia`),
+enquanto o calendário é preenchido à mão arrastando obra × equipe. A O.S. imprimia a dedução, que
+não era o que a equipe ia fazer. Hoje a tela de Ordem de Serviço não existe mais: o calendário
+emite direto (botão no mês, com escolha de período, e no dia aberto), gerando uma folha por equipe
+via `OrdemServicoPrint`. A O.S. **não é salva nem numerada** — o registro é a própria agenda, então
+não há como a folha e o calendário divergirem. A tabela `ordens` continua no banco com as O.S.
+antigas, mas nenhum código a lê; para consultar, é ir no Supabase.
+
+**Equipe é gravada uma por vez.** `saveEquipes` regravava a lista inteira e engolia o erro do
+SELECT, então o DELETE muitas vezes nem era enviado e a função resolvia como sucesso — a equipe
+sumia da tela e voltava no F5. Agora são `upsertEquipe`/`deleteEquipe`; o delete pede as linhas de
+volta (`.select("id")`) e **falha se o banco não apagou nada**, porque um DELETE barrado por RLS
+volta 204 sem erro. Se a gravação falhar, a equipe é restaurada na lista em vez de sumir.
 
 ## Armadilhas conhecidas
 

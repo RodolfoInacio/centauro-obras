@@ -33,47 +33,23 @@ export async function fetchEquipes() {
   }));
 }
 
-// Sincroniza a lista inteira: upsert das atuais + remove as que sumiram.
-export async function saveEquipes(equipes) {
-  const { data: existing } = await supabase.from("equipes").select("id");
-  const keep = new Set(equipes.map(e => e.id));
-  const toDelete = (existing || []).filter(r => !keep.has(r.id)).map(r => r.id);
-  if (toDelete.length) {
-    const { error } = await supabase.from("equipes").delete().in("id", toDelete);
-    if (error) throw error;
-  }
-  if (equipes.length) {
-    const rows = equipes.map(e => ({ id: e.id, nome: e.nome, integrantes: e.integrantes || [], cor: e.cor }));
-    const { error } = await supabase.from("equipes").upsert(rows);
-    if (error) throw error;
-  }
-}
-
-// ─── ORDENS DE SERVIÇO ───────────────────────────────────────────────────────
-export async function fetchOrdens() {
-  // Resiliente: se a tabela ainda não existe, não quebra o app (retorna vazio).
-  const { data, error } = await supabase.from("ordens").select("data").order("numero", { ascending: false });
-  if (error) { console.warn("fetchOrdens:", error.message); return []; }
-  return (data || []).map(r => r.data);
-}
-
-export async function upsertOrdem(ordem) {
-  const row = {
-    id: ordem.id,
-    numero: ordem.numero,
-    equipe_id: ordem.equipeId,
-    periodo_inicio: ordem.periodoInicio || null,
-    periodo_fim: ordem.periodoFim || null,
-    updated_at: new Date().toISOString(),
-    data: ordem,
-  };
-  const { error } = await supabase.from("ordens").upsert(row);
+// Uma equipe por vez, de propósito: gravar a lista inteira fazia uma chamada atrasada
+// com a lista antiga ressuscitar, via upsert, a equipe que acabou de ser excluída.
+export async function upsertEquipe(eq) {
+  const { error } = await supabase.from("equipes").upsert({
+    id: eq.id, nome: eq.nome, integrantes: eq.integrantes || [], cor: eq.cor,
+  });
   if (error) throw error;
 }
 
-export async function deleteOrdem(id) {
-  const { error } = await supabase.from("ordens").delete().eq("id", id);
+export async function deleteEquipe(id) {
+  const { data, error } = await supabase.from("equipes").delete().eq("id", id).select("id");
   if (error) throw error;
+  // O PostgREST devolve 204 sem erro quando o RLS filtra todas as linhas. Sem nenhuma
+  // linha de volta, nada foi apagado — e sem esta checagem o app acha que deu certo.
+  if (!data || data.length === 0) {
+    throw new Error("A equipe não foi apagada — sem permissão ou ela já não existia.");
+  }
 }
 
 // ─── CRONOGRAMAS ─────────────────────────────────────────────────────────────
