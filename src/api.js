@@ -30,6 +30,8 @@ export async function fetchEquipes() {
   if (error) throw error;
   return (data || []).map(r => ({
     id: r.id, nome: r.nome, integrantes: r.integrantes || [], cor: r.cor,
+    // Arquivada continua vindo do banco: é ela que segura o histórico do calendário.
+    arquivada: !!r.arquivada,
   }));
 }
 
@@ -38,10 +40,13 @@ export async function fetchEquipes() {
 export async function upsertEquipe(eq) {
   const { error } = await supabase.from("equipes").upsert({
     id: eq.id, nome: eq.nome, integrantes: eq.integrantes || [], cor: eq.cor,
+    arquivada: !!eq.arquivada,
   });
   if (error) throw error;
 }
 
+// Exclusão de verdade. A tela usa arquivamento (upsertEquipe com arquivada), porque apagar a
+// linha faz os serviços antigos do calendário perderem a equipe. Fica aqui para uso manual.
 export async function deleteEquipe(id) {
   const { data, error } = await supabase.from("equipes").delete().eq("id", id).select("id");
   if (error) throw error;

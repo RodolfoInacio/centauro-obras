@@ -513,7 +513,8 @@ function GanttView({ obra, onChange, equipes }) {
 
   // Teams assigned to this obra
   const equipesObra = (localObra.equipes || []);
-  const equipesDisponiveis = equipes.filter(e => !equipesObra.includes(e.id));
+  // Equipe arquivada não entra em obra nova; a que já é líder continua aparecendo no chip acima.
+  const equipesDisponiveis = equipes.filter(e => !equipesObra.includes(e.id) && !e.arquivada);
   function addEquipe(id) {
     if (!id || equipesObra.includes(id)) return;
     update({ ...localObra, equipes: [...equipesObra, id] });
@@ -1069,7 +1070,7 @@ function PrintView({ obra, onBack }) {
 }
 
 // ─── EQUIPES VIEW ─────────────────────────────────────────────────────────────
-function EquipesView({ equipes, onSalvar, onExcluir, obras }) {
+function EquipesView({ equipes, onSalvar, onArquivar, onReativar, onExcluir, obras, agenda }) {
   const [nome, setNome] = useState("");
   const [integrantes, setIntegrantes] = useState([]);
   const [novoInt, setNovoInt] = useState("");
@@ -1098,17 +1099,31 @@ function EquipesView({ equipes, onSalvar, onExcluir, obras }) {
   function editar(eq) {
     setEditingId(eq.id); setNome(eq.nome); setIntegrantes([...eq.integrantes]); setNovoInt("");
   }
-  function excluir(eq) {
+  // Arquivar, não excluir: apagar a linha faria os serviços já lançados no calendário perderem
+  // a equipe e caírem em "Sem equipe". Arquivada, ela some das escolhas e fica no histórico.
+  function arquivar(eq) {
     const n = usoCount(eq.id);
     const aviso = n > 0
-      ? `Excluir a equipe "${eq.nome}"? Ela será removida de ${n} obra(s) onde está atribuída.`
-      : `Excluir a equipe "${eq.nome}"?`;
+      ? `Arquivar a equipe "${eq.nome}"?\n\nEla sai das ${n} obra(s) onde é líder e não poderá mais ser escolhida, mas continua aparecendo nos dias do calendário em que já tem serviço.`
+      : `Arquivar a equipe "${eq.nome}"?\n\nEla não poderá mais ser escolhida, mas continua aparecendo nos dias do calendário em que já tem serviço.`;
     if (!confirm(aviso)) return;
-    onExcluir(eq.id);
+    onArquivar(eq.id);
     if (editingId === eq.id) resetForm();
   }
   // count obras using each team
   const usoCount = (id) => obras.filter(o => (o.equipes || []).includes(id)).length;
+  const ativas = equipes.filter(e => !e.arquivada);
+  const arquivadas = equipes.filter(e => e.arquivada);
+  // Quantos serviços a equipe tem na agenda. Só quem não tem nenhum (nem obra) pode ser apagada
+  // de vez — apagar quem tem histórico é justamente o que o arquivamento veio evitar.
+  const servicosCount = (id) => (agenda || []).filter(a => a.equipeId === id).length;
+  const podeExcluir = (eq) => servicosCount(eq.id) === 0 && usoCount(eq.id) === 0;
+  function excluirDeVez(eq) {
+    if (!confirm(`Excluir a equipe "${eq.nome}" de vez?
+
+Ela não tem nenhum serviço no calendário nem obra atribuída, então nada de histórico se perde. Não dá para desfazer.`)) return;
+    onExcluir(eq.id);
+  }
 
   return (
     <div style={{ padding: "24px 28px", maxWidth: 900, margin: "0 auto" }}>
@@ -1162,10 +1177,10 @@ function EquipesView({ equipes, onSalvar, onExcluir, obras }) {
 
       {/* List */}
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {equipes.length === 0 && (
+        {ativas.length === 0 && (
           <div style={{ textAlign: "center", padding: 40, color: "#94a3b8", fontSize: 14 }}>Nenhuma equipe cadastrada ainda</div>
         )}
-        {equipes.map(eq => (
+        {ativas.map(eq => (
           <div key={eq.id} style={{ background: "#fff", borderRadius: 12, padding: "16px 20px", boxShadow: "0 1px 4px rgba(0,0,0,0.07)", border: "1px solid #e2e8f0", borderLeft: `5px solid ${eq.cor}`, display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
             <div style={{ flex: 1, minWidth: 200 }}>
               <div style={{ fontWeight: 800, fontSize: 15, color: eq.cor }}>{eq.nome}</div>
@@ -1178,11 +1193,45 @@ function EquipesView({ equipes, onSalvar, onExcluir, obras }) {
             </div>
             <button onClick={() => editar(eq)}
               style={{ background: "#eff6ff", color: "#1a1a1a", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Editar</button>
-            <button onClick={() => excluir(eq)}
-              style={{ background: "#fee2e2", color: "#dc2626", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Excluir</button>
+            <button onClick={() => arquivar(eq)} title="Sai das escolhas, mas continua no histórico do calendário"
+              style={{ background: "#fef3c7", color: "#92400e", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Arquivar</button>
           </div>
         ))}
       </div>
+
+      {/* Arquivadas: fora das escolhas, mas ainda no histórico do calendário e nas O.S. antigas */}
+      {arquivadas.length > 0 && (
+        <div style={{ marginTop: 28 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 4 }}>
+            Equipes arquivadas
+          </div>
+          <p style={{ fontSize: 12, color: "#64748b", marginTop: 0, marginBottom: 12 }}>
+            Não aparecem para escolher em obra nem para receber serviço novo. Continuam nos dias do
+            calendário em que já tinham serviço, e nas Ordens de Serviço daqueles dias.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {arquivadas.map(eq => (
+              <div key={eq.id} style={{ background: "#f8fafc", borderRadius: 12, padding: "12px 18px", border: "1px solid #e2e8f0", borderLeft: `5px solid ${eq.cor}`, display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  <div style={{ fontWeight: 800, fontSize: 14, color: "#64748b" }}>{eq.nome}</div>
+                  <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 2 }}>
+                    {eq.integrantes.length > 0 ? eq.integrantes.join(" + ") : "sem integrantes"}
+                  </div>
+                </div>
+                <span style={{ fontSize: 11, color: "#94a3b8" }}>
+                  {servicosCount(eq.id)} serviço(s) no calendário
+                </span>
+                <button onClick={() => onReativar(eq.id)}
+                  style={{ background: "#dcfce7", color: "#166534", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Reativar</button>
+                {podeExcluir(eq) && (
+                  <button onClick={() => excluirDeVez(eq)} title="Sem serviço no calendário e sem obra: dá para apagar sem perder histórico"
+                    style={{ background: "#fee2e2", color: "#dc2626", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Excluir de vez</button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1216,6 +1265,7 @@ function novoAgendamento({ dia, equipeId, obra = null }) {
     periodo: "Dia todo",
     horaObs: "",                                        // complemento livre: "saída 5h30"
     descricao: "",
+    itens: [],                                          // ids dos itens da obra que vão ser montados
     ordem: Date.now(),
   };
 }
@@ -1230,6 +1280,7 @@ function normAgendamento(a) {
     periodo: PERIODOS.includes(a.periodo) ? a.periodo : "Dia todo",
     horaObs: a.horaObs || "",
     descricao: a.descricao || "",
+    itens: (Array.isArray(a.itens) ? a.itens : []).map(Number).filter(Number.isFinite),
     ordem: Number.isFinite(a.ordem) ? a.ordem : 0,
   };
 }
@@ -1239,6 +1290,110 @@ function tituloAgendamento(ag, obras) {
   const o = obras.find(x => x.id === ag.obraId);
   return o ? `#${o.numero} ${o.cliente}` : "(obra removida)";
 }
+// Os itens escolhidos para o serviço, resolvidos contra a obra. Item que sumiu da obra
+// (reimportação do PDF, por exemplo) simplesmente não aparece — o id fica guardado à toa.
+function itensDoAgendamento(ag, obras) {
+  if (!ag.obraId || !(ag.itens || []).length) return [];
+  const obra = obras.find(o => o.id === ag.obraId);
+  if (!obra) return [];
+  return (obra.itens || []).filter(i => ag.itens.includes(i.id));
+}
+// "#3 JANELA 4F · 2un · 1500×1200 · SALA"
+// Muito item vem do PDF com a descrição começando em "Observações:" — na folha impressa isso é
+// ruído, o que interessa é o nome da peça.
+function descricaoLimpa(i) {
+  return (i.descricao || "").replace(/^\s*(observa[çc][õo]es|obs)\s*:\s*/i, "").trim();
+}
+function descreveItem(i) {
+  const partes = [`#${i.id}`, i.tipo || descricaoLimpa(i).slice(0, 40) || "Item"];
+  const medida = (i.L && i.H) ? `${i.L}×${i.H}` : "";
+  const extras = [i.qtd ? `${i.qtd}un` : "", medida, i.localizacao || ""].filter(Boolean);
+  return partes.join(" ") + (extras.length ? " · " + extras.join(" · ") : "");
+}
+// Já instalado? Serve só para avisar no popup, não bloqueia a escolha.
+function itemInstalado(i) {
+  return !!((i.etapas || {})["Instalação"] || {}).feito;
+}
+
+// Popup de escolha dos itens que a equipe vai montar naquele dia.
+function ModalItensObra({ obra, agendamento, onConfirmar, onFechar }) {
+  const [sel, setSel] = useState(() => new Set(agendamento.itens || []));
+  const itens = obra ? (obra.itens || []) : [];
+  const toggle = (id) => setSel(prev => {
+    const n = new Set(prev);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
+  const th = { padding: "5px 6px", fontSize: 10, fontWeight: 800, color: "#94a3b8", textTransform: "uppercase", textAlign: "left", borderBottom: "1px solid #e2e8f0" };
+  const td = { padding: "5px 6px", fontSize: 12, borderBottom: "1px solid #f1f5f9", verticalAlign: "middle" };
+  const btn = { borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer", border: "1px solid #e2e8f0", background: "#fff", color: "#1a1a1a" };
+
+  return (
+    <Modal open title={`Itens de #${obra.numero} ${obra.cliente}`} onClose={onFechar} width={700}>
+      <div style={{ fontSize: 12, color: "#64748b", marginBottom: 10 }}>
+        Marque o que vai ser montado neste dia. Vai sair na Ordem de Serviço.
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+        <button onClick={() => setSel(new Set(itens.map(i => i.id)))} style={btn}>Marcar todos</button>
+        <button onClick={() => setSel(new Set())} style={btn}>Limpar</button>
+        <span style={{ marginLeft: "auto", alignSelf: "center", fontSize: 12, fontWeight: 700, color: "#1a1a1a" }}>
+          {sel.size} de {itens.length} marcado(s)
+        </span>
+      </div>
+      <div style={{ maxHeight: "50vh", overflowY: "auto", border: "1px solid #e2e8f0", borderRadius: 8 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th style={{ ...th, width: 30 }} />
+              <th style={th}>Item</th>
+              <th style={th}>Descrição</th>
+              <th style={{ ...th, textAlign: "center" }}>Qtd</th>
+              <th style={{ ...th, textAlign: "center" }}>Medida</th>
+              <th style={th}>Local</th>
+              <th style={{ ...th, textAlign: "center" }}>Feito</th>
+            </tr>
+          </thead>
+          <tbody>
+            {itens.map(i => {
+              const on = sel.has(i.id);
+              return (
+                <tr key={i.id} onClick={() => toggle(i.id)}
+                  style={{ background: on ? "#eff6ff" : "#fff", cursor: "pointer" }}>
+                  <td style={{ ...td, textAlign: "center" }}>
+                    <input type="checkbox" checked={on} onChange={() => toggle(i.id)}
+                      onClick={e => e.stopPropagation()} style={{ cursor: "pointer" }} />
+                  </td>
+                  <td style={{ ...td, fontWeight: 700, whiteSpace: "nowrap" }}>
+                    #{i.id} {i.tipo || ""}
+                  </td>
+                  <td style={{ ...td, color: "#475569" }}>{descricaoLimpa(i).slice(0, 60) || "—"}</td>
+                  <td style={{ ...td, textAlign: "center" }}>{i.qtd || "—"}</td>
+                  <td style={{ ...td, textAlign: "center", whiteSpace: "nowrap" }}>{(i.L && i.H) ? `${i.L}×${i.H}` : "—"}</td>
+                  <td style={{ ...td, color: "#64748b" }}>{i.localizacao || "—"}</td>
+                  <td style={{ ...td, textAlign: "center", whiteSpace: "nowrap" }}>
+                    <span style={{ fontWeight: 700, color: itemInstalado(i) ? "#10b981" : "#94a3b8" }}>
+                      {itemPercentual(i)}%
+                    </span>
+                    {itemInstalado(i) && <span title="Instalação já concluída" style={{ marginLeft: 4 }}>✓</span>}
+                  </td>
+                </tr>
+              );
+            })}
+            {itens.length === 0 && (
+              <tr><td colSpan={7} style={{ ...td, textAlign: "center", color: "#94a3b8", padding: 20 }}>Esta obra não tem itens importados.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 14, flexWrap: "wrap" }}>
+        <button onClick={onFechar} style={btn}>Cancelar</button>
+        <button onClick={() => onConfirmar([...sel].sort((a, b) => a - b))}
+          style={{ ...btn, background: "#10b981", color: "#fff", border: "none" }}>Confirmar</button>
+      </div>
+    </Modal>
+  );
+}
+
 // Dia da semana de "YYYY-MM-DD" sem cair na armadilha de fuso do new Date(string), que é UTC.
 function dowDe(dStr) {
   const [y, m, d] = dStr.split("-");
@@ -1259,9 +1414,10 @@ function diasUteisEntre(de, ate) {
 }
 
 // Um serviço já agendado. Campos iguais aos da planilha, mais o botão de repetir nos próximos dias.
-function CardAgendamento({ ag, obras, cor, onChange, onExcluir, onRepetir, onAbrirObra, onArrastar }) {
+function CardAgendamento({ ag, obras, cor, onChange, onPedirRemocao, onRepetir, onAbrirObra, onArrastar, onEscolherItens }) {
   const [ate, setAte] = useState("");
   const obra = ag.obraId ? obras.find(o => o.id === ag.obraId) : null;
+  const itensEscolhidos = itensDoAgendamento(ag, obras);
   const inp = { border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 12, color: "#1e293b", width: "100%", boxSizing: "border-box" };
   return (
     <div draggable
@@ -1280,7 +1436,7 @@ function CardAgendamento({ ag, obras, cor, onChange, onExcluir, onRepetir, onAbr
             onChange={e => onChange({ ...ag, titulo: e.target.value })}
             style={{ ...inp, fontWeight: 800, fontSize: 13, border: "1px dashed #c9a227", background: "#fffbeb", flex: 1 }} />
         )}
-        <button onClick={() => onExcluir(ag.id)} title="Remover do dia"
+        <button onClick={() => onPedirRemocao(ag)} title="Remover do dia"
           style={{ marginLeft: "auto", background: "#fee2e2", color: "#dc2626", border: "none", borderRadius: 6, padding: "2px 9px", fontWeight: 800, fontSize: 13, cursor: "pointer" }}>×</button>
       </div>
 
@@ -1304,6 +1460,22 @@ function CardAgendamento({ ag, obras, cor, onChange, onExcluir, onRepetir, onAbr
         <input value={ag.referencia} placeholder="Referência" onChange={e => onChange({ ...ag, referencia: e.target.value })}
           style={{ ...inp, flex: 1, minWidth: 110 }} />
       </div>
+
+      {obra && (
+        <div style={{ display: "flex", gap: 6, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <button onClick={() => onEscolherItens(ag)}
+            title="Escolher os itens da obra que serão montados neste dia"
+            style={{ background: itensEscolhidos.length ? "#eff6ff" : "#fff", color: "#1a1a1a", border: "1px solid " + (itensEscolhidos.length ? "#bfdbfe" : "#e2e8f0"), borderRadius: 999, padding: "3px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
+            🔩 Itens ({itensEscolhidos.length})
+          </button>
+          <div style={{ fontSize: 11, color: itensEscolhidos.length ? "#475569" : "#94a3b8", alignSelf: "center", flex: 1, minWidth: 120 }}>
+            {itensEscolhidos.length
+              ? itensEscolhidos.slice(0, 3).map(i => `#${i.id} ${i.tipo || ""}`.trim()).join(" · ")
+                + (itensEscolhidos.length > 3 ? ` +${itensEscolhidos.length - 3}` : "")
+              : "nenhum item escolhido"}
+          </div>
+        </div>
+      )}
 
       <textarea value={ag.descricao} placeholder="Descrição do serviço / anotações" rows={2}
         onChange={e => onChange({ ...ag, descricao: e.target.value })}
@@ -1330,6 +1502,8 @@ function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar,
   // arrastar da lista de obras).
   const arrastando = useRef(null);          // { obraId } | { avulso } | { agId }
   const [alvo, setAlvo] = useState(null);   // equipe sob o cursor
+  const [escolhendoItens, setEscolhendoItens] = useState(null);   // agendamento com o popup de itens aberto
+  const [confirmarRemocao, setConfirmarRemocao] = useState(null); // agendamento aguardando confirmação
 
   const [y, m, d] = dia.split("-");
   const dow = DIAS_SEMANA_LONGO[dowDe(dia)];
@@ -1343,6 +1517,9 @@ function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar,
 
   const doEquipe = (eqId) => agendaDoDia.filter(a => a.equipeId === eqId).sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
   const semEquipe = agendaDoDia.filter(a => !equipes.some(e => e.id === a.equipeId));
+  // Equipe arquivada não recebe serviço novo, mas continua na tela do dia em que já tem um —
+  // é isso que preserva o histórico de quem fez o quê.
+  const equipesDoDia = equipes.filter(e => !e.arquivada || doEquipe(e.id).length > 0);
 
   // Último dia antes deste que tem alguma coisa marcada — é o que "copiar do dia anterior" traz.
   const diaAnterior = agenda.filter(a => a.dia < dia).map(a => a.dia).sort().pop() || null;
@@ -1359,7 +1536,14 @@ function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar,
       return;
     }
     const obra = drag.obraId ? obras.find(o => o.id === drag.obraId) : null;
-    onSalvar(novoAgendamento({ dia, equipeId, obra }));
+    criar(equipeId, obra);
+  }
+
+  // Cria o serviço e, se for de obra com itens, já abre o popup para escolher o que será montado.
+  function criar(equipeId, obra) {
+    const ag = novoAgendamento({ dia, equipeId, obra });
+    onSalvar(ag);
+    if (obra && (obra.itens || []).length) setEscolhendoItens(ag);
   }
 
   function copiarDoDiaAnterior() {
@@ -1435,41 +1619,49 @@ function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar,
               Cadastre as equipes em <b>Equipes</b> para distribuir os serviços do dia.
             </div>
           )}
-          {equipes.map(eq => {
+          {equipesDoDia.map(eq => {
             const lista = doEquipe(eq.id);
             const sobre = alvo === eq.id;
+            const arq = !!eq.arquivada;
             return (
               <div key={eq.id}
-                onDragOver={e => { e.preventDefault(); setAlvo(eq.id); }}
+                onDragOver={e => { if (!arq) { e.preventDefault(); setAlvo(eq.id); } }}
                 onDragLeave={() => setAlvo(a => a === eq.id ? null : a)}
-                onDrop={e => { e.preventDefault(); soltarEm(eq.id); }}
-                style={{ background: sobre ? eq.cor + "10" : "#fff", border: "1px " + (sobre ? "dashed " : "solid ") + (sobre ? eq.cor : "#e2e8f0"), borderRadius: 12, padding: 12 }}>
+                onDrop={e => { if (arq) return; e.preventDefault(); soltarEm(eq.id); }}
+                style={{ background: sobre ? eq.cor + "10" : (arq ? "#f8fafc" : "#fff"), border: "1px " + (sobre ? "dashed " : "solid ") + (sobre ? eq.cor : "#e2e8f0"), borderRadius: 12, padding: 12, opacity: arq ? 0.85 : 1 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                   <span style={{ width: 10, height: 10, borderRadius: "50%", background: eq.cor, display: "inline-block" }} />
                   <span style={{ fontWeight: 800, fontSize: 14, color: "#1e293b" }}>{eq.nome}</span>
+                  {arq && (
+                    <span title="Equipe arquivada — fica no histórico, mas não recebe serviço novo"
+                      style={{ background: "#e2e8f0", color: "#475569", borderRadius: 999, padding: "1px 8px", fontSize: 10, fontWeight: 800, textTransform: "uppercase" }}>arquivada</span>
+                  )}
                   {eq.integrantes.length > 0 && <span style={{ fontSize: 12, color: "#64748b" }}>— {eq.integrantes.join(" + ")}</span>}
                   <span style={{ fontSize: 11, color: "#94a3b8" }}>{lista.length} serviço(s)</span>
-                  <select value="" onChange={e => {
-                      const v = e.target.value;
-                      if (!v) return;
-                      const obra = v === "__avulso" ? null : obras.find(o => o.id === v);
-                      onSalvar(novoAgendamento({ dia, equipeId: eq.id, obra }));
-                    }}
-                    style={{ marginLeft: "auto", border: "1px dashed #c9a227", color: "#c9a227", background: "#fffbeb", borderRadius: 8, padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
-                    <option value="">+ Adicionar</option>
-                    <option value="__avulso">🔧 Atividade avulsa</option>
-                    {ativas.map(o => <option key={o.id} value={o.id}>#{o.numero} {o.cliente}</option>)}
-                  </select>
+                  {!arq && (
+                    <select value="" onChange={e => {
+                        const v = e.target.value;
+                        if (!v) return;
+                        criar(eq.id, v === "__avulso" ? null : obras.find(o => o.id === v));
+                        e.target.value = "";
+                      }}
+                      style={{ marginLeft: "auto", border: "1px dashed #c9a227", color: "#c9a227", background: "#fffbeb", borderRadius: 8, padding: "4px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                      <option value="">+ Adicionar</option>
+                      <option value="__avulso">🔧 Atividade avulsa</option>
+                      {ativas.map(o => <option key={o.id} value={o.id}>#{o.numero} {o.cliente}</option>)}
+                    </select>
+                  )}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {lista.map(ag => (
                     <CardAgendamento key={ag.id} ag={ag} obras={obras} cor={eq.cor}
-                      onChange={onSalvar} onExcluir={onExcluir} onRepetir={repetir} onAbrirObra={onAbrirObra}
-                      onArrastar={() => { arrastando.current = { agId: ag.id }; }} />
+                      onChange={onSalvar} onPedirRemocao={setConfirmarRemocao} onRepetir={repetir} onAbrirObra={onAbrirObra}
+                      onArrastar={() => { arrastando.current = { agId: ag.id }; }}
+                      onEscolherItens={setEscolhendoItens} />
                   ))}
                   {lista.length === 0 && (
                     <div style={{ fontSize: 12, color: "#94a3b8", fontStyle: "italic" }}>
-                      Solte uma obra aqui para dar serviço a esta equipe.
+                      {arq ? "Equipe arquivada — sem serviço neste dia." : "Solte uma obra aqui para dar serviço a esta equipe."}
                     </div>
                   )}
                 </div>
@@ -1484,14 +1676,51 @@ function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar,
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {semEquipe.map(ag => (
                   <CardAgendamento key={ag.id} ag={ag} obras={obras} cor="#dc2626"
-                    onChange={onSalvar} onExcluir={onExcluir} onRepetir={repetir} onAbrirObra={onAbrirObra}
-                    onArrastar={() => { arrastando.current = { agId: ag.id }; }} />
+                    onChange={onSalvar} onPedirRemocao={setConfirmarRemocao} onRepetir={repetir} onAbrirObra={onAbrirObra}
+                    onArrastar={() => { arrastando.current = { agId: ag.id }; }}
+                    onEscolherItens={setEscolhendoItens} />
                 ))}
               </div>
             </div>
           )}
         </div>
       </div>
+
+      {/* Escolha dos itens que a equipe vai montar */}
+      {escolhendoItens && (() => {
+        const atual = agendaDoDia.find(a => a.id === escolhendoItens.id) || escolhendoItens;
+        const obra = obras.find(o => o.id === atual.obraId);
+        if (!obra) return null;
+        return (
+          <ModalItensObra obra={obra} agendamento={atual}
+            onFechar={() => setEscolhendoItens(null)}
+            onConfirmar={(ids) => { onSalvar({ ...atual, itens: ids }); setEscolhendoItens(null); }} />
+        );
+      })()}
+
+      {/* Remover serviço: some com a descrição e os itens, então pergunta antes */}
+      <Modal open={!!confirmarRemocao} title="Remover serviço do dia" onClose={() => setConfirmarRemocao(null)} width={440}>
+        {confirmarRemocao && (
+          <>
+            <div style={{ fontSize: 13, color: "#1e293b", fontWeight: 700, marginBottom: 4 }}>
+              {tituloAgendamento(confirmarRemocao, obras)}
+            </div>
+            <div style={{ fontSize: 12, color: "#64748b", marginBottom: 14 }}>
+              {(equipes.find(e => e.id === confirmarRemocao.equipeId) || {}).nome || "Sem equipe"}
+              {" · "}{fmtDate(confirmarRemocao.dia)}{" · "}{confirmarRemocao.periodo}
+              <div style={{ marginTop: 8, color: "#dc2626" }}>
+                A descrição, a referência e os itens escolhidos são apagados junto. Não dá para desfazer.
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+              <button onClick={() => setConfirmarRemocao(null)}
+                style={{ background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Cancelar</button>
+              <button onClick={() => { onExcluir(confirmarRemocao.id); setConfirmarRemocao(null); }}
+                style={{ background: "#dc2626", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Remover</button>
+            </div>
+          </>
+        )}
+      </Modal>
     </div>
   );
 }
@@ -2059,7 +2288,9 @@ function OrdemServicoPrint({ agenda, obras, equipes, inicio, fim, onBack }) {
               </tr>
             </thead>
             <tbody>
-              {g.linhas.map((ag, i) => (
+              {g.linhas.map((ag, i) => {
+                const itens = itensDoAgendamento(ag, obras);
+                return (
                 <tr key={ag.id} style={{ background: i % 2 ? "#f8fafc" : "#fff" }}>
                   <td style={{ ...td, whiteSpace: "nowrap", fontWeight: 700 }}>{fmtDiaSemana(ag.dia)}</td>
                   <td style={{ ...td, fontWeight: 600 }}>{tituloAgendamento(ag, obras)}</td>
@@ -2068,9 +2299,22 @@ function OrdemServicoPrint({ agenda, obras, equipes, inicio, fim, onBack }) {
                   <td style={{ ...td, whiteSpace: "nowrap" }}>
                     {ag.periodo}{ag.horaObs ? ` · ${ag.horaObs}` : ""}
                   </td>
-                  <td style={td}>{ag.descricao || "—"}</td>
+                  <td style={td}>
+                    {ag.descricao || (itens.length ? "" : "—")}
+                    {itens.length > 0 && (
+                      <div style={{ marginTop: ag.descricao ? 5 : 0 }}>
+                        <div style={{ fontSize: 9.5, fontWeight: 800, color: "#475569", textTransform: "uppercase", letterSpacing: 0.3 }}>
+                          Itens a montar ({itens.length})
+                        </div>
+                        {itens.map(it => (
+                          <div key={it.id} style={{ fontSize: 10.5, color: "#1e293b" }}>• {descreveItem(it)}</div>
+                        ))}
+                      </div>
+                    )}
+                  </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
 
@@ -2894,15 +3138,22 @@ export default function App() {
     dbUpsertEquipe(eq).catch(err => showError("Erro ao salvar equipe: " + err.message));
   }, []);
 
-  // Se a gravação falhar a equipe volta para a lista. Antes ela sumia da tela de
-  // qualquer jeito e o usuário só descobria no F5, quando ela reaparecia sozinha.
-  const handleDeleteEquipe = useCallback((id) => {
+  // Arquivar em vez de excluir: a linha continua no banco, então os serviços já lançados no
+  // calendário seguem achando a equipe (nome, cor, composição) e a O.S. antiga sai igual.
+  // Se a gravação falhar a equipe volta como estava — antes ela sumia da tela de qualquer
+  // jeito e o usuário só descobria no F5, quando ela reaparecia sozinha.
+  const handleArquivarEquipe = useCallback((id) => {
     let anterior = [];
-    setEquipes(prev => { anterior = prev; return prev.filter(e => e.id !== id); });
-    dbDeleteEquipe(id)
+    let alvo = null;
+    setEquipes(prev => {
+      anterior = prev;
+      alvo = prev.find(e => e.id === id);
+      return prev.map(e => e.id === id ? { ...e, arquivada: true } : e);
+    });
+    if (!alvo) return;
+    dbUpsertEquipe({ ...alvo, arquivada: true })
       .then(() => {
-        // O confirm promete tirar a equipe das obras; até aqui isso nunca acontecia
-        // e o id ficava pendurado em obra.equipes para sempre.
+        // O confirm promete tirar a equipe das obras onde é líder.
         setObras(prev => prev.map(o => {
           if (!(o.equipes || []).includes(id)) return o;
           const limpa = { ...o, equipes: o.equipes.filter(e => e !== id) };
@@ -2912,9 +3163,34 @@ export default function App() {
       })
       .catch(err => {
         setEquipes(anterior);
-        showError("Erro ao excluir equipe: " + err.message);
+        showError("Erro ao arquivar equipe (rodou a migration_equipes_arquivada.sql?): " + err.message);
       });
   }, [persistObra]);
+
+  // Exclusão de verdade, só oferecida para equipe arquivada sem serviço e sem obra.
+  const handleDeleteEquipe = useCallback((id) => {
+    let anterior = [];
+    setEquipes(prev => { anterior = prev; return prev.filter(e => e.id !== id); });
+    dbDeleteEquipe(id).catch(err => {
+      setEquipes(anterior);
+      showError("Erro ao excluir equipe: " + err.message);
+    });
+  }, []);
+
+  const handleReativarEquipe = useCallback((id) => {
+    let anterior = [];
+    let alvo = null;
+    setEquipes(prev => {
+      anterior = prev;
+      alvo = prev.find(e => e.id === id);
+      return prev.map(e => e.id === id ? { ...e, arquivada: false } : e);
+    });
+    if (!alvo) return;
+    dbUpsertEquipe({ ...alvo, arquivada: false }).catch(err => {
+      setEquipes(anterior);
+      showError("Erro ao reativar equipe: " + err.message);
+    });
+  }, []);
 
   const cronoTimer = useRef({});
   const handleSaveCronograma = useCallback((cr) => {
@@ -3041,7 +3317,8 @@ export default function App() {
                 onSelectObra={openObra}
                 onEmitirOS={(inicio, fim) => navTo({ type: "osPrint", inicio, fim })} />
             : view.type === "equipes"
-              ? <EquipesView equipes={equipes} onSalvar={handleSaveEquipe} onExcluir={handleDeleteEquipe} obras={obras} />
+              ? <EquipesView equipes={equipes} onSalvar={handleSaveEquipe} onArquivar={handleArquivarEquipe}
+                  onReativar={handleReativarEquipe} onExcluir={handleDeleteEquipe} obras={obras} agenda={agenda} />
               : view.type === "cronogramas"
                 ? <CronogramasView cronogramas={cronogramas} obras={obras}
                     onNovo={(titulo, obra) => { const cr = novoCronograma(titulo, obra); handleSaveCronograma(cr); navTo({ type: "cronograma", id: cr.id }); }}

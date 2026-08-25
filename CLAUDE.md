@@ -37,6 +37,8 @@ supabase/
   schema.sql                 Tabelas base + RLS + bucket de Storage.
   migration_ordens.sql       Tabela `ordens` — histórica, sem tela (ver Decisões).
   migration_cronogramas.sql  Tabela `cronogramas` (rodar separado).
+  migration_agenda.sql       Tabela `agenda` — serviços do dia (rodar separado).
+  migration_equipes_arquivada.sql  Coluna `equipes.arquivada` (rodar separado).
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF.
   SETUP.md                   Passo a passo de criação do projeto Supabase.
 docs/
@@ -86,9 +88,9 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 | Tabela | PK | Colunas | `data` contém |
 |---|---|---|---|
 | `obras` | `id` (= nº da proposta, texto) | `numero`, `cliente`, `updated_at`, `data` | a obra inteira (itens, etapas, financeiro, compras) |
-| `equipes` | `id` | `nome`, `integrantes` (jsonb), `cor` | — (essa não usa `data`) |
+| `equipes` | `id` | `nome`, `integrantes` (jsonb), `cor`, `arquivada` | — (essa não usa `data`) |
 | `ordens` | `id` | `numero`, `equipe_id`, `periodo_inicio`, `periodo_fim`, `data` | **histórica** — nenhum código lê ou grava (ver Decisões) |
-| `agenda` | `id` | `dia`, `equipe_id`, `obra_id`, `updated_at`, `data` | o serviço do dia (obra × equipe × período) |
+| `agenda` | `id` | `dia`, `equipe_id`, `obra_id`, `updated_at`, `data` | o serviço do dia: obra (ou avulso) × equipe × período + endereço, referência, descrição e `itens` (ids dos itens da obra que serão montados) |
 | `cronogramas` | `id` | `titulo`, `obra_id`, `updated_at`, `data` | o cronograma inteiro (tasks) |
 | `profiles` | `id` (= auth.users) | `nome`, `papel` | — |
 | `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (**vazia**, fundação para o futuro) |
@@ -195,6 +197,13 @@ SELECT, então o DELETE muitas vezes nem era enviado e a função resolvia como 
 sumia da tela e voltava no F5. Agora são `upsertEquipe`/`deleteEquipe`; o delete pede as linhas de
 volta (`.select("id")`) e **falha se o banco não apagou nada**, porque um DELETE barrado por RLS
 volta 204 sem erro. Se a gravação falhar, a equipe é restaurada na lista em vez de sumir.
+
+**Excluir equipe virou arquivar.** Apagar a linha fazia os serviços já lançados na agenda perderem
+a equipe e caírem na faixa "Sem equipe" — sumia o registro de quem fez o quê no mês passado. Hoje o
+botão grava `arquivada: true`: a equipe sai das escolhas (líder da obra, "+ Adicionar" do dia) mas
+continua no banco, então o dia antigo e a O.S. daquele dia seguem mostrando nome, cor e composição.
+Ela reaparece na tela do dia só onde já tem serviço, com selo "arquivada" e sem receber serviço
+novo. `deleteEquipe` continua na `api.js` para exclusão manual, mas **nenhuma tela chama**.
 
 ## Armadilhas conhecidas
 
