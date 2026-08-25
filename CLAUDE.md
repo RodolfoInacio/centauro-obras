@@ -91,7 +91,7 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 | `equipes` | `id` | `nome`, `integrantes` (jsonb), `cor`, `arquivada` | — (essa não usa `data`) |
 | `ordens` | `id` | `numero`, `equipe_id`, `periodo_inicio`, `periodo_fim`, `data` | **histórica** — nenhum código lê ou grava (ver Decisões) |
 | `agenda` | `id` | `dia`, `equipe_id`, `obra_id`, `updated_at`, `data` | o serviço do dia: obra (ou avulso) × equipe × período + endereço, referência, descrição e `itens` (ids dos itens da obra que serão montados) |
-| `cronogramas` | `id` | `titulo`, `obra_id`, `updated_at`, `data` | o cronograma inteiro (tasks) |
+| `cronogramas` | `id` | `titulo`, `obra_id`, `updated_at`, `data` | o cronograma inteiro (tasks) + `predecessorasMacro` (ids de outros cronogramas) |
 | `profiles` | `id` (= auth.users) | `nome`, `papel` | — |
 | `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (**vazia**, fundação para o futuro) |
 
@@ -137,7 +137,8 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   `guardNav`, que intercepta a saída se houver cronograma com gravação pendente.
   Tipos de view: `dashboard`, `obrasPasta` (`pasta: "andamento"|"concluidas"`), `gantt` (`obraId`),
   `print` (`obraId`), `calendar`, `equipes`, `osPrint` (`inicio`, `fim`),
-  `cronogramas`, `cronograma` (`id`), `financeiro`.
+  `cronogramas` (o **macro**: todas as obras, uma por linha), `cronograma` (`id`, o micro de uma
+  obra), `financeiro`.
 - **Persistência**: o estado local muda na hora; a gravação é **debounced em 700 ms por entidade**
   (`persistObra`, `handleSaveCronograma`, `handleSaveAgendamento`). Equipes gravam imediatamente,
   uma por vez (`upsertEquipe`/`deleteEquipe`). O cronograma é o único com indicador de "não salvo"
@@ -191,6 +192,31 @@ emite direto (botão no mês, com escolha de período, e no dia aberto), gerando
 via `OrdemServicoPrint`. A O.S. **não é salva nem numerada** — o registro é a própria agenda, então
 não há como a folha e o calendário divergirem. A tabela `ordens` continua no banco com as O.S.
 antigas, mas nenhum código a lê; para consultar, é ir no Supabase.
+
+**Dias úteis do cronograma são regra da empresa, não do cronograma.** O calendário era seg-**sáb**
+e cada cronograma gravava sua cópia de `diasUteis` no `jsonb` — mas nunca houve tela para editá-la,
+então era dado morto que só serviria para fazer cronograma antigo e novo discordarem. Hoje
+`normConfig` (`cronograma.js`) descarta o valor persistido e impõe o `CONFIG_PADRAO` (seg-sex,
+9h/dia). Consequência aceita: cronogramas criados antes esticam ao abrir. Se um dia entrar
+calendário por obra ou feriado, o ponto único de mudança é `ehDiaUtil` + `normConfig`.
+
+**O % do grupo é derivado, e defini-lo significa escrever nas folhas.** O percentual de um resumo é
+a média das folhas ponderada pelas **horas de duração** (`percentPonderado`) — nunca é gravado.
+Para o escritório poder dizer "Suprimentos está 50%", `distribuirPercent` consome o peso na ordem
+da lista: 50% de (Metais 4d + Acessórios 2d + Vidros 3d) vira 100/25/0, e não 50/50/50. Descartado
+o rateio uniforme: ele ignora que a obra anda em sequência e mostraria Vidros começando junto com
+Metais. O arredondamento por folha é corrigido na folha de corte, para o grupo fechar exatamente no
+valor pedido.
+
+**Macro e micro leem a mesma verdade: as predecessoras.** A tela `cronogramas` deixou de ser uma
+lista de cards e virou o Gantt macro (uma linha por cronograma, `agendarMacro` em ordem topológica).
+Ligar "obra B só começa depois da obra A" grava `predecessorasMacro` na obra B; o início efetivo é
+**calculado**, nunca gravado — o editor micro recebe `dataBaseEfetiva` como prop e ignora a
+`dataBase` própria. Gravar a data derivada teria criado a mesma classe de bug da O.S. antiga: duas
+fontes de verdade divergindo em silêncio. A coluna Pred. aceita **números de linha** (ergonomia do
+MS Project) mas persiste **ids**, e a lista é ordenada por criação (não pelo `updated_at desc` do
+banco), senão os números mudariam sozinhos. Ciclo não trava: as arestas que o fecham são ignoradas
+e a tela avisa.
 
 **Equipe é gravada uma por vez.** `saveEquipes` regravava a lista inteira e engolia o erro do
 SELECT, então o DELETE muitas vezes nem era enviado e a função resolvia como sucesso — a equipe

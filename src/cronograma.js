@@ -9,9 +9,15 @@ export const CONFIG_PADRAO = {
   horasDia: 9,
   expediente: ["08:00", "18:00"],
   almoco: ["12:00", "13:00"],
-  diasUteis: [1, 2, 3, 4, 5, 6], // getDay(): 0=Dom..6=Sáb → seg a sáb
-  dataBase: "",                  // "YYYY-MM-DD" (se vazio, usa hoje)
+  diasUteis: [1, 2, 3, 4, 5], // getDay(): 0=Dom..6=Sáb → seg a sex
+  dataBase: "",               // "YYYY-MM-DD" ou "YYYY-MM-DDTHH:mm" (se vazio, usa hoje)
 };
+
+// Dias úteis são regra da empresa, não do cronograma: o valor gravado nos cronogramas antigos
+// (que incluía sábado) é descartado — vale sempre o CONFIG_PADRAO.
+export function normConfig(config) {
+  return { ...CONFIG_PADRAO, ...(config || {}), diasUteis: CONFIG_PADRAO.diasUteis };
+}
 
 // ── datas ──
 function hm(str) { const [h, m] = (str || "00:00").split(":").map(Number); return h * 60 + (m || 0); }
@@ -28,6 +34,12 @@ function atMinutes(date, minutes) {
 export function dayKey(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
+// "YYYY-MM-DDTHH:mm" no fuso local — formato aceito por parseDT e por <input type="datetime-local">
+export function toLocalISO(date) {
+  if (!date) return "";
+  const p = n => String(n).padStart(2, "0");
+  return `${dayKey(date)}T${p(date.getHours())}:${p(date.getMinutes())}`;
+}
 export function fmtDataHora(date) {
   if (!date) return "—";
   const dd = String(date.getDate()).padStart(2, "0");
@@ -43,7 +55,7 @@ function intervalosDia(config) {
   if (config.almoco && lS > eS && lE < eE) return [[eS, lS], [lE, eE]];
   return [[eS, eE]];
 }
-export function ehDiaUtil(date, config) { return config.diasUteis.includes(date.getDay()); }
+export function ehDiaUtil(date, config) { return normConfig(config).diasUteis.includes(date.getDay()); }
 
 function proximoInstanteUtil(d, config) {
   let cur = new Date(d);
@@ -151,13 +163,61 @@ export function renumerarIds(tasks) {
   }));
 }
 
+// Média ponderada pelas horas de duração — a regra do rollup de % dos resumos.
+export function percentPonderado(folhas, config) {
+  const cfg = normConfig(config);
+  const totH = folhas.reduce((a, k) => a + duracaoParaHoras(k, cfg), 0);
+  if (totH <= 0) return 0;
+  const v = Math.round(folhas.reduce((a, k) => a + duracaoParaHoras(k, cfg) * (Number(k.percent) || 0), 0) / totH);
+  return Math.max(0, Math.min(100, v));
+}
+
+// Distribui um percentual-alvo entre as folhas descendentes de `i`, consumindo o peso
+// (horas de duração) na ordem da lista: as primeiras completam antes de a próxima começar.
+// Devolve { [índice da task no array]: novoPercent }.
+export function distribuirPercent(tasks, i, alvo, config) {
+  const cfg = normConfig(config);
+  const alvoC = Math.max(0, Math.min(100, Math.round(Number(alvo) || 0)));
+  const idxFolhas = descendentesDe(tasks, i).filter(j => !ehResumo(tasks, j));
+  const mapa = {};
+  if (!idxFolhas.length) return mapa;
+
+  const pesos = idxFolhas.map(j => duracaoParaHoras(tasks[j], cfg));
+  const total = pesos.reduce((a, b) => a + b, 0);
+  if (total <= 0) { idxFolhas.forEach(j => { mapa[j] = alvoC; }); return mapa; }
+
+  let restante = total * (alvoC / 100);
+  let corte = -1; // posição (em idxFolhas) da folha parcialmente preenchida
+  idxFolhas.forEach((j, k) => {
+    const p = pesos[k];
+    if (p <= 0) { mapa[j] = restante > 0 ? 100 : 0; return; } // marco acompanha a frente de trabalho
+    if (restante >= p) { mapa[j] = 100; restante -= p; }
+    else if (restante > 0) { mapa[j] = Math.round(restante / p * 100); corte = k; restante = 0; }
+    else mapa[j] = 0;
+  });
+
+  // Fechamento exato: o arredondamento por folha pode deixar o grupo em 49% com alvo 50%.
+  // A folha de corte é a única com valor fracionário — é nela que a diferença é absorvida.
+  if (corte >= 0) {
+    for (let g = 0; g < 3; g++) {
+      const atual = percentPonderado(idxFolhas.map(j => ({ ...tasks[j], percent: mapa[j] })), cfg);
+      if (atual === alvoC) break;
+      const jCorte = idxFolhas[corte];
+      const novo = Math.max(0, Math.min(100, Math.round(mapa[jCorte] + (alvoC - atual) * total / pesos[corte])));
+      if (novo === mapa[jCorte]) break;
+      mapa[jCorte] = novo;
+    }
+  }
+  return mapa;
+}
+
 // Retorna { [taskId]: { inicio, termino, percent, durDias, isSummary } }
 export function agendar(tasks, config) {
-  const cfg = { ...CONFIG_PADRAO, ...(config || {}) };
-  const base = proximoInstanteUtil(
-    cfg.dataBase ? parseDT(cfg.dataBase + "T" + cfg.expediente[0]) : new Date(new Date().setHours(hm(cfg.expediente[0]) / 60 | 0, 0, 0, 0)),
-    cfg
-  );
+  const cfg = normConfig(config);
+  const raw = cfg.dataBase
+    ? (cfg.dataBase.includes("T") ? cfg.dataBase : cfg.dataBase + "T" + cfg.expediente[0])
+    : dayKey(new Date()) + "T" + cfg.expediente[0];
+  const base = proximoInstanteUtil(parseDT(raw), cfg);
   const summary = tasks.map((_, i) => ehResumo(tasks, i));
   const sched = {};
 
@@ -200,14 +260,71 @@ export function agendar(tasks, config) {
     if (summary[i]) {
       const leaves = [];
       for (let j = i + 1; j < tasks.length && tasks[j].nivel > tasks[i].nivel; j++) if (!summary[j]) leaves.push(tasks[j]);
-      const totH = leaves.reduce((a, k) => a + duracaoParaHoras(k, cfg), 0);
-      percent = totH > 0 ? Math.round(leaves.reduce((a, k) => a + duracaoParaHoras(k, cfg) * (Number(k.percent) || 0), 0) / totH) : 0;
-      percent = Math.max(0, Math.min(100, percent));
+      percent = percentPonderado(leaves, cfg);
     } else percent = Math.max(0, Math.min(100, Math.round(Number(t.percent) || 0)));
     const durDias = Math.round(minutosUteisEntre(s.inicio, s.termino, cfg) / (cfg.horasDia * 60) * 100) / 100;
     out[t.id] = { inicio: s.inicio, termino: s.termino, percent, durDias, isSummary: summary[i] };
   }
   return out;
+}
+
+// ── macro: obra × obra ──
+// Cada cronograma é uma barra. `predecessorasMacro` (ids de cronogramas) empurram o início do
+// sucessor para o término do predecessor (Fim→Início), como as predecessoras do micro.
+// Devolve { mapa: { [cronoId]: {...} }, ciclo: [ids que participam de dependência circular] }.
+export function agendarMacro(cronogramas) {
+  const lista = cronogramas || [];
+  const porId = {};
+  lista.forEach(c => { porId[c.id] = c; });
+
+  // arestas válidas (descarta auto-referência e cronogramas já excluídos)
+  const preds = {};
+  lista.forEach(c => { preds[c.id] = (c.predecessorasMacro || []).filter(p => p !== c.id && porId[p]); });
+
+  // ordem topológica (Kahn) — assim `agendar` roda uma única vez por cronograma
+  const grau = {}, sucs = {};
+  lista.forEach(c => { grau[c.id] = preds[c.id].length; sucs[c.id] = []; });
+  lista.forEach(c => preds[c.id].forEach(p => sucs[p].push(c.id)));
+  const fila = lista.filter(c => grau[c.id] === 0).map(c => c.id);
+  const ordem = [];
+  while (fila.length) {
+    const id = fila.shift();
+    ordem.push(id);
+    for (const s of sucs[id]) if (--grau[s] === 0) fila.push(s);
+  }
+  // o que sobrou está num ciclo: entra no fim, com as arestas do ciclo desprezadas
+  const resolvidos = new Set(ordem);
+  const ciclo = lista.filter(c => !resolvidos.has(c.id)).map(c => c.id);
+  ciclo.forEach(id => ordem.push(id));
+
+  const mapa = {};
+  for (const id of ordem) {
+    const c = porId[id];
+    const cfgBase = normConfig(c.config);
+    let herdado = null, origemId = null;
+    for (const p of preds[id]) {
+      const m = mapa[p];
+      if (m && m.termino && (!herdado || m.termino > herdado)) { herdado = m.termino; origemId = p; }
+    }
+    const dataBaseEfetiva = herdado ? toLocalISO(proximoInstanteUtil(herdado, cfgBase)) : (cfgBase.dataBase || "");
+    const cfg = { ...cfgBase, dataBase: dataBaseEfetiva };
+    const tasks = c.tasks || [];
+    const sched = agendar(tasks, cfg);
+    let inicio = null, termino = null;
+    for (const t of tasks) {
+      const s = sched[t.id]; if (!s) continue;
+      if (!inicio || s.inicio < inicio) inicio = s.inicio;
+      if (!termino || s.termino > termino) termino = s.termino;
+    }
+    const folhas = tasks.filter((_, i) => !ehResumo(tasks, i));
+    mapa[id] = {
+      inicio, termino,
+      percent: percentPonderado(folhas, cfg),
+      durDias: Math.round(minutosUteisEntre(inicio, termino, cfg) / (cfg.horasDia * 60) * 100) / 100,
+      dataBaseEfetiva, origemId,
+    };
+  }
+  return { mapa, ciclo };
 }
 
 // Texto da duração para exibir na grade (resumo = calculado em dias; folha = valor informado)
@@ -218,4 +335,10 @@ export function textoDuracao(t, sc) {
   }
   const v = Number(t.durValor) || 0;
   return `${v.toString().replace(".", ",")} ${t.durUnid === "hrs" ? "hrs" : "dias"}`;
+}
+
+// Duração em dias úteis, para as linhas do macro (que não têm `durValor` próprio).
+export function textoDias(n) {
+  const v = Number(n) || 0;
+  return `${(Number.isInteger(v) ? v : v.toFixed(2)).toString().replace(".", ",")} dias`;
 }

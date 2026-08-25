@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from "react";
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
 import { fetchObras, upsertObra, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento } from "./api";
-import { agendar, CONFIG_PADRAO, fmtDataHora, textoDuracao, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis } from "./cronograma";
+import { agendar, agendarMacro, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent } from "./cronograma";
 import Modal from "./Modal";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
@@ -1305,10 +1305,10 @@ function descricaoLimpa(i) {
   return (i.descricao || "").replace(/^\s*(observa[çc][õo]es|obs)\s*:\s*/i, "").trim();
 }
 function descreveItem(i) {
-  const partes = [`#${i.id}`, i.tipo || descricaoLimpa(i).slice(0, 40) || "Item"];
+  const nome = [i.tipo, descricaoLimpa(i)].filter(Boolean).join("  ") || "Item";
   const medida = (i.L && i.H) ? `${i.L}×${i.H}` : "";
   const extras = [i.qtd ? `${i.qtd}un` : "", medida, i.localizacao || ""].filter(Boolean);
-  return partes.join(" ") + (extras.length ? " · " + extras.join(" · ") : "");
+  return `#${i.id} ${nome}` + (extras.length ? " · " + extras.join(" · ") : "");
 }
 // Já instalado? Serve só para avisar no popup, não bloqueia a escolha.
 function itemInstalado(i) {
@@ -2290,29 +2290,35 @@ function OrdemServicoPrint({ agenda, obras, equipes, inicio, fim, onBack }) {
             <tbody>
               {g.linhas.map((ag, i) => {
                 const itens = itensDoAgendamento(ag, obras);
+                const fundo = i % 2 ? "#f8fafc" : "#fff";
+                // Sem itens, a linha fecha com a borda de sempre. Com itens, a borda passa para a
+                // linha de baixo, que ocupa a largura toda — na coluna Descrição não cabia.
+                const tdLinha = itens.length ? { ...td, borderBottom: "none" } : td;
                 return (
-                <tr key={ag.id} style={{ background: i % 2 ? "#f8fafc" : "#fff" }}>
-                  <td style={{ ...td, whiteSpace: "nowrap", fontWeight: 700 }}>{fmtDiaSemana(ag.dia)}</td>
-                  <td style={{ ...td, fontWeight: 600 }}>{tituloAgendamento(ag, obras)}</td>
-                  <td style={td}>{ag.endereco || "—"}</td>
-                  <td style={td}>{ag.referencia || "—"}</td>
-                  <td style={{ ...td, whiteSpace: "nowrap" }}>
-                    {ag.periodo}{ag.horaObs ? ` · ${ag.horaObs}` : ""}
-                  </td>
-                  <td style={td}>
-                    {ag.descricao || (itens.length ? "" : "—")}
-                    {itens.length > 0 && (
-                      <div style={{ marginTop: ag.descricao ? 5 : 0 }}>
-                        <div style={{ fontSize: 9.5, fontWeight: 800, color: "#475569", textTransform: "uppercase", letterSpacing: 0.3 }}>
+                <Fragment key={ag.id}>
+                  <tr style={{ background: fundo, pageBreakInside: "avoid" }}>
+                    <td style={{ ...tdLinha, whiteSpace: "nowrap", fontWeight: 700 }}>{fmtDiaSemana(ag.dia)}</td>
+                    <td style={{ ...tdLinha, fontWeight: 600 }}>{tituloAgendamento(ag, obras)}</td>
+                    <td style={tdLinha}>{ag.endereco || "—"}</td>
+                    <td style={tdLinha}>{ag.referencia || "—"}</td>
+                    <td style={{ ...tdLinha, whiteSpace: "nowrap" }}>
+                      {ag.periodo}{ag.horaObs ? ` · ${ag.horaObs}` : ""}
+                    </td>
+                    <td style={tdLinha}>{ag.descricao || "—"}</td>
+                  </tr>
+                  {itens.length > 0 && (
+                    <tr style={{ background: fundo, pageBreakInside: "avoid" }}>
+                      <td colSpan={6} style={{ padding: "0 8px 9px", borderBottom: "1px solid #e2e8f0" }}>
+                        <div style={{ fontSize: 9.5, fontWeight: 800, color: "#475569", textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 2 }}>
                           Itens a montar ({itens.length})
                         </div>
                         {itens.map(it => (
-                          <div key={it.id} style={{ fontSize: 10.5, color: "#1e293b" }}>• {descreveItem(it)}</div>
+                          <div key={it.id} style={{ fontSize: 11, color: "#1e293b", lineHeight: 1.45 }}>• {descreveItem(it)}</div>
                         ))}
-                      </div>
-                    )}
-                  </td>
-                </tr>
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
                 );
               })}
             </tbody>
@@ -2499,12 +2505,38 @@ function toLocalInput(date) {
   return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
 }
 
-function CronogramasView({ cronogramas, obras, onNovo, onNovoComModelo, onAbrir, onExcluir }) {
+const CR_ROW_H = 28;
+const CR_DAY_MS = 86400000;
+
+// Ordem do macro: por criação (o id é "cr_<timestamp>"), não pelo `updated_at desc` que vem do
+// banco — o número da linha é o que se digita na coluna Pred., então precisa ser estável.
+function ordemMacro(cronogramas) {
+  const ts = c => Number(String(c.id).replace(/^cr_/, "")) || 0;
+  return [...cronogramas].sort((a, b) => ts(a) - ts(b) || String(a.id).localeCompare(String(b.id)));
+}
+
+// Input de predecessoras com rascunho local: sem ele, digitar "1," seria reescrito para "1"
+// no meio da digitação, porque o valor exibido é derivado da lista já normalizada.
+function PredInput({ valor, onCommit, titulo }) {
+  const [txt, setTxt] = useState(valor);
+  useEffect(() => { setTxt(valor); }, [valor]);
+  return (
+    <input value={txt} title={titulo} placeholder="—"
+      onClick={e => e.stopPropagation()}
+      onChange={e => setTxt(e.target.value)}
+      onBlur={() => onCommit(txt)}
+      onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      style={{ border: "1px solid #e2e8f0", borderRadius: 5, padding: "2px 5px", fontSize: 12, boxSizing: "border-box", width: 52, textAlign: "center" }} />
+  );
+}
+
+function CronogramaMacroView({ cronogramas, obras, macro, onNovo, onNovoComModelo, onAbrir, onExcluir, onChange }) {
   const [criando, setCriando] = useState(false);
   const [titulo, setTitulo] = useState("");
   const [obraId, setObraId] = useState("");
   const [perguntarVidros, setPerguntarVidros] = useState(false);
   const [aviso, setAviso] = useState("");
+  const [zoom, setZoom] = useState("semana"); // semana | mes
 
   const obraSelecionada = obras.find(o => o.id === obraId) || null;
 
@@ -2533,11 +2565,62 @@ function CronogramasView({ cronogramas, obras, onNovo, onNovoComModelo, onAbrir,
     limpar();
   }
 
+  // ── linhas do macro: um cronograma por linha ──
+  const lista = ordemMacro(cronogramas);
+  const numeroPorId = {};
+  lista.forEach((c, i) => { numeroPorId[c.id] = i + 1; });
+  const tituloPorId = {};
+  lista.forEach(c => { tituloPorId[c.id] = c.titulo; });
+
+  function commitPred(c, texto) {
+    const meuNum = numeroPorId[c.id];
+    const ids = texto.split(",")
+      .map(x => parseInt(x.trim(), 10))
+      .filter(n => n >= 1 && n <= lista.length && n !== meuNum)
+      .map(n => lista[n - 1].id);
+    const atual = (c.predecessorasMacro || []).join("|");
+    const novo = [...new Set(ids)].join("|");
+    if (atual !== novo) onChange({ ...c, predecessorasMacro: novo ? novo.split("|") : [] });
+  }
+
+  // ── escala da timeline ──
+  const DAY_W = zoom === "semana" ? 12 : 4;
+  const hoje = new Date();
+  const hoje0 = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
+  let tStart = null, tEnd = null;
+  for (const c of lista) {
+    const r = macro.mapa[c.id];
+    if (!r || !r.inicio) continue;
+    if (!tStart || r.inicio < tStart) tStart = r.inicio;
+    if (!tEnd || r.termino > tEnd) tEnd = r.termino;
+  }
+  if (!tStart) { tStart = hoje0; tEnd = hoje0; }
+  if (hoje0 < tStart) tStart = hoje0;
+  if (hoje0 > tEnd) tEnd = hoje0;
+  tStart = new Date(tStart.getFullYear(), tStart.getMonth(), tStart.getDate() - 3);
+  const totalDays = Math.max(21, Math.ceil((tEnd - tStart) / CR_DAY_MS) + 5);
+  const dias = Array.from({ length: totalDays }, (_, i) => new Date(tStart.getTime() + i * CR_DAY_MS));
+  const TL_W = totalDays * DAY_W;
+  const ROWS_H = lista.length * CR_ROW_H;
+  const xHoje = ((hoje0 - tStart) / CR_DAY_MS) * DAY_W;
+
+  const COL = { id: 30, nome: 292, dur: 84, pct: 46, ini: 104, term: 104, pred: 60, del: 30 };
+  const GRID_W = Object.values(COL).reduce((a, b) => a + b, 0);
+  const btn = { background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 10px", fontWeight: 700, fontSize: 12, cursor: "pointer" };
+
+  // Obras ainda sem cronograma — o macro só enxerga o que tem cronograma montado.
+  const obrasComCrono = new Set(cronogramas.map(c => c.obraId).filter(Boolean));
+  const obrasSemCrono = obras.filter(o => o.status !== "Concluído" && !obrasComCrono.has(o.id));
+
   return (
-    <div style={{ padding: "24px 28px", maxWidth: 1000, margin: "0 auto" }}>
+    <div style={{ padding: "20px 24px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
         <h2 style={{ fontSize: 20, fontWeight: 800, color: BRAND, margin: 0 }}>Cronograma Comercial</h2>
-        <button onClick={() => setCriando(v => !v)} style={{ marginLeft: "auto", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>+ Novo cronograma</button>
+        <span style={{ fontSize: 12, color: "#94a3b8" }}>visão macro — obra × obra. Clique na linha para abrir o cronograma da obra.</span>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => setZoom(z => z === "semana" ? "mes" : "semana")} style={btn} title="Zoom da timeline">{zoom === "semana" ? "🔍 Mês" : "🔍 Semana"}</button>
+          <button onClick={() => setCriando(v => !v)} style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>+ Novo cronograma</button>
+        </div>
       </div>
 
       {criando && (
@@ -2581,35 +2664,151 @@ function CronogramasView({ cronogramas, obras, onNovo, onNovoComModelo, onAbrir,
         </div>
       </Modal>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {cronogramas.length === 0 && <div style={{ color: "#94a3b8", fontSize: 13, padding: 24, textAlign: "center" }}>Nenhum cronograma ainda.</div>}
-        {cronogramas.map(c => {
-          const obra = obras.find(o => o.id === c.obraId);
-          return (
-            <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 12, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, padding: "12px 16px", flexWrap: "wrap" }}>
-              <span style={{ fontSize: 20 }}>📊</span>
-              <div style={{ flex: 1, minWidth: 180 }}>
-                <div style={{ fontWeight: 700, color: BRAND }}>{c.titulo}</div>
-                <div style={{ fontSize: 12, color: "#64748b" }}>{obra ? `Obra #${obra.numero} · ${obra.cliente}` : "Avulso"} · {c.tasks.length} tarefa(s)</div>
-              </div>
-              <button onClick={() => onAbrir(c.id)} style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Abrir</button>
-              <button onClick={() => { if (confirm("Excluir este cronograma?")) onExcluir(c.id); }} style={{ background: "#fee2e2", color: "#dc2626", border: "none", borderRadius: 7, padding: "7px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Excluir</button>
+      {macro.ciclo.length > 0 && (
+        <div style={{ background: "#fef2f2", border: "1px solid #fecaca", color: "#b91c1c", borderRadius: 8, padding: "8px 12px", fontSize: 12.5, fontWeight: 600, marginBottom: 12 }}>
+          Dependência circular entre obras: {macro.ciclo.map(id => tituloPorId[id] || id).join(" → ")} → … — essas ligações foram ignoradas no cálculo das datas.
+        </div>
+      )}
+
+      {lista.length === 0
+        ? <div style={{ color: "#94a3b8", fontSize: 13, padding: 40, textAlign: "center", background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12 }}>Nenhum cronograma ainda.</div>
+        : (
+        <div style={{ display: "flex", alignItems: "flex-start", overflowX: "auto", background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12 }}>
+          {/* GRADE */}
+          <div style={{ width: GRID_W, minWidth: GRID_W, borderRight: "2px solid #cbd5e1", background: "#fff" }}>
+            <div style={{ display: "flex", background: "#1a1a1a", color: "#fff", height: CR_ROW_H * 2, alignItems: "center", fontSize: 11, fontWeight: 700 }}>
+              <div style={{ width: COL.id, textAlign: "center" }}>Id</div>
+              <div style={{ width: COL.nome, paddingLeft: 6 }}>Obra / Cronograma</div>
+              <div style={{ width: COL.dur, textAlign: "center" }}>Duração</div>
+              <div style={{ width: COL.pct, textAlign: "center" }}>%</div>
+              <div style={{ width: COL.ini, textAlign: "center" }}>Início</div>
+              <div style={{ width: COL.term, textAlign: "center" }}>Término</div>
+              <div style={{ width: COL.pred, textAlign: "center" }}>Pred.</div>
+              <div style={{ width: COL.del }} />
             </div>
-          );
-        })}
-      </div>
+            {lista.map((c, i) => {
+              const obra = obras.find(o => o.id === c.obraId);
+              const r = macro.mapa[c.id] || {};
+              const origem = r.origemId ? tituloPorId[r.origemId] : null;
+              return (
+                <div key={c.id} onClick={() => onAbrir(c.id)} title="Abrir o cronograma desta obra"
+                  style={{ display: "flex", alignItems: "center", height: CR_ROW_H, borderBottom: "1px solid #f1f5f9", background: i % 2 ? "#fafafa" : "#fff", fontSize: 12, cursor: "pointer" }}>
+                  <div style={{ width: COL.id, textAlign: "center", color: "#94a3b8" }}>{i + 1}</div>
+                  <div style={{ width: COL.nome, paddingLeft: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+                    <b style={{ color: BRAND }}>{c.titulo}</b>
+                    <span style={{ color: "#94a3b8", fontSize: 11 }}> · {obra ? `#${obra.numero} ${obra.cliente}` : "Avulso"}</span>
+                  </div>
+                  <div style={{ width: COL.dur, textAlign: "center", color: "#64748b", fontWeight: 600 }}>{textoDias(r.durDias)}</div>
+                  <div style={{ width: COL.pct, textAlign: "center", fontWeight: 700 }}>{r.percent ?? 0}%</div>
+                  <div style={{ width: COL.ini, textAlign: "center", fontSize: 11, color: origem ? "#0d9488" : "#1e293b" }}
+                    title={origem ? `Início herdado de ${origem}` : ""}>
+                    {origem && "⛓ "}{fmtDataHora(r.inicio)}
+                  </div>
+                  <div style={{ width: COL.term, textAlign: "center", fontSize: 11, color: "#64748b" }}>{fmtDataHora(r.termino)}</div>
+                  <div style={{ width: COL.pred, textAlign: "center" }}>
+                    <PredInput valor={(c.predecessorasMacro || []).map(id => numeroPorId[id]).filter(Boolean).join(",")}
+                      titulo="Números das linhas que precisam terminar antes desta obra começar (ex: 1,3)"
+                      onCommit={txt => commitPred(c, txt)} />
+                  </div>
+                  <div style={{ width: COL.del, textAlign: "center" }}>
+                    <button onClick={e => { e.stopPropagation(); if (confirm(`Excluir o cronograma "${c.titulo}"?`)) onExcluir(c.id); }}
+                      title="Excluir cronograma" style={{ border: "none", background: "transparent", cursor: "pointer", color: "#cbd5e1", fontSize: 12 }}>🗑</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* GANTT MACRO */}
+          <div style={{ position: "relative", minWidth: TL_W }}>
+            <div style={{ height: CR_ROW_H * 2, position: "relative", background: "#1a1a1a", color: "#fff" }}>
+              {dias.map((d, i) => {
+                const marca = zoom === "semana" ? i % 7 === 0 : d.getDate() === 1;
+                const rot = zoom === "semana"
+                  ? `${String(d.getDate()).padStart(2, "0")}/${MESES_ABBR[d.getMonth()]}`
+                  : `${MESES_ABBR[d.getMonth()]}/${String(d.getFullYear()).slice(2)}`;
+                return (
+                  <div key={i} style={{ position: "absolute", left: i * DAY_W, top: 0, width: DAY_W, height: "100%", borderLeftWidth: 1, borderLeftStyle: "solid", borderLeftColor: marca ? "#4b5563" : "#2a2a2a", boxSizing: "border-box" }}>
+                    {marca && <div style={{ position: "absolute", top: 5, left: 3, fontSize: 10, whiteSpace: "nowrap", color: "#9ca3af" }}>{rot}</div>}
+                    {zoom === "semana" && <div style={{ position: "absolute", bottom: 4, width: "100%", textAlign: "center", fontSize: 9, color: ehDiaUtil(d, CONFIG_PADRAO) ? "#cbd5e1" : "#6b7280" }}>{DOW1[d.getDay()]}</div>}
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ position: "relative" }}>
+              {dias.map((d, i) => (
+                <div key={i} style={{ position: "absolute", left: i * DAY_W, top: 0, bottom: 0, width: DAY_W, borderLeft: "1px solid #f8fafc", background: ehDiaUtil(d, CONFIG_PADRAO) ? "transparent" : "#f1f5f9", boxSizing: "border-box" }} />
+              ))}
+              {/* hoje */}
+              <div style={{ position: "absolute", left: xHoje, top: 0, height: ROWS_H, width: 1, background: "#dc2626", zIndex: 2 }} title="Hoje" />
+              {/* setas de dependência entre obras */}
+              <svg style={{ position: "absolute", top: 0, left: 0, width: TL_W, height: ROWS_H, pointerEvents: "none" }}>
+                {lista.map((c, i) => (c.predecessorasMacro || []).map(pid => {
+                  const pi = numeroPorId[pid] - 1;
+                  const ps = macro.mapa[pid], ss = macro.mapa[c.id];
+                  if (pi === undefined || pi < 0 || !ps || !ps.termino || !ss || !ss.inicio) return null;
+                  const x1 = ((ps.termino - tStart) / CR_DAY_MS) * DAY_W;
+                  const y1 = pi * CR_ROW_H + CR_ROW_H / 2;
+                  const x2 = ((ss.inicio - tStart) / CR_DAY_MS) * DAY_W;
+                  const y2 = i * CR_ROW_H + CR_ROW_H / 2;
+                  const mx = x1 + 5;
+                  return <polyline key={pid + "-" + c.id} points={`${x1},${y1} ${mx},${y1} ${mx},${y2} ${x2},${y2}`} fill="none" stroke="#94a3b8" strokeWidth="1" markerEnd="url(#arrM)" />;
+                }))}
+                <defs><marker id="arrM" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#94a3b8" /></marker></defs>
+              </svg>
+              {/* barras */}
+              {lista.map((c, i) => {
+                const r = macro.mapa[c.id];
+                if (!r || !r.inicio) return null;
+                const obra = obras.find(o => o.id === c.obraId);
+                const cor = obra?.status === "Atrasado" ? ["#fecaca", "#dc2626"]
+                  : obra?.status === "Concluído" ? ["#bbf7d0", "#16a34a"]
+                  : ["#5eead4", "#0d9488"];
+                const x = ((r.inicio - tStart) / CR_DAY_MS) * DAY_W;
+                const w = Math.max(((r.termino - r.inicio) / CR_DAY_MS) * DAY_W, 3);
+                return (
+                  <div key={c.id} onClick={() => onAbrir(c.id)}
+                    title={`${c.titulo}\n${fmtDataHora(r.inicio)} → ${fmtDataHora(r.termino)}\n${textoDias(r.durDias)} · ${r.percent}% concluído`}
+                    style={{ position: "absolute", left: x, top: i * CR_ROW_H + CR_ROW_H / 2 - 6, width: w, height: 12, background: cor[0], border: `1px solid ${cor[1]}`, borderRadius: 2, overflow: "hidden", cursor: "pointer", zIndex: 3 }}>
+                    <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${r.percent}%`, background: cor[1] }} />
+                  </div>
+                );
+              })}
+              {lista.map((c, i) => (
+                <div key={c.id} style={{ position: "absolute", left: 0, top: i * CR_ROW_H, width: TL_W, height: CR_ROW_H, borderBottom: "1px solid #f1f5f9", boxSizing: "border-box", pointerEvents: "none" }} />
+              ))}
+              <div style={{ height: ROWS_H }} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {obrasSemCrono.length > 0 && (
+        <div style={{ marginTop: 16, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 14 }}>
+          <div style={{ fontSize: 12, color: "#64748b", fontWeight: 700, marginBottom: 8 }}>
+            Obras em andamento ainda sem cronograma ({obrasSemCrono.length}) — elas não entram no macro:
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {obrasSemCrono.map(o => (
+              <button key={o.id} onClick={() => { setCriando(true); setObraId(o.id); setAviso(""); }}
+                title="Criar cronograma para esta obra"
+                style={{ background: "#f8fafc", color: "#334155", border: "1px dashed #cbd5e1", borderRadius: 7, padding: "6px 10px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                + #{o.numero} {o.cliente}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-const CR_ROW_H = 28;
-const CR_DAY_MS = 86400000;
-
-function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora }) {
+function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, dataBaseEfetiva, origemInicio }) {
   const [c, setC] = useState(cronograma);
   const [sel, setSel] = useState(null);
   const [zoom, setZoom] = useState("dia"); // dia | semana
-  const [zerarAlvo, setZerarAlvo] = useState(null); // id da task cujo % o usuário quer zerar em cascata
+  const [percentAlvo, setPercentAlvo] = useState(null); // id do resumo cujo % está sendo definido
+  const [percentValor, setPercentValor] = useState("0");
   const [expandidoId, setExpandidoId] = useState(null); // id da task-item com detalhes abertos
   const [comentarioDraft, setComentarioDraft] = useState("");
   const undoStack = useRef([]); // snapshots de `c` para Ctrl+Z (~20 níveis)
@@ -2648,7 +2847,10 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora })
   }, [onChange]);
 
   const DAY_W = zoom === "dia" ? 26 : 12;
-  const sched = agendar(c.tasks, c.config);
+  // Quando o macro amarra esta obra a outra, o início herdado vence a dataBase própria — nada é
+  // gravado aqui: a verdade continua sendo a predecessora do macro, então as duas telas batem.
+  const cfg = normConfig(dataBaseEfetiva ? { ...c.config, dataBase: dataBaseEfetiva } : c.config);
+  const sched = agendar(c.tasks, cfg);
 
   // faixa da timeline
   let tStart = null, tEnd = null;
@@ -2698,12 +2900,22 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora })
     setTasks(renumerarIds(c.tasks.filter((_, i) => i !== selIdx)));
     setSel(null);
   }
-  function zerarCascata(taskId) {
+  // Percentual do resumo é derivado (média ponderada pelas horas das folhas), então "definir 50%
+  // no grupo" só existe como escrita nas folhas — distribuídas por peso, na ordem da lista.
+  function previaPercent(taskId, alvo) {
     const idx = c.tasks.findIndex(t => t.id === taskId);
+    if (idx < 0) return { idx: -1, mapa: {} };
+    return { idx, mapa: distribuirPercent(c.tasks, idx, alvo, cfg) };
+  }
+  function aplicarPercentGrupo(taskId, alvo) {
+    const { idx, mapa } = previaPercent(taskId, alvo);
     if (idx < 0) return;
-    const idsAlvo = new Set([taskId, ...descendentesDe(c.tasks, idx).map(j => c.tasks[j].id)]);
-    setTasks(c.tasks.map(t => idsAlvo.has(t.id) ? { ...t, percent: 0 } : t));
-    setZerarAlvo(null);
+    setTasks(c.tasks.map((t, i) => mapa[i] !== undefined ? { ...t, percent: mapa[i] } : t));
+    setPercentAlvo(null);
+  }
+  function abrirPercent(t, atual) {
+    setPercentAlvo(t.id);
+    setPercentValor(String(atual ?? 0));
   }
 
   const inp = { border: "1px solid #e2e8f0", borderRadius: 5, padding: "2px 5px", fontSize: 12, boxSizing: "border-box" };
@@ -2726,6 +2938,12 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora })
           style={{ fontWeight: 800, fontSize: 15, color: BRAND, border: "1px solid transparent", borderRadius: 6, padding: "4px 8px", minWidth: 220 }}
           onFocus={e => e.target.style.border = "1px solid #e2e8f0"} onBlur={e => e.target.style.border = "1px solid transparent"} />
         {obraVinculada && <span style={{ fontSize: 12, color: "#64748b" }}>· Obra #{obraVinculada.numero} — {obraVinculada.cliente}</span>}
+        {origemInicio && (
+          <span title={`No macro esta obra só começa depois de "${origemInicio}". Tarefas com início fixado (📌) não se deslocam.`}
+            style={{ fontSize: 11.5, fontWeight: 700, color: "#0f766e", background: "#ccfbf1", border: "1px solid #99f6e4", borderRadius: 999, padding: "3px 10px" }}>
+            ⛓ Início herdado de {origemInicio}
+          </span>
+        )}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>
           <button onClick={addTarefa} style={btn}>+ Tarefa</button>
           <button onClick={() => indent(1)} style={btn} title="Indentar">→</button>
@@ -2793,7 +3011,7 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora })
                       </span>}
                 </div>
                 <div style={{ width: COL.pct, textAlign: "center" }}>
-                  {sc.isSummary ? <b onClick={e => { e.stopPropagation(); setZerarAlvo(t.id); }} style={{ cursor: "pointer" }} title="Zerar percentual do grupo">{sc.percent}%</b>
+                  {sc.isSummary ? <b onClick={e => { e.stopPropagation(); abrirPercent(t, sc.percent); }} style={{ cursor: "pointer", textDecoration: "underline dotted #cbd5e1" }} title="Definir o percentual deste grupo">{sc.percent}%</b>
                     : <input type="number" min={0} max={100} value={t.percent} onClick={e => e.stopPropagation()} onChange={e => updTask(t.id, { percent: clampPercent(e.target.value) }, "percent")} style={{ ...inp, width: 54, textAlign: "center" }} />}
                 </div>
                 <div style={{ width: COL.ini, textAlign: "center", fontSize: 11 }}>
@@ -2846,7 +3064,7 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora })
             {dias.map((d, i) => (
               <div key={i} style={{ position: "absolute", left: i * DAY_W, top: 0, width: DAY_W, height: "100%", borderLeft: "1px solid #333", boxSizing: "border-box" }}>
                 {i % 7 === 0 && <div style={{ position: "absolute", top: 4, left: 3, fontSize: 10, whiteSpace: "nowrap", color: "#9ca3af" }}>{String(d.getDate()).padStart(2, "0")}/{MESES_ABBR[d.getMonth()]}</div>}
-                <div style={{ position: "absolute", bottom: 4, width: "100%", textAlign: "center", fontSize: 9, color: ehDiaUtil(d, c.config) ? "#cbd5e1" : "#6b7280" }}>{DOW1[d.getDay()]}</div>
+                <div style={{ position: "absolute", bottom: 4, width: "100%", textAlign: "center", fontSize: 9, color: ehDiaUtil(d, cfg) ? "#cbd5e1" : "#6b7280" }}>{DOW1[d.getDay()]}</div>
               </div>
             ))}
           </div>
@@ -2854,7 +3072,7 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora })
           <div style={{ position: "relative" }}>
             {/* colunas / sombreado */}
             {dias.map((d, i) => (
-              <div key={i} style={{ position: "absolute", left: i * DAY_W, top: 0, bottom: 0, width: DAY_W, borderLeft: "1px solid #f1f5f9", background: ehDiaUtil(d, c.config) ? "transparent" : "#f1f5f9", boxSizing: "border-box" }} />
+              <div key={i} style={{ position: "absolute", left: i * DAY_W, top: 0, bottom: 0, width: DAY_W, borderLeft: "1px solid #f1f5f9", background: ehDiaUtil(d, cfg) ? "transparent" : "#f1f5f9", boxSizing: "border-box" }} />
             ))}
             {/* setas de dependência */}
             <svg style={{ position: "absolute", top: 0, left: 0, width: TL_W, height: ROWS_H, pointerEvents: "none" }}>
@@ -2903,14 +3121,52 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora })
         </div>
       </div>
 
-      <Modal open={zerarAlvo !== null} title="Zerar percentual" onClose={() => setZerarAlvo(null)}>
-        <div style={{ fontSize: 13, color: "#475569", marginBottom: 18 }}>
-          Isso vai zerar o percentual desta tarefa e de todas as subtarefas dentro dela. Confirma?
-        </div>
-        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-          <button onClick={() => setZerarAlvo(null)} style={{ background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Cancelar</button>
-          <button onClick={() => zerarCascata(zerarAlvo)} style={{ background: "#dc2626", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Zerar tudo</button>
-        </div>
+      <Modal open={percentAlvo !== null} title="Percentual do grupo" onClose={() => setPercentAlvo(null)}>
+        {percentAlvo !== null && (() => {
+          const grupo = c.tasks.find(t => t.id === percentAlvo);
+          const alvo = clampPercent(percentValor);
+          const { mapa } = previaPercent(percentAlvo, alvo);
+          const afetadas = Object.keys(mapa).map(Number).sort((a, b) => a - b);
+          const mostrar = afetadas.slice(0, 8);
+          return (
+            <>
+              <div style={{ fontSize: 13, color: "#475569", marginBottom: 12 }}>
+                O percentual de <b>{grupo?.nome}</b> é a média das tarefas dentro dele, ponderada pela duração
+                de cada uma. Definir um valor aqui distribui esse total nas tarefas, na ordem da lista:
+                as primeiras completam antes de a próxima começar.
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+                <input type="number" min={0} max={100} value={percentValor} autoFocus
+                  onChange={e => setPercentValor(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") aplicarPercentGrupo(percentAlvo, alvo); }}
+                  style={{ border: "1px solid #e2e8f0", borderRadius: 7, padding: "7px 10px", fontSize: 15, fontWeight: 700, width: 90, textAlign: "center" }} />
+                <span style={{ fontSize: 13, color: "#64748b" }}>% de conclusão · {afetadas.length} tarefa(s) serão sobrescritas</span>
+              </div>
+              <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 10px", marginBottom: 16, maxHeight: 200, overflowY: "auto" }}>
+                {mostrar.map(j => {
+                  const t = c.tasks[j];
+                  const de = clampPercent(t.percent), para = mapa[j];
+                  return (
+                    <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "2px 0" }}>
+                      <span style={{ flex: 1, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis", color: "#334155" }}>{t.nome}</span>
+                      <span style={{ color: "#94a3b8", fontSize: 11 }}>{textoDuracao(t, {})}</span>
+                      <span style={{ width: 74, textAlign: "right", color: de === para ? "#94a3b8" : "#0d9488", fontWeight: 700 }}>{de}% → {para}%</span>
+                    </div>
+                  );
+                })}
+                {afetadas.length > mostrar.length && (
+                  <div style={{ fontSize: 11, color: "#94a3b8", paddingTop: 4 }}>e mais {afetadas.length - mostrar.length} tarefa(s)…</div>
+                )}
+                {afetadas.length === 0 && <div style={{ fontSize: 12, color: "#94a3b8" }}>Este grupo não tem tarefas dentro dele.</div>}
+              </div>
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+                <button onClick={() => setPercentAlvo(null)} style={{ background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Cancelar</button>
+                <button onClick={() => aplicarPercentGrupo(percentAlvo, 0)} style={{ background: "#fff", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Zerar tudo</button>
+                <button onClick={() => aplicarPercentGrupo(percentAlvo, alvo)} style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Aplicar {alvo}%</button>
+              </div>
+            </>
+          );
+        })()}
       </Modal>
     </div>
   );
@@ -3223,6 +3479,9 @@ export default function App() {
     dbDeleteCronograma(id).catch(err => showError("Erro ao excluir cronograma: " + err.message));
   }, []);
 
+  // Agenda obra × obra uma vez só: alimenta a tela macro e o início herdado do editor de cada obra.
+  const macro = useMemo(() => agendarMacro(cronogramas), [cronogramas]);
+
   const handleImport = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -3320,15 +3579,18 @@ export default function App() {
               ? <EquipesView equipes={equipes} onSalvar={handleSaveEquipe} onArquivar={handleArquivarEquipe}
                   onReativar={handleReativarEquipe} onExcluir={handleDeleteEquipe} obras={obras} agenda={agenda} />
               : view.type === "cronogramas"
-                ? <CronogramasView cronogramas={cronogramas} obras={obras}
+                ? <CronogramaMacroView cronogramas={cronogramas} obras={obras} macro={macro}
                     onNovo={(titulo, obra) => { const cr = novoCronograma(titulo, obra); handleSaveCronograma(cr); navTo({ type: "cronograma", id: cr.id }); }}
                     onNovoComModelo={(titulo, obra, temVidros) => { const cr = novoCronogramaComModelo(titulo, obra, temVidros); handleSaveCronograma(cr); navTo({ type: "cronograma", id: cr.id }); }}
                     onAbrir={(id) => navTo({ type: "cronograma", id })}
+                    onChange={handleSaveCronograma}
                     onExcluir={handleDeleteCronograma} />
                 : view.type === "cronograma"
                   ? (cronogramas.find(x => x.id === view.id)
                       ? <CronogramaEditor cronograma={cronogramas.find(x => x.id === view.id)} obras={obras} onChange={handleSaveCronograma}
-                          dirty={dirtyCronoIds.has(view.id)} onSalvarAgora={handleSaveCronogramaNow} />
+                          dirty={dirtyCronoIds.has(view.id)} onSalvarAgora={handleSaveCronogramaNow}
+                          dataBaseEfetiva={macro.mapa[view.id]?.origemId ? macro.mapa[view.id].dataBaseEfetiva : ""}
+                          origemInicio={macro.mapa[view.id]?.origemId ? cronogramas.find(x => x.id === macro.mapa[view.id].origemId)?.titulo : ""} />
                       : <CenteredMsg>Cronograma não encontrado</CenteredMsg>)
                   : view.type === "financeiro"
                     ? <FinanceiroView obras={obras} unlocked={financeiroUnlocked} onUnlock={() => setFinanceiroUnlocked(true)} />
@@ -3354,3 +3616,4 @@ export default function App() {
     </div>
   );
 }
+
