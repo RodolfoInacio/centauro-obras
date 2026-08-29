@@ -104,3 +104,78 @@ export async function deleteAgendamento(id) {
   const { error } = await supabase.from("agenda").delete().eq("id", id);
   if (error) throw error;
 }
+
+// ─── LEMBRETES (mural do calendário) ─────────────────────────────────────────
+export async function fetchLembretes() {
+  // Resiliente: se a tabela ainda não existe (migration_lembretes.sql), não quebra o app.
+  const { data, error } = await supabase.from("lembretes").select("data").order("ordem", { ascending: true });
+  if (error) { console.warn("fetchLembretes:", error.message); return []; }
+  return (data || []).map(r => r.data);
+}
+
+export async function upsertLembrete(l) {
+  const row = {
+    id: l.id,
+    texto: l.texto || "",
+    prazo: l.prazo || null,
+    arquivado: !!l.arquivado,
+    ordem: l.ordem || 0,
+    updated_at: new Date().toISOString(),
+    data: l,
+  };
+  const { error } = await supabase.from("lembretes").upsert(row);
+  if (error) throw error;
+}
+
+export async function deleteLembrete(id) {
+  const { data, error } = await supabase.from("lembretes").delete().eq("id", id).select("id");
+  if (error) throw error;
+  // Igual ao deleteEquipe: DELETE barrado por RLS volta 204 sem erro. Sem linha de
+  // volta, nada foi apagado — e o lembrete reapareceria no F5.
+  if (!data || data.length === 0) {
+    throw new Error("O lembrete não foi apagado — sem permissão ou ele já não existia.");
+  }
+}
+
+// ─── DIÁRIO DE OBRAS ─────────────────────────────────────────────────────────
+export async function fetchDiarios() {
+  // Resiliente: se a tabela ainda não existe (migration_diario.sql), não quebra o app.
+  const { data, error } = await supabase.from("diarios").select("data").order("dia", { ascending: false });
+  if (error) { console.warn("fetchDiarios:", error.message); return []; }
+  return (data || []).map(r => r.data);
+}
+
+export async function upsertDiario(d) {
+  const row = {
+    id: d.id,
+    obra_id: d.obraId || null,
+    dia: d.dia,
+    numero: d.numero || null,
+    updated_at: new Date().toISOString(),
+    data: d,
+  };
+  const { error } = await supabase.from("diarios").upsert(row);
+  if (error) throw error;
+}
+
+export async function deleteDiario(id) {
+  const { error } = await supabase.from("diarios").delete().eq("id", id);
+  if (error) throw error;
+}
+
+// ─── FOTOS DO DIÁRIO (Storage) ───────────────────────────────────────────────
+// O app nunca escrevia no Storage; o padrão vem do seed_supabase.mjs.
+// Caminho: <obraId>/<diarioId>/<fotoId>.jpg (e -orig.jpg para a foto sem marcação).
+const BUCKET_DIARIO = "diario";
+
+export async function uploadFotoDiario(path, blob) {
+  const { error } = await supabase.storage.from(BUCKET_DIARIO)
+    .upload(path, blob, { contentType: blob.type || "image/jpeg", upsert: true });
+  if (error) throw error;
+  return supabase.storage.from(BUCKET_DIARIO).getPublicUrl(path).data.publicUrl;
+}
+
+export async function removeFotoDiario(paths) {
+  const { error } = await supabase.storage.from(BUCKET_DIARIO).remove(paths);
+  if (error) console.warn("removeFotoDiario:", error.message); // sobra de arquivo não trava a UI
+}

@@ -2,9 +2,11 @@ import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from "rea
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
-import { fetchObras, upsertObra, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento } from "./api";
+import { fetchObras, upsertObra, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario } from "./api";
 import { agendar, agendarMacro, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent } from "./cronograma";
 import Modal from "./Modal";
+import PainelLembretes, { normLembrete } from "./PainelLembretes";
+import DiarioView, { DiarioPrint, normDiario } from "./DiarioObra";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 // Brand color (was navy #1a1a1a) — now charcoal black
@@ -1725,7 +1727,7 @@ function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar,
   );
 }
 
-function CalendarView({ obras, equipes, agenda, onSalvarAgendamento, onExcluirAgendamento, onSelectObra, onEmitirOS }) {
+function CalendarView({ obras, equipes, agenda, lembretes, onSalvarAgendamento, onExcluirAgendamento, onSalvarLembrete, onExcluirLembrete, onSelectObra, onEmitirOS }) {
   const hoje = new Date();
   // O helper global hoje() está sombreado pelo Date acima, então monta a string a partir dele.
   const hojeISO = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}-${String(hoje.getDate()).padStart(2, "0")}`;
@@ -1782,7 +1784,10 @@ function CalendarView({ obras, equipes, agenda, onSalvarAgendamento, onExcluirAg
   }
 
   return (
-    <div style={{ padding: "24px 28px", maxWidth: 1200, margin: "0 auto" }}>
+    // Duas colunas: o mês ocupa o que sobrar e o mural de lembretes fica fixo à direita.
+    // flexWrap faz o painel cair abaixo do mês em tela estreita, como no DiaAgenda.
+    <div style={{ padding: "24px 28px", maxWidth: 1560, margin: "0 auto", display: "flex", gap: 20, alignItems: "flex-start", flexWrap: "wrap" }}>
+      <div style={{ flex: 1, minWidth: 620 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 20, flexWrap: "wrap" }}>
         <h2 style={{ fontSize: 20, fontWeight: 800, color: "#1a1a1a", margin: 0 }}>Calendário de Obras</h2>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 10 }}>
@@ -1893,6 +1898,10 @@ function CalendarView({ obras, equipes, agenda, onSalvarAgendamento, onExcluirAg
           );
         })}
       </div>
+      </div>
+
+      <PainelLembretes lembretes={lembretes} obras={obras}
+        onSalvar={onSalvarLembrete} onExcluir={onExcluirLembrete} onSelectObra={onSelectObra} />
     </div>
   );
 }
@@ -2346,6 +2355,7 @@ function SideMenu({ open, onClose, onNav, onImport, current }) {
   const items = [
     { key: "dashboard", label: "Obras", icon: "🏠" },
     { key: "calendar", label: "Calendário", icon: "📅" },
+    { key: "diario", label: "Diário de Obras", icon: "📓" },
     { key: "equipes", label: "Equipes", icon: "👷" },
     { key: "cronogramas", label: "Cronograma Comercial", icon: "📊" },
     { key: "financeiro", label: "Financeiro", icon: "🔒" },
@@ -3238,6 +3248,8 @@ export default function App() {
   const [equipes, setEquipes] = useState([]);
   const [cronogramas, setCronogramas] = useState([]);
   const [agenda, setAgenda] = useState([]);   // serviços do dia (obra x equipe)
+  const [lembretes, setLembretes] = useState([]); // mural fixo ao lado do calendário
+  const [diarios, setDiarios] = useState([]);     // diário de obra: um registro por obra por dia
   // Navegação: view atual + pilha de histórico (botão voltar universal)
   const [view, setView] = useState({ type: "dashboard" });
   const [history, setHistory] = useState([]);
@@ -3276,12 +3288,14 @@ export default function App() {
 
   // Carrega dados do banco após login
   useEffect(() => {
-    if (!session) { setObras([]); setEquipes([]); setCronogramas([]); setAgenda([]); return; }
+    if (!session) { setObras([]); setEquipes([]); setCronogramas([]); setAgenda([]); setLembretes([]); setDiarios([]); return; }
     let cancel = false;
     setLoading(true);
     (async () => {
       try {
-        const [obs, eqs, crons, ags] = await Promise.all([fetchObras(), fetchEquipes(), fetchCronogramas(), fetchAgenda()]);
+        const [obs, eqs, crons, ags, lbs, dis] = await Promise.all([
+          fetchObras(), fetchEquipes(), fetchCronogramas(), fetchAgenda(), fetchLembretes(), fetchDiarios(),
+        ]);
         if (cancel) return;
         setObras(obs.map(normObra).sort((a, b) => {
           const ao = Number.isFinite(a.ordem) ? a.ordem : 1e9 + (Number(a.numero) || 0);
@@ -3291,6 +3305,8 @@ export default function App() {
         setEquipes(eqs);
         setCronogramas(crons);
         setAgenda(ags.map(normAgendamento));
+        setLembretes(lbs.map(normLembrete));
+        setDiarios(dis.map(normDiario));
       } catch (err) {
         console.error(err);
         if (!cancel) showError("Erro ao carregar dados: " + err.message);
@@ -3331,6 +3347,45 @@ export default function App() {
     if (t[id]) { clearTimeout(t[id]); delete t[id]; }
     setAgenda(prev => prev.filter(a => a.id !== id));
     dbDeleteAgendamento(id).catch(err => showError("Erro ao remover da agenda: " + err.message));
+  }, []);
+
+  // Lembretes e diário: mesmo desenho da agenda — estado muda na hora, gravação
+  // debounced por id (texto e observações são digitados, não vale upsert por tecla).
+  const handleSaveLembrete = useCallback((l) => {
+    setLembretes(prev => prev.some(x => x.id === l.id) ? prev.map(x => x.id === l.id ? l : x) : [...prev, l]);
+    const t = saveTimers.current;
+    if (t[l.id]) clearTimeout(t[l.id]);
+    t[l.id] = setTimeout(() => {
+      upsertLembrete(l).catch(err => showError("Erro ao salvar o lembrete (rodou a migration_lembretes.sql?): " + err.message));
+    }, 700);
+  }, []);
+
+  const handleDeleteLembrete = useCallback((id) => {
+    const t = saveTimers.current;
+    if (t[id]) { clearTimeout(t[id]); delete t[id]; }
+    const anterior = lembretes.find(l => l.id === id);
+    setLembretes(prev => prev.filter(l => l.id !== id));
+    // Se o banco recusar, o lembrete volta para a lista em vez de sumir e reaparecer no F5.
+    dbDeleteLembrete(id).catch(err => {
+      showError("Erro ao excluir o lembrete: " + err.message);
+      if (anterior) setLembretes(prev => prev.some(l => l.id === id) ? prev : [...prev, anterior]);
+    });
+  }, [lembretes]);
+
+  const handleSaveDiario = useCallback((d) => {
+    setDiarios(prev => prev.some(x => x.id === d.id) ? prev.map(x => x.id === d.id ? d : x) : [...prev, d]);
+    const t = saveTimers.current;
+    if (t[d.id]) clearTimeout(t[d.id]);
+    t[d.id] = setTimeout(() => {
+      upsertDiario(d).catch(err => showError("Erro ao salvar o diário (rodou a migration_diario.sql?): " + err.message));
+    }, 700);
+  }, []);
+
+  const handleDeleteDiario = useCallback((id) => {
+    const t = saveTimers.current;
+    if (t[id]) { clearTimeout(t[id]); delete t[id]; }
+    setDiarios(prev => prev.filter(d => d.id !== id));
+    dbDeleteDiario(id).catch(err => showError("Erro ao excluir o registro do diário: " + err.message));
   }, []);
 
   // Há um cronograma com gravação pendente e é justamente o que está aberto agora?
@@ -3519,11 +3574,15 @@ export default function App() {
     return <OrdemServicoPrint agenda={agenda} obras={obras} equipes={equipes}
       inicio={view.inicio} fim={view.fim} onBack={back} />;
   }
+  if (view.type === "diarioPrint") {
+    return <DiarioPrint diarios={diarios} obras={obras} equipes={equipes}
+      obraId={view.obraId} inicio={view.inicio} fim={view.fim} onBack={back} />;
+  }
 
   const userEmail = session.user?.email || "";
   const selectedObra = view.type === "gantt" ? obras.find(o => o.id === view.obraId) : null;
   const canGoBack = history.length > 0 || view.type !== "dashboard";
-  const tituloView = { dashboard: "Obras", calendar: "Calendário de Obras", equipes: "Equipes", financeiro: "Financeiro", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
+  const tituloView = { dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", financeiro: "Financeiro", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
 
   return (
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
@@ -3571,10 +3630,16 @@ export default function App() {
         : view.type === "gantt"
           ? (selectedObra ? <GanttView obra={selectedObra} onChange={updateObra} equipes={equipes} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>)
           : view.type === "calendar"
-            ? <CalendarView obras={obras} equipes={equipes} agenda={agenda}
+            ? <CalendarView obras={obras} equipes={equipes} agenda={agenda} lembretes={lembretes}
                 onSalvarAgendamento={handleSaveAgendamento} onExcluirAgendamento={handleDeleteAgendamento}
+                onSalvarLembrete={handleSaveLembrete} onExcluirLembrete={handleDeleteLembrete}
                 onSelectObra={openObra}
                 onEmitirOS={(inicio, fim) => navTo({ type: "osPrint", inicio, fim })} />
+            : view.type === "diario"
+            ? <DiarioView obras={obras} equipes={equipes} agenda={agenda} diarios={diarios}
+                obraInicial={view.obraId || null} usuario={userEmail}
+                onSalvar={handleSaveDiario} onExcluir={handleDeleteDiario} onAbrirObra={openObra}
+                onImprimir={(obraId, inicio, fim) => navTo({ type: "diarioPrint", obraId, inicio, fim })} />
             : view.type === "equipes"
               ? <EquipesView equipes={equipes} onSalvar={handleSaveEquipe} onArquivar={handleArquivarEquipe}
                   onReativar={handleReativarEquipe} onExcluir={handleDeleteEquipe} obras={obras} agenda={agenda} />

@@ -4,7 +4,8 @@
 
 App web interno para acompanhar obras de esquadrias de alumínio e vidro: importa o orçamento em
 PDF, controla itens/etapas/equipes, distribui obra × equipe no calendário e imprime a O.S. dali,
-monta cronograma estilo MS Project e
+mantém um mural de lembretes ao lado do calendário, registra o diário de obra de cada dia (com
+foto marcada à mão), monta cronograma estilo MS Project e
 acompanha o financeiro por obra (recebido, a receber, compras por categoria).
 Uso interno do escritório — sem cadastro público, login criado manualmente no Supabase.
 Produção: <https://obras.centauroesquadrias.com.br>
@@ -26,11 +27,14 @@ Sem framework de teste, sem linter, sem router, sem lib de gráfico, sem lib de 
 
 ```
 src/
-  App.jsx          ~2.700 linhas — TODOS os componentes e telas. É o app inteiro.
-  api.js           CRUD do Supabase (obras, equipes, agenda, cronogramas).
+  App.jsx          ~2.700 linhas — quase todos os componentes e telas.
+  api.js           CRUD do Supabase (obras, equipes, agenda, cronogramas, lembretes, diários) + upload das fotos.
   supabase.js      Cria o client a partir das env vars.
   cronograma.js    Motor de agendamento do Cronograma Comercial (dias úteis, dependências).
-  Modal.jsx        Único componente extraído: modal genérico com backdrop.
+  Modal.jsx        Modal genérico com backdrop.
+  PainelLembretes.jsx  Mural de lembretes da coluna direita do calendário.
+  DiarioObra.jsx   Diário de Obras: escolha da obra, caderno, editor do dia e folha impressa.
+  FotoMarkup.jsx   Rabisco sobre a foto (seta/caneta/retângulo/texto) + campo de assinatura.
   index.css        CSS global mínimo.
   assets/          Logos.
 supabase/
@@ -39,6 +43,8 @@ supabase/
   migration_cronogramas.sql  Tabela `cronogramas` (rodar separado).
   migration_agenda.sql       Tabela `agenda` — serviços do dia (rodar separado).
   migration_equipes_arquivada.sql  Coluna `equipes.arquivada` (rodar separado).
+  migration_lembretes.sql    Tabela `lembretes` (rodar separado).
+  migration_diario.sql       Tabela `diarios` + bucket `diario` (rodar separado).
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF.
   SETUP.md                   Passo a passo de criação do projeto Supabase.
 docs/
@@ -92,15 +98,22 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 | `ordens` | `id` | `numero`, `equipe_id`, `periodo_inicio`, `periodo_fim`, `data` | **histórica** — nenhum código lê ou grava (ver Decisões) |
 | `agenda` | `id` | `dia`, `equipe_id`, `obra_id`, `updated_at`, `data` | o serviço do dia: obra (ou avulso) × equipe × período + endereço, referência, descrição e `itens` (ids dos itens da obra que serão montados) |
 | `cronogramas` | `id` | `titulo`, `obra_id`, `updated_at`, `data` | o cronograma inteiro (tasks) + `predecessorasMacro` (ids de outros cronogramas) |
+| `lembretes` | `id` | `texto`, `prazo`, `arquivado`, `ordem`, `updated_at`, `data` | o lembrete: texto, prazo, obra vinculada, concluído/em andamento/arquivado |
+| `diarios` | `id` | `obra_id`, `dia`, `numero`, `updated_at`, `data` | o registro do dia: clima, equipes/presença, atividades, ocorrências, visitas, fotos, assinaturas |
 | `profiles` | `id` (= auth.users) | `nome`, `papel` | — |
 | `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (**vazia**, fundação para o futuro) |
 
 - `obra_membros` e os papéis `encarregado`/`cliente` existem no schema mas **não são usados**: as
   policies que dariam acesso a eles estão comentadas em `schema.sql`. Hoje só `admin` acessa.
 - Todo usuário novo vira `admin` automaticamente (trigger `handle_new_user`).
-- Storage: bucket público `desenhos` (leitura pública, escrita autenticada).
-- `agenda` e `cronogramas` **não estão no `schema.sql`** — são migrations separadas. Se esquecer
-  de rodar, o app não quebra: `fetchAgenda`/`fetchCronogramas` capturam o erro e devolvem `[]`.
+- Storage: buckets públicos `desenhos` (desenhos técnicos do item) e `diario` (fotos do diário).
+  Leitura pública, escrita autenticada. **Leitura pública mesmo**: quem tiver a URL vê a foto.
+- `agenda`, `cronogramas`, `lembretes` e `diarios` **não estão no `schema.sql`** — são migrations
+  separadas. Se esquecer de rodar, o app não quebra: os `fetch*` correspondentes capturam o erro e
+  devolvem `[]`. A exceção é o upload de foto do diário, que falha visível com "Bucket not found"
+  até a `migration_diario.sql` rodar.
+- `diarios` tem índice **único em (obra_id, dia)**: um registro por obra por dia, e duas abas
+  abertas não conseguem criar dois.
 
 ## Backend
 
@@ -130,17 +143,21 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
 
 - **Idioma**: código, comentários e commits em português. Nomes de campo em português
   (`valorRecebido`, `statusCompras`).
-- **Componentes**: tudo em `App.jsx`, na ordem em que aparece na navegação. Não criar arquivo
-  novo por componente a menos que o componente seja genérico e reutilizado (só `Modal.jsx` é).
+- **Componentes**: por padrão tudo em `App.jsx`, na ordem em que aparece na navegação. Só sai para
+  arquivo próprio o que é genérico e reutilizado (`Modal.jsx`, `FotoMarkup.jsx`) ou uma tela inteira
+  grande o bastante para afogar o `App.jsx` (`DiarioObra.jsx`, `PainelLembretes.jsx` — ver Decisões).
 - **Navegação**: sem router. Estado `view = {type, ...params}` no `App` + pilha `history`.
   `navTo` empilha, `navReplace` troca, `back` desempilha, `goHome` limpa. Todos passam por
   `guardNav`, que intercepta a saída se houver cronograma com gravação pendente.
   Tipos de view: `dashboard`, `obrasPasta` (`pasta: "andamento"|"concluidas"`), `gantt` (`obraId`),
   `print` (`obraId`), `calendar`, `equipes`, `osPrint` (`inicio`, `fim`),
   `cronogramas` (o **macro**: todas as obras, uma por linha), `cronograma` (`id`, o micro de uma
-  obra), `financeiro`.
+  obra), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`).
+  `calendar` e `diario` navegam por dentro (estado local), sem empilhar view — `DiaAgenda` e as
+  três telas do diário são early-returns dos próprios componentes.
 - **Persistência**: o estado local muda na hora; a gravação é **debounced em 700 ms por entidade**
-  (`persistObra`, `handleSaveCronograma`, `handleSaveAgendamento`). Equipes gravam imediatamente,
+  (`persistObra`, `handleSaveCronograma`, `handleSaveAgendamento`, `handleSaveLembrete`,
+  `handleSaveDiario`). Equipes gravam imediatamente,
   uma por vez (`upsertEquipe`/`deleteEquipe`). O cronograma é o único com indicador de "não salvo"
   (`dirtyCronoIds`), botão Salvar e aviso ao sair.
 - **Migração de schema**: nunca migrar o banco — os campos novos entram com default em `normObra`
@@ -218,6 +235,60 @@ MS Project) mas persiste **ids**, e a lista é ordenada por criação (não pelo
 banco), senão os números mudariam sozinhos. Ciclo não trava: as arestas que o fecham são ignoradas
 e a tela avisa.
 
+**A etiqueta do lembrete é derivada, o prazo é o dado.** O painel grava três fatos (`concluido`,
+`emAndamento`, `prazo`) e `statusLembrete` deduz o rótulo: concluído > atrasado (prazo vencido e não
+concluído) > em andamento > a fazer. Gravar "atrasado" como estado teria criado um campo que envelhece
+sozinho e mente no dia seguinte — a mesma classe de problema do % do grupo no cronograma. Lembrete sem
+prazo nunca atrasa, de propósito: obriga a escolher entre "tem data" e "é só uma anotação". O "hoje" do
+painel vem do relógio **local**, não de `toISOString()`: às 21h no Brasil o ISO já é o dia seguinte e a
+etiqueta vermelha acenderia um dia cedo.
+
+**Diário de obra: um registro por obra por dia, nascido da agenda.** A tela não é um formulário em
+branco — ao criar o registro, os serviços daquele dia daquela obra são lidos da `agenda` e viram
+equipe, integrantes (todos presentes), endereço e a lista de itens. O usuário edita a diferença. É o
+mesmo princípio que fez a O.S. sair da agenda: a agenda é a fonte de verdade do que a equipe faz no
+dia, e o diário é o *verso* da O.S. — a O.S. é o que vai ser feito, o diário é o que foi feito.
+O caderno ainda aponta os dias que têm serviço na agenda e não têm diário. Só a data é obrigatória:
+formulário longo com campo obrigatório é formulário não preenchido.
+
+**Nem todo dia tem equipe: existe o grupo avulso.** Um item de `diario.equipes` com `equipeId: null`
+é um grupo sem cadastro — a vistoria do escritório, você e um funcionário conferindo itens. Ele tem
+`rotulo` livre (que vira o nome dele na folha) e os nomes são digitados na hora. Criar uma "equipe"
+no cadastro para isso poluiria as escolhas do calendário com algo que nunca vai receber serviço.
+O mesmo campo de digitar nome aparece nas equipes cadastradas, para o ajudante emprestado do dia:
+`presentes` guarda os nomes, e quem não está no cadastro da equipe é exibido como chip removível.
+
+O modelo é de **prova, não de conformidade**. Não existe obrigação legal genérica de RDO em obra
+privada — a Resolução CONFEA 1.094/2017 (Livro de Ordem) foi revogada em 23/11/2023, e a Lei
+14.133/2021 art. 117 §1º só obriga o fiscal de contrato público a registrar ocorrências. Por isso
+ficaram de fora os campos de construtora tocando obra inteira (concretagem, índice pluviométrico,
+horas ociosas de máquina, efetivo por função, cost code, resíduos) e o bloco que sobrou como mais
+valioso é o de **ocorrências com responsável (Centauro/Cliente/Terceiro), horas paradas e foto** —
+é o que prova que o atraso não foi nosso. Materiais recebidos/avaria estão no modelo de dados
+(`materiais: []`) mas ainda sem UI.
+
+**Foto do diário: original no Storage, traços em vetor, achatada para imprimir.** Cada foto guarda
+três coisas: `urlOriginal` (a foto crua), `tracos` (o rabisco como vetor no `jsonb`) e `url` (o JPEG
+achatado com os traços). O editor reabre original + traços, então dá para desfazer a seta de ontem;
+a folha impressa usa a achatada, que é só um `<img>` — canvas na impressão é frágil. As duas gravam
+em caminhos diferentes (`<obra>/<diario>/<foto>-orig.jpg` e `<foto>.jpg`) e a achatada leva
+`?v=<timestamp>` na URL, senão o navegador continua mostrando a marcação anterior do cache.
+Toda foto é reduzida a 1.600px no maior lado antes de subir: foto de celular tem 4–6 MB e o canteiro
+é 4G. **Nunca base64 no `jsonb`** — foi para resolver isso que o `seed_supabase.mjs` existiu.
+
+Cada foto tem `tamanho: "normal" | "grande"`, que **só afeta a folha impressa**: normal entra na
+grade de duas colunas recortada (`cover`), grande atravessa a largura inteira e sai sem corte
+(`contain`, `gridColumn: "1 / -1"`). É por foto, não por documento: numa mesma folha o detalhe do
+contramarco sai grande e o resto continua miniatura. `contain` na grande é o ponto — recortar
+justamente a foto que existe para ser enxergada anularia a escolha.
+
+**Telas grandes saíram do `App.jsx`.** O diário sozinho passa de 900 linhas; empurrado para dentro,
+o `App.jsx` iria a ~4.500 e a cadeia de ternários do despacho ganharia mais um nível. `DiarioObra.jsx`
+e `PainelLembretes.jsx` são telas inteiras com estado próprio e interface estreita com o `App`
+(props de dados + callbacks de gravação), então o custo de separar é zero e o ganho é navegar no
+arquivo. `FotoMarkup.jsx` é o caso clássico da regra antiga: genérico e reutilizado (o mesmo canvas
+serve o rabisco na foto e a assinatura no dedo). Componentes pequenos continuam no `App.jsx`.
+
 **Equipe é gravada uma por vez.** `saveEquipes` regravava a lista inteira e engolia o erro do
 SELECT, então o DELETE muitas vezes nem era enviado e a função resolvia como sucesso — a equipe
 sumia da tela e voltava no F5. Agora são `upsertEquipe`/`deleteEquipe`; o delete pede as linhas de
@@ -250,6 +321,15 @@ novo. `deleteEquipe` continua na `api.js` para exclusão manual, mas **nenhuma t
 - **`obra.material`** (dataLimite/dataCompra/previsaoEntrega) ainda é criado em três lugares mas
   **não tem mais UI** — as datas viraram por categoria em `obra.compras`. Campo vestigial.
 - **`parsePDFFile` está morto**: ninguém chama. O fallback usa `parseObraLines` direto.
+- **No editor do diário, mutação lê `ref.current`, render lê a prop `diario`.** O `useEffect` que
+  sincroniza o ref só roda depois da pintura, então dois cliques no mesmo ciclo (clicar rápido em
+  tempo e praticabilidade) liam a mesma versão antiga e o segundo apagava o primeiro. O `salvar()`
+  atualiza o ref **antes** de avisar o pai. Se for adicionar campo novo, siga a regra: `ref.current.x`
+  para montar o próximo estado, `diario.x` para exibir.
+- **O canvas do rabisco precisa de CORS na foto.** O `<img>` do editor usa `crossOrigin="anonymous"`
+  porque sem isso o canvas fica "tainted" e o `toBlob()` do achatamento estoura `SecurityError`.
+  O Storage público do Supabase manda `Access-Control-Allow-Origin: *`; se um dia as fotos migrarem
+  para bucket privado com URL assinada, esse é o ponto que quebra.
 - **TypeScript é decorativo**: `tsconfig.json` existe e `typescript` está nas devDependencies,
   mas o app é todo `.jsx` e não há `tsc` em nenhum script. Idem `vite-plugin-singlefile`, que
   está nas deps mas não é usado no `vite.config.js`.
