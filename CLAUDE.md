@@ -252,6 +252,11 @@ dia, e o diário é o *verso* da O.S. — a O.S. é o que vai ser feito, o diár
 O caderno ainda aponta os dias que têm serviço na agenda e não têm diário. Só a data é obrigatória:
 formulário longo com campo obrigatório é formulário não preenchido.
 
+**`responsavel` é campo livre, não vem do login.** Chegou a nascer com `session.user.email` e o
+resultado na folha foi `salomaoengenhariapg@gmail.com` — o login é da empresa, não da pessoa que
+foi à obra. Enquanto não houver cadastro de pessoas para escolher, é texto digitado. Não religar
+no e-mail do login.
+
 **Nem todo dia tem equipe: existe o grupo avulso.** Um item de `diario.equipes` com `equipeId: null`
 é um grupo sem cadastro — a vistoria do escritório, você e um funcionário conferindo itens. Ele tem
 `rotulo` livre (que vira o nome dele na folha) e os nomes são digitados na hora. Criar uma "equipe"

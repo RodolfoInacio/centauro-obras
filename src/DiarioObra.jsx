@@ -148,7 +148,10 @@ export function normDiario(d) {
 }
 
 // O registro nasce da agenda: equipes, integrantes, endereço e itens do dia.
-export function novoDiario({ obra, dia, agenda, equipes, diariosDaObra, responsavel }) {
+// `responsavel` fica em branco de propósito: quem preenche o diário nem sempre é
+// quem está logado (o login é do escritório). Campo livre até haver cadastro de
+// pessoas de verdade para escolher.
+export function novoDiario({ obra, dia, agenda, equipes, diariosDaObra }) {
   const servicos = (agenda || []).filter(a => a.dia === dia && a.obraId === obra.id);
 
   const vistas = new Set();
@@ -183,7 +186,7 @@ export function novoDiario({ obra, dia, agenda, equipes, diariosDaObra, responsa
     endereco: (servicos[0] && servicos[0].endereco) || [obra.obra, obra.cidade].filter(Boolean).join(" · "),
     equipes: eqs,
     atividades,
-    responsavel: responsavel || "",
+    responsavel: "",
   });
 }
 
@@ -212,7 +215,7 @@ function Bloco({ titulo, sub, acao, children }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // TELA PRINCIPAL — navegação interna em estado local, como CalendarView/DiaAgenda
 // ─────────────────────────────────────────────────────────────────────────────
-export default function DiarioView({ obras, equipes, agenda, diarios, obraInicial, usuario,
+export default function DiarioView({ obras, equipes, agenda, diarios, obraInicial,
   onSalvar, onExcluir, onImprimir, onAbrirObra }) {
   const [obraId, setObraId] = useState(obraInicial || null);
   const [abertoId, setAbertoId] = useState(null);
@@ -232,7 +235,7 @@ export default function DiarioView({ obras, equipes, agenda, diarios, obraInicia
 
   if (obra) {
     return (
-      <CadernoObra obra={obra} equipes={equipes} agenda={agenda} diarios={diarios} usuario={usuario}
+      <CadernoObra obra={obra} equipes={equipes} agenda={agenda} diarios={diarios}
         onSalvar={onSalvar} onExcluir={onExcluir} onAbrir={setAbertoId}
         onVoltar={() => setObraId(null)} onImprimir={onImprimir} onAbrirObra={onAbrirObra} />
     );
@@ -291,7 +294,7 @@ export default function DiarioView({ obras, equipes, agenda, diarios, obraInicia
 // ─────────────────────────────────────────────────────────────────────────────
 // Nível 2: o caderno da obra
 // ─────────────────────────────────────────────────────────────────────────────
-function CadernoObra({ obra, equipes, agenda, diarios, usuario, onSalvar, onExcluir, onAbrir, onVoltar, onImprimir, onAbrirObra }) {
+function CadernoObra({ obra, equipes, agenda, diarios, onSalvar, onExcluir, onAbrir, onVoltar, onImprimir, onAbrirObra }) {
   const [criando, setCriando] = useState(false);
   const [diaNovo, setDiaNovo] = useState(hojeLocal());
   const [imprimindo, setImprimindo] = useState(false);
@@ -307,7 +310,7 @@ function CadernoObra({ obra, equipes, agenda, diarios, usuario, onSalvar, onExcl
 
   function criar() {
     if (jaExiste) { onAbrir(jaExiste.id); setCriando(false); return; }
-    const d = novoDiario({ obra, dia: diaNovo, agenda, equipes, diariosDaObra: meus, responsavel: usuario });
+    const d = novoDiario({ obra, dia: diaNovo, agenda, equipes, diariosDaObra: meus });
     onSalvar(d);
     setCriando(false);
     onAbrir(d.id);
@@ -594,18 +597,24 @@ function EditorDiario({ diario, obra, equipes, agenda, onSalvar, onExcluir, onVo
         <div style={{ background: "#fee2e2", border: "1px solid #fecaca", color: "#dc2626", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12.5, fontWeight: 600 }}>{erro}</div>
       )}
 
-      {/* Identificação (automático) */}
+      {/* Identificação — obra vem da obra, responsável e endereço são digitados */}
       <div style={{ ...painel, marginBottom: 14, background: "#f8fafc" }}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 }}>
           <Campo rotulo="Obra" valor={obra.obra || "—"} />
           <Campo rotulo="Cliente" valor={obra.cliente} />
           <Campo rotulo="Proposta" valor={"#" + obra.numero} />
-          <Campo rotulo="Responsável" valor={diario.responsavel || "—"} />
         </div>
-        <div style={{ marginTop: 12 }}>
-          <div style={{ fontSize: 10.5, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", marginBottom: 4 }}>Endereço</div>
-          <input value={diario.endereco} onChange={e => salvar({ endereco: e.target.value })}
-            placeholder="Endereço da obra" style={{ ...inp, width: "100%", background: "#fff" }} />
+        <div style={{ display: "flex", gap: 12, marginTop: 12, flexWrap: "wrap" }}>
+          <div style={{ flex: 2, minWidth: 240 }}>
+            <div style={{ fontSize: 10.5, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", marginBottom: 4 }}>Endereço</div>
+            <input value={diario.endereco} onChange={e => salvar({ endereco: e.target.value })}
+              placeholder="Endereço da obra" style={{ ...inp, width: "100%", background: "#fff" }} />
+          </div>
+          <div style={{ flex: 1, minWidth: 190 }}>
+            <div style={{ fontSize: 10.5, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", marginBottom: 4 }}>Responsável</div>
+            <input value={diario.responsavel} onChange={e => salvar({ responsavel: e.target.value })}
+              placeholder="Quem preencheu" style={{ ...inp, width: "100%", background: "#fff" }} />
+          </div>
         </div>
       </div>
 

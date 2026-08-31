@@ -3637,7 +3637,7 @@ export default function App() {
                 onEmitirOS={(inicio, fim) => navTo({ type: "osPrint", inicio, fim })} />
             : view.type === "diario"
             ? <DiarioView obras={obras} equipes={equipes} agenda={agenda} diarios={diarios}
-                obraInicial={view.obraId || null} usuario={userEmail}
+                obraInicial={view.obraId || null}
                 onSalvar={handleSaveDiario} onExcluir={handleDeleteDiario} onAbrirObra={openObra}
                 onImprimir={(obraId, inicio, fim) => navTo({ type: "diarioPrint", obraId, inicio, fim })} />
             : view.type === "equipes"
