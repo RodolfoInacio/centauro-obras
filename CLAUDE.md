@@ -44,6 +44,7 @@ supabase/
   migration_agenda.sql       Tabela `agenda` — serviços do dia (rodar separado).
   migration_equipes_arquivada.sql  Coluna `equipes.arquivada` (rodar separado).
   migration_lembretes.sql    Tabela `lembretes` (rodar separado).
+  migration_lembretes_ordem_bigint.sql  Conserta `lembretes.ordem` int → bigint (rodar separado).
   migration_diario.sql       Tabela `diarios` + bucket `diario` (rodar separado).
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF.
   SETUP.md                   Passo a passo de criação do projeto Supabase.
@@ -304,6 +305,10 @@ novo. `deleteEquipe` continua na `api.js` para exclusão manual, mas **nenhuma t
 
 ## Armadilhas conhecidas
 
+- **`ordem` é `Date.now()`, então a coluna precisa ser `bigint`.** `lembretes` é a única tabela que
+  copia o `ordem` do app para uma coluna solta; ela nasceu `int` e recusava todo lembrete novo com
+  `value "1788184147925" is out of range for type integer`. A agenda escapou porque lá o `ordem`
+  mora só dentro do `jsonb`. Se um dia outra tabela ganhar coluna `ordem`, ela nasce `bigint`.
 - **`normObra` quebra se a obra não tiver `itens`**: faz `o.itens.map(...)` sem guarda, e isso
   roda na carga de todas as obras — um registro ruim derruba a tela inteira.
 - **A senha do Financeiro (`SENHA_FINANCEIRO`) é uma constante no código do cliente.** Está no

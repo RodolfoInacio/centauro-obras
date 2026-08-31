@@ -9,7 +9,7 @@ create table if not exists public.lembretes (
   texto      text,
   prazo      date,
   arquivado  boolean default false,
-  ordem      int,
+  ordem      bigint,
   updated_at timestamptz default now(),
   data       jsonb not null
 );
