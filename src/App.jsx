@@ -95,6 +95,59 @@ function finTotais(obras) {
   }, { total: 0, recebido: 0, aReceber: 0, aPagar: 0, aEntregar: 0, emAlerta: 0 });
 }
 
+// ─── AGRUPAMENTO DE OBRAS (um cliente, vários contratos) ─────────────────────
+// Duas propostas do mesmo cliente são a mesma obra com dois contratos. O agrupamento é só de
+// APRESENTAÇÃO: cada contrato continua sendo uma obra própria no banco, porque o `id` da obra é o
+// número da proposta e agenda, cronograma, lembretes e diário todos guardam esse id. Fundir os
+// registros quebraria esses vínculos e faria os ids de item (sequenciais por obra) colidirem.
+
+// "BOL ENGENHARIA LTDA." e "Bol Engenharia" caem na mesma chave.
+function chaveCliente(nome) {
+  return (nome || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")             // acento
+    .toUpperCase()
+    .replace(/[.,\-/]/g, " ")
+    .replace(/\b(LTDA|ME|EPP|EIRELI|MEI|CIA|S\s?A)\b/g, "")       // razão social
+    .replace(/\s+/g, " ").trim();
+}
+// A chave gravada à mão vence a automática. "solo:<id>" é uma obra que o usuário separou do grupo.
+function chaveGrupo(o) { return o.grupo || chaveCliente(o.cliente) || "solo:" + o.id; }
+
+// Mesmo fallback da carga inicial e da ordenação da lista: sem `ordem`, vai para o fim por número.
+function ordemDeObra(o) { return Number.isFinite(o.ordem) ? o.ordem : 1e9 + (Number(o.numero) || 0); }
+
+// Agrupa e já entrega os consolidados que a tela precisa.
+function agruparObras(obras) {
+  const mapa = new Map();
+  for (const o of obras) {
+    const chave = chaveGrupo(o);
+    if (!mapa.has(chave)) mapa.set(chave, []);
+    mapa.get(chave).push(o);
+  }
+  return [...mapa.entries()].map(([chave, lista]) => {
+    const contratos = [...lista].sort((a, b) => (Number(a.numero) || 0) - (Number(b.numero) || 0));
+    // O financeiro soma contrato a contrato via finObra — nunca recalcula sobre valores já somados.
+    // O clamp `Math.max(0, total - recebido)` de finObra é o que impede o adiantamento de um
+    // contrato mascarar o que o outro ainda tem a receber.
+    const fin = finTotais(contratos);
+    const todosItens = contratos.flatMap(o => o.itens || []);
+    return {
+      chave,
+      nome: contratos[0].cliente,
+      contratos,
+      ordem: Math.min(...contratos.map(ordemDeObra)),
+      // A obra só acabou quando não sobra contrato aberto.
+      concluido: contratos.every(o => o.status === "Concluído"),
+      itens: todosItens.length,
+      pecas: todosItens.reduce((a, i) => a + (i.qtd || 0), 0),
+      // Média sobre os itens de todos os contratos juntos, não média das médias por contrato.
+      pct: todosItens.length ? Math.round(todosItens.reduce((a, i) => a + itemPercentual(i), 0) / todosItens.length) : 0,
+      fin,
+      emAlerta: fin.emAlerta,
+    };
+  });
+}
+
 // Dias corridos entre a assinatura do contrato e hoje (a coluna TEMPO da planilha do escritório).
 function diasDesdeContrato(o) {
   if (!o.dataContrato) return null;
@@ -160,6 +213,8 @@ function normObra(o) {
   return {
     ...o,
     equipes: o.equipes || [],
+    // Chave do grupo forçada à mão. "" = agrupa sozinho pelo nome do cliente (ver chaveGrupo).
+    grupo: o.grupo || "",
     dataLimiteEntrega: o.dataLimiteEntrega || "",
     material: o.material || { dataLimite: "", dataCompra: "", previsaoEntrega: "" },
     // Financeiro por obra: por enquanto preenchido a mão (planilha), depois vem do ERP.
@@ -1906,12 +1961,358 @@ function CalendarView({ obras, equipes, agenda, lembretes, onSalvarAgendamento, 
   );
 }
 
+// ─── CARDS DA LISTA DE OBRAS ─────────────────────────────────────────────────
+
+// A alça é a única parte que "arma" o arrasto: o navegador decide no mousedown, antes do render.
+function AlcaArrasto({ onArmar, onDesarmar }) {
+  return (
+    <div title="Arraste para reordenar"
+      onMouseDown={onArmar}
+      onMouseUp={onDesarmar}
+      onClick={e => e.stopPropagation()}
+      style={{ alignSelf: "center", color: "#94a3b8", fontSize: 20, lineHeight: 1, cursor: "grab", padding: "0 4px", userSelect: "none" }}
+    >☰</div>
+  );
+}
+
+// Botão discreto que abre o modal de agrupamento.
+function BotaoGrupo({ n, onClick }) {
+  return (
+    <button
+      title={n > 1 ? `${n} contratos nesta obra — clique para separar ou juntar` : "Juntar esta obra a outra"}
+      onClick={e => { e.stopPropagation(); onClick(); }}
+      style={{
+        background: n > 1 ? "#eff6ff" : "transparent", color: n > 1 ? "#1d4ed8" : "#cbd5e1",
+        border: "1px solid " + (n > 1 ? "#bfdbfe" : "#e2e8f0"), borderRadius: 999,
+        padding: n > 1 ? "2px 10px" : "2px 7px", fontSize: 11, fontWeight: 800, cursor: "pointer", lineHeight: 1.6,
+      }}>
+      ⛓{n > 1 ? ` ${n} contratos` : ""}
+    </button>
+  );
+}
+
+const cardBase = (isOver, isDragging) => ({
+  background: "#fff", borderRadius: 12, boxShadow: "0 1px 4px rgba(0,0,0,0.07)",
+  border: "1px solid #e2e8f0", borderTop: isOver ? "3px solid #1a1a1a" : "1px solid #e2e8f0",
+  transition: "box-shadow 0.15s", opacity: isDragging ? 0.4 : 1,
+});
+const realce = {
+  entra: e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.12)",
+  sai: e => e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.07)",
+};
+
+// Badges 👷 das equipes da obra.
+function EquipesDaObra({ ids, equipes }) {
+  if (!(ids || []).length) return null;
+  return (
+    <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+      {ids.map(id => {
+        const eq = equipes.find(e => e.id === id);
+        if (!eq) return null;
+        return (
+          <span key={id} style={{ background: eq.cor + "1a", color: eq.cor, border: `1px solid ${eq.cor}55`, borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
+            👷 {eq.nome}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+// Obra com um contrato só — o card de sempre, sem mudança visual.
+function CardObra({ os, equipes, onSelect, onStatusChange, onFlagsChange, onAbrirGrupo, alca, dragProps, isDragging, isOver }) {
+  const pct = os.itens.length > 0
+    ? Math.round(os.itens.reduce((a, i) => a + itemPercentual(i), 0) / os.itens.length)
+    : 0;
+  const statusColor = STATUS_COLORS[os.status] || "#94a3b8";
+  const fin = finObra(os);
+  const dias = diasDesdeContrato(os);
+  return (
+    <div {...dragProps}
+      style={{ ...cardBase(isOver, isDragging), padding: "18px 22px", cursor: "pointer" }}
+      onClick={() => onSelect(os.id)}
+      onMouseEnter={realce.entra} onMouseLeave={realce.sai}
+    >
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
+        {alca}
+        <div style={{ background: "#1a1a1a", color: "#fff", borderRadius: 8, padding: "6px 14px", fontWeight: 800, fontSize: 18, minWidth: 60, textAlign: "center" }}>
+          #{os.numero}
+        </div>
+        {precisaAlertaCompras(os) && (
+          <span title="Falta comprar mais do que ainda vai receber dessa obra" style={{ alignSelf: "center", fontSize: 20, lineHeight: 1 }}>🚩</span>
+        )}
+        <div style={{ flex: 1, minWidth: 180 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ fontWeight: 700, fontSize: 15, color: "#1e293b" }}>{os.cliente}</div>
+            <BotaoGrupo n={1} onClick={onAbrirGrupo} />
+          </div>
+          <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{os.obra || "—"} · {os.cidade}</div>
+          <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
+            Vendedor: {os.vendedor} · Início: {os.dataInicio ? fmtDate(os.dataInicio) : "a definir"}
+          </div>
+          <EquipesDaObra ids={os.equipes} equipes={equipes} />
+        </div>
+        {/* Informativo: o que ainda entra e o que ainda sai desta obra + contrato + bandeiras */}
+        <div style={{ minWidth: 230, display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+            <div>
+              <div style={{ fontSize: 10, color: "#f59e0b", fontWeight: 700, textTransform: "uppercase" }}>● A Receber</div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: "#f59e0b" }}>R$ {fmt(fin.aReceber)}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 10, color: "#dc2626", fontWeight: 700, textTransform: "uppercase" }}>● A Pagar</div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: "#dc2626" }}>R$ {fmt(fin.aPagar)}</div>
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: "#94a3b8", display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <span>Contrato: {os.dataContrato ? fmtDate(os.dataContrato) : "a definir"}</span>
+            {dias !== null && (
+              <span title="Dias corridos desde a data do contrato" style={{ color: corDias(dias), fontWeight: 800 }}>
+                ⏱ {dias} dia{dias === 1 ? "" : "s"}
+              </span>
+            )}
+          </div>
+          <FlagsObra flags={os.flags} onChange={fs => onFlagsChange(os.id, fs)} size={12} />
+        </div>
+        <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 11, color: "#94a3b8" }}>Itens</div>
+            <div style={{ fontWeight: 800, fontSize: 18 }}>{os.itens.length}</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 11, color: "#94a3b8" }}>Peças</div>
+            <div style={{ fontWeight: 800, fontSize: 18 }}>{os.itens.reduce((a, i) => a + (i.qtd || 0), 0)}</div>
+          </div>
+          <div style={{ minWidth: 120 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <span style={{ fontSize: 11, color: "#94a3b8" }}>Progresso</span>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>{pct}%</span>
+            </div>
+            <ProgressBar value={pct} height={8} />
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <select
+              value={os.status}
+              onClick={e => e.stopPropagation()}
+              onChange={e => { e.stopPropagation(); onStatusChange(os.id, e.target.value); }}
+              style={{ background: statusColor + "22", color: statusColor, border: `1px solid ${statusColor}55`, borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+            >
+              {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Obra com dois ou mais contratos: cabeçalho consolidado + uma linha por contrato.
+// Status e bandeiras ficam na linha do contrato, não no cabeçalho — são dele.
+function CardGrupo({ g, equipes, onSelect, onStatusChange, onFlagsChange, onAbrirGrupo, alca, dragProps, isDragging, isOver }) {
+  return (
+    <div {...dragProps}
+      style={{ ...cardBase(isOver, isDragging), borderLeft: "4px solid #1d4ed8", overflow: "hidden" }}
+      onMouseEnter={realce.entra} onMouseLeave={realce.sai}
+    >
+      {/* Cabeçalho da obra */}
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap", padding: "16px 22px 14px" }}>
+        {alca}
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <div style={{ fontWeight: 800, fontSize: 16, color: "#1e293b" }}>{g.nome}</div>
+            <BotaoGrupo n={g.contratos.length} onClick={onAbrirGrupo} />
+            {g.emAlerta > 0 && (
+              <span title={`${g.emAlerta} contrato(s) com compras acima do que ainda vai receber`} style={{ fontSize: 17, lineHeight: 1 }}>🚩</span>
+            )}
+          </div>
+          <div style={{ fontSize: 11.5, color: "#94a3b8", marginTop: 3 }}>
+            {[...new Set(g.contratos.map(o => o.cidade).filter(Boolean))].join(" · ") || "—"}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 10, color: "#f59e0b", fontWeight: 700, textTransform: "uppercase" }}>● A Receber</div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#f59e0b" }}>R$ {fmt(g.fin.aReceber)}</div>
+          </div>
+          <div>
+            <div style={{ fontSize: 10, color: "#dc2626", fontWeight: 700, textTransform: "uppercase" }}>● A Pagar</div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#dc2626" }}>R$ {fmt(g.fin.aPagar)}</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 11, color: "#94a3b8" }}>Itens</div>
+            <div style={{ fontWeight: 800, fontSize: 18 }}>{g.itens}</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 11, color: "#94a3b8" }}>Peças</div>
+            <div style={{ fontWeight: 800, fontSize: 18 }}>{g.pecas}</div>
+          </div>
+          <div style={{ minWidth: 120 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+              <span style={{ fontSize: 11, color: "#94a3b8" }}>Progresso</span>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>{g.pct}%</span>
+            </div>
+            <ProgressBar value={g.pct} height={8} />
+          </div>
+        </div>
+      </div>
+
+      {/* Uma linha por contrato */}
+      <div style={{ background: "#f8fafc", borderTop: "1px solid #e2e8f0" }}>
+        {g.contratos.map(os => (
+          <LinhaContrato key={os.id} os={os} equipes={equipes}
+            onSelect={onSelect} onStatusChange={onStatusChange} onFlagsChange={onFlagsChange} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LinhaContrato({ os, equipes, onSelect, onStatusChange, onFlagsChange }) {
+  const pct = os.itens.length > 0
+    ? Math.round(os.itens.reduce((a, i) => a + itemPercentual(i), 0) / os.itens.length)
+    : 0;
+  const statusColor = STATUS_COLORS[os.status] || "#94a3b8";
+  const fin = finObra(os);
+  const dias = diasDesdeContrato(os);
+  return (
+    <div onClick={() => onSelect(os.id)}
+      title="Abrir este contrato"
+      style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap", padding: "11px 22px", borderTop: "1px solid #eef2f7", cursor: "pointer" }}
+      onMouseEnter={e => e.currentTarget.style.background = "#f1f5f9"}
+      onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+    >
+      <div style={{ background: "#1a1a1a", color: "#fff", borderRadius: 7, padding: "3px 11px", fontWeight: 800, fontSize: 14, minWidth: 54, textAlign: "center" }}>
+        #{os.numero}
+      </div>
+      {precisaAlertaCompras(os) && (
+        <span title="Falta comprar mais do que ainda vai receber deste contrato" style={{ fontSize: 15, lineHeight: 1 }}>🚩</span>
+      )}
+      <div style={{ flex: 1, minWidth: 170 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1e293b" }}>{os.obra || "—"}</div>
+        <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 1 }}>
+          {os.cidade || "—"} · A receber R$ {fmt(fin.aReceber)}
+          {dias !== null && <span style={{ color: corDias(dias), fontWeight: 800 }}> · ⏱ {dias}d</span>}
+        </div>
+        <EquipesDaObra ids={os.equipes} equipes={equipes} />
+      </div>
+      <div onClick={e => e.stopPropagation()}>
+        <FlagsObra flags={os.flags} onChange={fs => onFlagsChange(os.id, fs)} size={11} />
+      </div>
+      <div style={{ textAlign: "center" }}>
+        <div style={{ fontSize: 10, color: "#94a3b8" }}>Itens</div>
+        <div style={{ fontWeight: 800, fontSize: 14 }}>{os.itens.length}</div>
+      </div>
+      <div style={{ minWidth: 100 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+          <span style={{ fontSize: 10, color: "#94a3b8" }}>Progresso</span>
+          <span style={{ fontSize: 11, fontWeight: 700 }}>{pct}%</span>
+        </div>
+        <ProgressBar value={pct} height={7} />
+      </div>
+      <select
+        value={os.status}
+        onClick={e => e.stopPropagation()}
+        onChange={e => { e.stopPropagation(); onStatusChange(os.id, e.target.value); }}
+        style={{ background: statusColor + "22", color: statusColor, border: `1px solid ${statusColor}55`, borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+      >
+        {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+      </select>
+    </div>
+  );
+}
+
+// Separar um contrato do grupo, devolvê-lo ao automático, ou juntar esta obra a outro grupo.
+// A chave gravada em `obra.grupo` vence a automática por nome de cliente.
+function ModalAgrupamento({ grupo, grupos, onFechar, onGrupoChange }) {
+  const [destino, setDestino] = useState("");
+  useEffect(() => { setDestino(""); }, [grupo]);
+  if (!grupo) return null;
+
+  const outros = grupos.filter(g => g.chave !== grupo.chave);
+  const sozinha = grupo.contratos.length === 1;
+  const separada = sozinha && String(grupo.contratos[0].grupo || "").startsWith("solo:");
+
+  return (
+    <Modal open={!!grupo} title="Agrupamento de contratos" onClose={onFechar} width={480}>
+      <div style={{ fontSize: 12.5, color: "#475569", marginBottom: 14, lineHeight: 1.5 }}>
+        Contratos do mesmo cliente andam juntos como uma obra só. O sistema agrupa sozinho pelo nome —
+        aqui você corrige quando ele erra.
+      </div>
+
+      <div style={{ fontSize: 10.5, color: "#94a3b8", fontWeight: 800, textTransform: "uppercase", marginBottom: 6 }}>
+        {sozinha ? "Esta obra" : `${grupo.contratos.length} contratos nesta obra`}
+      </div>
+      <div style={{ border: "1px solid #e2e8f0", borderRadius: 9, marginBottom: 16, overflow: "hidden" }}>
+        {grupo.contratos.map(o => (
+          <div key={o.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderBottom: "1px solid #f1f5f9" }}>
+            <span style={{ fontWeight: 800, fontSize: 12.5, color: "#1a1a1a", minWidth: 52 }}>#{o.numero}</span>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: "#475569", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {o.obra || o.cliente}
+            </span>
+            {!sozinha && (
+              <button onClick={() => onGrupoChange(o.id, "solo:" + o.id)}
+                title="Tirar este contrato da obra — ele passa a ser uma obra própria"
+                style={{ background: "#fff", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 7, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                Separar
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {separada && (
+        <button onClick={() => { onGrupoChange(grupo.contratos[0].id, ""); onFechar(); }}
+          style={{ width: "100%", background: "#f1f5f9", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 8, padding: "9px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer", marginBottom: 14 }}>
+          ↩ Voltar a agrupar pelo nome do cliente
+        </button>
+      )}
+
+      <div style={{ fontSize: 10.5, color: "#94a3b8", fontWeight: 800, textTransform: "uppercase", marginBottom: 6 }}>
+        Juntar a outra obra
+      </div>
+      <div style={{ fontSize: 11.5, color: "#94a3b8", marginBottom: 8, lineHeight: 1.45 }}>
+        Para quando o nome do cliente foi escrito diferente nas duas propostas e o sistema não juntou.
+        {!sozinha && " Move todos os contratos acima."}
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <select value={destino} onChange={e => setDestino(e.target.value)}
+          style={{ flex: 1, minWidth: 0, border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 10px", fontSize: 12.5, background: "#fff", cursor: "pointer" }}>
+          <option value="">— escolha a obra —</option>
+          {outros.map(g => (
+            <option key={g.chave} value={g.chave}>
+              {g.nome} ({g.contratos.map(o => "#" + o.numero).join(", ")})
+            </option>
+          ))}
+        </select>
+        <button disabled={!destino}
+          onClick={() => { grupo.contratos.forEach(o => onGrupoChange(o.id, destino)); onFechar(); }}
+          style={{ background: destino ? "#1d4ed8" : "#e2e8f0", color: destino ? "#fff" : "#94a3b8", border: "none", borderRadius: 8, padding: "8px 16px", fontWeight: 700, fontSize: 12, cursor: destino ? "pointer" : "not-allowed" }}>
+          Juntar
+        </button>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 18 }}>
+        <button onClick={onFechar}
+          style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 7, padding: "7px 16px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Fechar</button>
+      </div>
+    </Modal>
+  );
+}
+
 // ─── DASHBOARD ────────────────────────────────────────────────────────────────
 // Tela de uma pasta (Em Andamento / Concluídas): lista completa daquele grupo, com busca, filtro,
 // ordenação e arrastar — igual ao Dashboard de antes, só que operando num subconjunto por status.
 // KPIs recalculados aqui em cima do subconjunto é o que dá o "percentual real de execução".
-function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, onFlagsChange, equipes }) {
-  const obras = todas.filter(o => pasta === "concluidas" ? o.status === "Concluído" : o.status !== "Concluído");
+//
+// A unidade da tela é o GRUPO (um cliente, um ou vários contratos), não a obra solta: é ele que
+// filtra, ordena e arrasta. A pasta é decidida pelo grupo inteiro — enquanto sobrar um contrato
+// aberto, a obra não está concluída e o grupo fica em Em Andamento com todos os contratos juntos.
+function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, onFlagsChange, onGrupoChange, equipes }) {
+  const gruposTodos = agruparObras(todas);
+  const grupos = gruposTodos.filter(g => pasta === "concluidas" ? g.concluido : !g.concluido);
+  const obras = grupos.flatMap(g => g.contratos);   // os contratos desta pasta, para os KPIs
 
   const [search, setSearch] = useState("");
   const [filterStatus, setFilterStatus] = useState("Todos");
@@ -1922,33 +2323,32 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
   useEffect(() => { gravarPref("dash.sortDir", sortDir); }, [sortDir]);
   // Ref (não estado): o navegador decide se o arrasto pode começar no próprio mousedown,
   // antes de qualquer re-render do React — um estado aqui chegaria tarde demais.
-  const dragArmed = useRef(null);                   // id com alça pressionada (pode arrastar)
-  const [dragId, setDragId] = useState(null);       // id sendo arrastado
-  const [overId, setOverId] = useState(null);       // id sob o cursor
+  const dragArmed = useRef(null);                   // chave do grupo com alça pressionada
+  const [dragId, setDragId] = useState(null);       // chave do grupo sendo arrastado
+  const [overId, setOverId] = useState(null);       // chave do grupo sob o cursor
+  const [agrupando, setAgrupando] = useState(null); // grupo com o modal de agrupamento aberto
 
-  const pctObra = (o) => o.itens.length ? Math.round(o.itens.reduce((a, i) => a + itemPercentual(i), 0) / o.itens.length) : 0;
-  const pecasObra = (o) => o.itens.reduce((a, i) => a + (i.qtd || 0), 0);
-
-  const filtered = obras.filter(o => {
-    const q = search.toLowerCase();
-    const matchText = !q || o.cliente.toLowerCase().includes(q) || o.numero.includes(q) || (o.obra || "").toLowerCase().includes(q) || (o.cidade || "").toLowerCase().includes(q);
-    const matchStatus = filterStatus === "Todos" || o.status === filterStatus;
-    return matchText && matchStatus;
-  });
+  // Um grupo casa se QUALQUER contrato dele casar — o grupo nunca se parte por busca ou filtro.
+  const q = search.toLowerCase();
+  const contratoCasa = (o) =>
+    (!q || (o.cliente || "").toLowerCase().includes(q) || String(o.numero || "").includes(q)
+      || (o.obra || "").toLowerCase().includes(q) || (o.cidade || "").toLowerCase().includes(q))
+    && (filterStatus === "Todos" || o.status === filterStatus);
+  const filtered = grupos.filter(g => g.contratos.some(contratoCasa));
 
   // Ordenação escolhida (base crescente + direção). "ordem" = ordem manual/arrastar.
   // Sempre ordena explicitamente pelo campo `ordem` (com o mesmo fallback usado na carga inicial)
   // em vez de confiar na posição do array — assim funciona não importa como o estado foi atualizado.
   const dirF = sortDir === "asc" ? 1 : -1;
-  const ordemDe = (o) => Number.isFinite(o.ordem) ? o.ordem : 1e9 + (Number(o.numero) || 0);
-  const displayed = sortBy === "ordem" ? [...filtered].sort((a, b) => ordemDe(a) - ordemDe(b)) : [...filtered].sort((a, b) => {
+  const menorNumero = (g) => Math.min(...g.contratos.map(o => Number(o.numero) || 0));
+  const displayed = sortBy === "ordem" ? [...filtered].sort((a, b) => a.ordem - b.ordem) : [...filtered].sort((a, b) => {
     let r = 0;
     switch (sortBy) {
-      case "numero": r = (Number(a.numero) || 0) - (Number(b.numero) || 0); break;
-      case "nome":   r = a.cliente.localeCompare(b.cliente, "pt-BR"); break;
-      case "pct":    r = pctObra(a) - pctObra(b); break;
-      case "itens":  r = a.itens.length - b.itens.length; break;
-      case "pecas":  r = pecasObra(a) - pecasObra(b); break;
+      case "numero": r = menorNumero(a) - menorNumero(b); break;
+      case "nome":   r = a.nome.localeCompare(b.nome, "pt-BR"); break;
+      case "pct":    r = a.pct - b.pct; break;
+      case "itens":  r = a.itens - b.itens; break;
+      case "pecas":  r = a.pecas - b.pecas; break;
     }
     return r * dirF;
   });
@@ -1958,16 +2358,20 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
 
   function limparDrag() { setDragId(null); setOverId(null); dragArmed.current = null; }
 
-  function handleDrop(targetId) {
-    if (!dragId || dragId === targetId) { limparDrag(); return; }
+  // Arrasta GRUPO, não contrato: é isso que mantém os contratos do mesmo cliente grudados.
+  function handleDrop(targetChave) {
+    if (!dragId || dragId === targetChave) { limparDrag(); return; }
     // Insere sempre ANTES do alvo, igual à linha preta que marca o ponto de soltura.
-    // Usa `displayed` (já ordenado pelo campo `ordem`) — não `obras` cru, que preserva a ordem
-    // de carregamento e fica dessincronizado da tela assim que algum `ordem` muda.
-    const ids = displayed.map(o => o.id).filter(id => id !== dragId);
-    const to = ids.indexOf(targetId);
+    // Usa `displayed` (já ordenado) — não a lista crua, que preserva a ordem de carregamento e
+    // fica dessincronizada da tela assim que algum `ordem` muda.
+    const restantes = displayed.filter(g => g.chave !== dragId);
+    const to = restantes.findIndex(g => g.chave === targetChave);
     if (to < 0) { limparDrag(); return; }
-    ids.splice(to, 0, dragId);
-    onReorder(ids);
+    const arrastado = displayed.find(g => g.chave === dragId);
+    restantes.splice(to, 0, arrastado);
+    // Achata para ids: handleReorder grava `ordem` = índice, então os contratos de um mesmo grupo
+    // recebem índices consecutivos e não têm como se separar depois.
+    onReorder(restantes.flatMap(g => g.contratos.map(c => c.id)));
     limparDrag();
   }
 
@@ -1981,7 +2385,7 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
       {/* KPI cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginBottom: 24 }}>
         {[
-          { label: "Total de Obras", value: obras.length, sub: `${obras.reduce((a,o)=>a+o.itens.length,0)} itens`, accent: "#1a1a1a" },
+          { label: "Total de Obras", value: grupos.length, sub: `${obras.length} contrato${obras.length === 1 ? "" : "s"} · ${obras.reduce((a,o)=>a+o.itens.length,0)} itens`, accent: "#1a1a1a" },
           { label: "Total de Peças", value: totalPecas, sub: "em todas as obras", accent: "#c9a227" },
           { label: "Progresso Médio", value: `${progMedio}%`, sub: "de todas as obras", accent: "#10b981" },
         ].map(({ label, value, sub, accent }) => (
@@ -2027,126 +2431,38 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
           </button>
         )}
         <div style={{ fontSize: 13, color: "#94a3b8", display: "flex", alignItems: "center" }}>
-          {displayed.length} de {obras.length} obras
+          {displayed.length} de {grupos.length} obras
         </div>
       </div>
 
-      {/* Obra cards */}
+      {/* Cards — a unidade é o grupo. Com um contrato só, o card é o de sempre. */}
       <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {displayed.map(os => {
-          const pct = os.itens.length > 0
-            ? Math.round(os.itens.reduce((a, i) => a + itemPercentual(i), 0) / os.itens.length)
-            : 0;
-          const statusColor = STATUS_COLORS[os.status] || "#94a3b8";
-          const fin = finObra(os);
-          const dias = diasDesdeContrato(os);
-          const isDragging = dragId === os.id;
-          const isOver = overId === os.id && dragId && dragId !== os.id;
-          return (
-            <div key={os.id}
-              draggable={canReorder}
-              onDragStart={e => {
-                // Só arrasta se o gesto começou na alça ☰ (evita arrastar clicando no card inteiro)
-                if (dragArmed.current !== os.id) { e.preventDefault(); return; }
-                setDragId(os.id);
-                if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", os.id); }
-              }}
-              onDragOver={e => { if (canReorder && dragId) { e.preventDefault(); setOverId(os.id); } }}
-              onDrop={e => { e.preventDefault(); handleDrop(os.id); }}
-              onDragEnd={limparDrag}
-              style={{ background: "#fff", borderRadius: 12, padding: "18px 22px", boxShadow: "0 1px 4px rgba(0,0,0,0.07)", border: "1px solid #e2e8f0", borderTop: isOver ? "3px solid #1a1a1a" : "1px solid #e2e8f0", cursor: "pointer", transition: "box-shadow 0.15s", opacity: isDragging ? 0.4 : 1 }}
-              onClick={() => onSelect(os.id)}
-              onMouseEnter={e => e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,0.12)"}
-              onMouseLeave={e => e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.07)"}
-            >
-              <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
-                {canReorder && (
-                  <div
-                    title="Arraste para reordenar"
-                    onMouseDown={() => { dragArmed.current = os.id; }}
-                    onMouseUp={() => { dragArmed.current = null; }}
-                    onClick={e => e.stopPropagation()}
-                    style={{ alignSelf: "center", color: "#94a3b8", fontSize: 20, lineHeight: 1, cursor: "grab", padding: "0 4px", userSelect: "none" }}
-                  >☰</div>
-                )}
-                <div style={{ background: "#1a1a1a", color: "#fff", borderRadius: 8, padding: "6px 14px", fontWeight: 800, fontSize: 18, minWidth: 60, textAlign: "center" }}>
-                  #{os.numero}
-                </div>
-                {precisaAlertaCompras(os) && (
-                  <span title="Falta comprar mais do que ainda vai receber dessa obra" style={{ alignSelf: "center", fontSize: 20, lineHeight: 1 }}>🚩</span>
-                )}
-                <div style={{ flex: 1, minWidth: 180 }}>
-                  <div style={{ fontWeight: 700, fontSize: 15, color: "#1e293b" }}>{os.cliente}</div>
-                  <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{os.obra || "—"} · {os.cidade}</div>
-                  <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>
-                    Vendedor: {os.vendedor} · Início: {os.dataInicio ? fmtDate(os.dataInicio) : "a definir"}
-                  </div>
-                  {(os.equipes || []).length > 0 && (
-                    <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                      {(os.equipes || []).map(id => {
-                        const eq = equipes.find(e => e.id === id);
-                        if (!eq) return null;
-                        return (
-                          <span key={id} style={{ background: eq.cor + "1a", color: eq.cor, border: `1px solid ${eq.cor}55`, borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
-                            👷 {eq.nome}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-                {/* Informativo: o que ainda entra e o que ainda sai desta obra + contrato + bandeiras */}
-                <div style={{ minWidth: 230, display: "flex", flexDirection: "column", gap: 6 }}>
-                  <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
-                    <div>
-                      <div style={{ fontSize: 10, color: "#f59e0b", fontWeight: 700, textTransform: "uppercase" }}>● A Receber</div>
-                      <div style={{ fontSize: 15, fontWeight: 800, color: "#f59e0b" }}>R$ {fmt(fin.aReceber)}</div>
-                    </div>
-                    <div>
-                      <div style={{ fontSize: 10, color: "#dc2626", fontWeight: 700, textTransform: "uppercase" }}>● A Pagar</div>
-                      <div style={{ fontSize: 15, fontWeight: 800, color: "#dc2626" }}>R$ {fmt(fin.aPagar)}</div>
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 11, color: "#94a3b8", display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <span>Contrato: {os.dataContrato ? fmtDate(os.dataContrato) : "a definir"}</span>
-                    {dias !== null && (
-                      <span title="Dias corridos desde a data do contrato" style={{ color: corDias(dias), fontWeight: 800 }}>
-                        ⏱ {dias} dia{dias === 1 ? "" : "s"}
-                      </span>
-                    )}
-                  </div>
-                  <FlagsObra flags={os.flags} onChange={fs => onFlagsChange(os.id, fs)} size={12} />
-                </div>
-                <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ fontSize: 11, color: "#94a3b8" }}>Itens</div>
-                    <div style={{ fontWeight: 800, fontSize: 18 }}>{os.itens.length}</div>
-                  </div>
-                  <div style={{ textAlign: "center" }}>
-                    <div style={{ fontSize: 11, color: "#94a3b8" }}>Peças</div>
-                    <div style={{ fontWeight: 800, fontSize: 18 }}>{os.itens.reduce((a, i) => a + (i.qtd || 0), 0)}</div>
-                  </div>
-                  <div style={{ minWidth: 120 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                      <span style={{ fontSize: 11, color: "#94a3b8" }}>Progresso</span>
-                      <span style={{ fontSize: 12, fontWeight: 700 }}>{pct}%</span>
-                    </div>
-                    <ProgressBar value={pct} height={8} />
-                  </div>
-                  <div style={{ textAlign: "right" }}>
-                    <select
-                      value={os.status}
-                      onClick={e => e.stopPropagation()}
-                      onChange={e => { e.stopPropagation(); onStatusChange(os.id, e.target.value); }}
-                      style={{ background: statusColor + "22", color: statusColor, border: `1px solid ${statusColor}55`, borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-                    >
-                      {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
-                    </select>
-                  </div>
-                </div>
-              </div>
-            </div>
-          );
+        {displayed.map(g => {
+          const isDragging = dragId === g.chave;
+          const isOver = overId === g.chave && dragId && dragId !== g.chave;
+          const dragProps = {
+            draggable: canReorder,
+            onDragStart: e => {
+              // Só arrasta se o gesto começou na alça ☰ (evita arrastar clicando no card inteiro)
+              if (dragArmed.current !== g.chave) { e.preventDefault(); return; }
+              setDragId(g.chave);
+              if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", g.chave); }
+            },
+            onDragOver: e => { if (canReorder && dragId) { e.preventDefault(); setOverId(g.chave); } },
+            onDrop: e => { e.preventDefault(); handleDrop(g.chave); },
+            onDragEnd: limparDrag,
+          };
+          const alca = canReorder
+            ? <AlcaArrasto onArmar={() => { dragArmed.current = g.chave; }} onDesarmar={() => { dragArmed.current = null; }} />
+            : null;
+          const comum = {
+            equipes, onSelect, onStatusChange, onFlagsChange,
+            onAbrirGrupo: () => setAgrupando(g),
+            alca, dragProps, isDragging, isOver,
+          };
+          return g.contratos.length === 1
+            ? <CardObra key={g.chave} os={g.contratos[0]} {...comum} />
+            : <CardGrupo key={g.chave} g={g} {...comum} />;
         })}
         {displayed.length === 0 && (
           <div style={{ textAlign: "center", padding: 60, color: "#94a3b8", fontSize: 15 }}>
@@ -2154,6 +2470,9 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
           </div>
         )}
       </div>
+
+      <ModalAgrupamento grupo={agrupando} grupos={gruposTodos} onFechar={() => setAgrupando(null)}
+        onGrupoChange={onGrupoChange} />
     </div>
   );
 }
@@ -2165,15 +2484,18 @@ function Dashboard({ obras, onAbrirPasta }) {
   const progMedio  = obras.length > 0
     ? Math.round(obras.reduce((a, o) => a + (o.itens.length > 0 ? o.itens.reduce((b, i) => b + itemPercentual(i), 0) / o.itens.length : 0), 0) / obras.length)
     : 0;
-  const emAndamento = obras.filter(o => o.status !== "Concluído").length;
-  const concluidas = obras.length - emAndamento;
+  // Conta OBRAS (grupos de contrato), não propostas. Um grupo só é concluído quando todos os
+  // seus contratos estão — enquanto sobra um aberto, a obra continua em andamento.
+  const grupos = agruparObras(obras);
+  const emAndamento = grupos.filter(g => !g.concluido).length;
+  const concluidas = grupos.length - emAndamento;
 
   return (
     <div style={{ padding: "24px 28px" }}>
       {/* KPI cards — todas as obras, sem filtro por pasta */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginBottom: 24 }}>
         {[
-          { label: "Total de Obras", value: obras.length, sub: `${obras.reduce((a,o)=>a+o.itens.length,0)} itens`, accent: "#1a1a1a" },
+          { label: "Total de Obras", value: grupos.length, sub: `${obras.length} contrato${obras.length === 1 ? "" : "s"} · ${obras.reduce((a,o)=>a+o.itens.length,0)} itens`, accent: "#1a1a1a" },
           { label: "Total de Peças", value: totalPecas, sub: "em todas as obras", accent: "#c9a227" },
           { label: "Progresso Médio", value: `${progMedio}%`, sub: "de todas as obras", accent: "#10b981" },
         ].map(({ label, value, sub, accent }) => (
@@ -2409,15 +2731,27 @@ function FinanceiroView({ obras, unlocked, onUnlock }) {
     );
   }
 
+  // Uma linha por obra (grupo de contratos), não por proposta. O total continua somando tudo —
+  // o que muda é a distribuição entre as linhas.
   const total = obras.reduce((a, o) => a + (o.valorTotal || 0), 0);
-  const sorted = [...obras].sort((a, b) => (b.valorTotal || 0) - (a.valorTotal || 0));
+  const linhas = agruparObras(obras)
+    .map(g => ({
+      chave: g.chave,
+      nome: g.nome,
+      numeros: g.contratos.map(o => "#" + o.numero).join(" · "),
+      cidades: [...new Set(g.contratos.map(o => o.cidade).filter(Boolean))].join(" · "),
+      valor: g.fin.total,
+    }))
+    .sort((a, b) => b.valor - a.valor);
   return (
     <div style={{ padding: "24px 28px", maxWidth: 900, margin: "0 auto" }}>
       <h2 style={{ fontSize: 20, fontWeight: 800, color: BRAND, marginBottom: 16 }}>Financeiro</h2>
       <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", borderLeft: "4px solid #c9a227", marginBottom: 20 }}>
         <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Total em Obras</div>
         <div style={{ fontSize: 28, fontWeight: 800, color: "#c9a227" }}>R$ {fmt(total)}</div>
-        <div style={{ fontSize: 12, color: "#64748b", marginTop: 4 }}>{obras.length} pedidos</div>
+        <div style={{ fontSize: 12, color: "#64748b", marginTop: 4 }}>
+          {linhas.length} obra{linhas.length === 1 ? "" : "s"} · {obras.length} pedido{obras.length === 1 ? "" : "s"}
+        </div>
       </div>
       <div style={{ background: "#fff", borderRadius: 12, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", overflow: "hidden" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
@@ -2429,13 +2763,13 @@ function FinanceiroView({ obras, unlocked, onUnlock }) {
             </tr>
           </thead>
           <tbody>
-            {sorted.map((o, i) => (
-              <tr key={o.id} style={{ background: i % 2 ? "#f8fafc" : "#fff", borderBottom: "1px solid #e2e8f0" }}>
-                <td style={{ padding: "7px 12px", fontWeight: 700 }}>#{o.numero}</td>
-                <td style={{ padding: "7px 12px" }}>{o.cliente}</td>
-                <td style={{ padding: "7px 12px", color: "#64748b" }}>{o.cidade}</td>
-                <td style={{ padding: "7px 12px", textAlign: "right", fontWeight: 700, color: "#c9a227" }}>R$ {fmt(o.valorTotal)}</td>
-                <td style={{ padding: "7px 12px", textAlign: "right", color: "#64748b" }}>{total ? ((o.valorTotal || 0) / total * 100).toFixed(1) : 0}%</td>
+            {linhas.map((l, i) => (
+              <tr key={l.chave} style={{ background: i % 2 ? "#f8fafc" : "#fff", borderBottom: "1px solid #e2e8f0" }}>
+                <td style={{ padding: "7px 12px", fontWeight: 700, whiteSpace: "nowrap" }}>{l.numeros}</td>
+                <td style={{ padding: "7px 12px" }}>{l.nome}</td>
+                <td style={{ padding: "7px 12px", color: "#64748b" }}>{l.cidades}</td>
+                <td style={{ padding: "7px 12px", textAlign: "right", fontWeight: 700, color: "#c9a227" }}>R$ {fmt(l.valor)}</td>
+                <td style={{ padding: "7px 12px", textAlign: "right", color: "#64748b" }}>{total ? (l.valor / total * 100).toFixed(1) : 0}%</td>
               </tr>
             ))}
           </tbody>
@@ -3432,6 +3766,17 @@ export default function App() {
     });
   }, [persistObra]);
 
+  // Agrupamento: "" volta ao automático por nome do cliente, "solo:<id>" separa a obra do grupo,
+  // qualquer outra chave junta a obra àquele grupo.
+  const handleGrupoChange = useCallback((id, grupo) => {
+    setObras(prev => {
+      const next = prev.map(o => o.id === id ? { ...o, grupo } : o);
+      const changed = next.find(o => o.id === id);
+      if (changed) persistObra(changed);
+      return next;
+    });
+  }, [persistObra]);
+
   // Reordenação manual das obras (arrastar): grava o índice em `ordem` e persiste os que mudaram
   // Atualiza só o `ordem` dos ids recebidos, preservando o resto do array — importante porque
   // agora quem chama pode ser uma pasta (subconjunto), não só a lista completa.
@@ -3660,7 +4005,7 @@ export default function App() {
                   : view.type === "financeiro"
                     ? <FinanceiroView obras={obras} unlocked={financeiroUnlocked} onUnlock={() => setFinanceiroUnlocked(true)} />
                     : view.type === "obrasPasta"
-                      ? <ObrasPasta obras={obras} pasta={view.pasta} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} onFlagsChange={handleFlagsChange} equipes={equipes} />
+                      ? <ObrasPasta obras={obras} pasta={view.pasta} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} onFlagsChange={handleFlagsChange} onGrupoChange={handleGrupoChange} equipes={equipes} />
                       : <Dashboard obras={obras} onAbrirPasta={(pasta) => navTo({ type: "obrasPasta", pasta })} />
       }
 

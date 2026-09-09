@@ -94,7 +94,7 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 
 | Tabela | PK | Colunas | `data` contém |
 |---|---|---|---|
-| `obras` | `id` (= nº da proposta, texto) | `numero`, `cliente`, `updated_at`, `data` | a obra inteira (itens, etapas, financeiro, compras) |
+| `obras` | `id` (= nº da proposta, texto) | `numero`, `cliente`, `updated_at`, `data` | a obra inteira (itens, etapas, financeiro, compras) + `grupo` (override do agrupamento por cliente) |
 | `equipes` | `id` | `nome`, `integrantes` (jsonb), `cor`, `arquivada` | — (essa não usa `data`) |
 | `ordens` | `id` | `numero`, `equipe_id`, `periodo_inicio`, `periodo_fim`, `data` | **histórica** — nenhum código lê ou grava (ver Decisões) |
 | `agenda` | `id` | `dia`, `equipe_id`, `obra_id`, `updated_at`, `data` | o serviço do dia: obra (ou avulso) × equipe × período + endereço, referência, descrição e `itens` (ids dos itens da obra que serão montados) |
@@ -235,6 +235,32 @@ fontes de verdade divergindo em silêncio. A coluna Pred. aceita **números de l
 MS Project) mas persiste **ids**, e a lista é ordenada por criação (não pelo `updated_at desc` do
 banco), senão os números mudariam sozinhos. Ciclo não trava: as arestas que o fecham são ignoradas
 e a tela avisa.
+
+**Obra é um cliente com N contratos, e o agrupamento é só de apresentação.** Duas propostas do
+mesmo cliente (BOL #2597 e #2695) são uma obra com dois contratos. Fundir os registros estava fora
+de cogitação: o `id` da obra **é** o número da proposta, e agenda, cronograma, lembretes e diário
+guardam esse `obraId` — além de os `item.id` serem sequenciais **por obra**, então concatenar itens
+faria a O.S. impressa casar item errado. Então cada contrato continua sendo uma obra no banco e
+quem agrupa é a tela: `agruparObras` monta o grupo, e Dashboard, as duas pastas e o Financeiro
+passam a contar grupos. Calendário, Diário, Cronograma e Lembretes seguem contrato a contrato,
+porque lá é preciso saber em qual proposta o serviço está sendo lançado.
+
+A chave vem de `chaveCliente` (maiúscula, sem acento, sem LTDA/ME/EIRELI), então grafia diferente
+ainda junta. `obra.grupo` é o override: `""` = automático, `"solo:<id>"` = separada à mão, qualquer
+outra chave = juntada à mão àquele grupo. É o que resolve homônimo e o inverso, "EDGARD MAX INC."
+que não bate com "EDGARD MAX INCORPORADORA LTDA".
+
+Duas consequências deliberadas: **o grupo só vai para Concluídas quando todos os contratos
+estiverem concluídos** (enquanto sobra um aberto, a obra não acabou — e o contrato já entregue
+aparece dentro de Em Andamento com o selo dele); e **busca e filtro nunca partem o grupo** — se
+qualquer contrato casa, o grupo inteiro aparece. Arrastar move o grupo: `handleDrop` achata os
+grupos em ids antes de chamar `onReorder`, então os contratos recebem `ordem` consecutivos e não
+têm como se separar depois.
+
+Nos consolidados, o financeiro soma **contrato a contrato** via `finObra` e nunca recalcula sobre
+valores já somados — o clamp `Math.max(0, total - recebido)` de `finObra` é o que impede o
+adiantamento de um contrato mascarar o que o outro tem a receber. O `pct` do grupo é a média sobre
+os itens de todos os contratos juntos, não a média das médias.
 
 **A etiqueta do lembrete é derivada, o prazo é o dado.** O painel grava três fatos (`concluido`,
 `emAndamento`, `prazo`) e `statusLembrete` deduz o rótulo: concluído > atrasado (prazo vencido e não
