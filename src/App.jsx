@@ -5,6 +5,7 @@ import { supabase } from "./supabase";
 import { fetchObras, upsertObra, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario } from "./api";
 import { agendar, agendarMacro, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent } from "./cronograma";
 import Modal from "./Modal";
+import { chaveGrupo } from "./agrupamento";
 import PainelLembretes, { normLembrete } from "./PainelLembretes";
 import DiarioView, { DiarioPrint, normDiario } from "./DiarioObra";
 
@@ -101,17 +102,9 @@ function finTotais(obras) {
 // número da proposta e agenda, cronograma, lembretes e diário todos guardam esse id. Fundir os
 // registros quebraria esses vínculos e faria os ids de item (sequenciais por obra) colidirem.
 
-// "BOL ENGENHARIA LTDA." e "Bol Engenharia" caem na mesma chave.
-function chaveCliente(nome) {
-  return (nome || "")
-    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")             // acento
-    .toUpperCase()
-    .replace(/[.,\-/]/g, " ")
-    .replace(/\b(LTDA|ME|EPP|EIRELI|MEI|CIA|S\s?A)\b/g, "")       // razão social
-    .replace(/\s+/g, " ").trim();
-}
-// A chave gravada à mão vence a automática. "solo:<id>" é uma obra que o usuário separou do grupo.
-function chaveGrupo(o) { return o.grupo || chaveCliente(o.cliente) || "solo:" + o.id; }
+// A chave em si mora em agrupamento.js, para o DiarioObra.jsx usar a mesma sem ciclo de
+// importação (o App importa o diário). Aqui fica só a consolidação, que depende de
+// finObra/itemPercentual.
 
 // Mesmo fallback da carga inicial e da ordenação da lista: sem `ordem`, vai para o fim por número.
 function ordemDeObra(o) { return Number.isFinite(o.ordem) ? o.ordem : 1e9 + (Number(o.numero) || 0); }

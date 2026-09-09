@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import Modal from "./Modal";
 import FotoMarkup, { redimensionarImagem, Assinatura } from "./FotoMarkup";
 import { uploadFotoDiario } from "./api";
+import { agruparSimples } from "./agrupamento";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Diário de Obras — um registro por obra por dia.
@@ -242,11 +243,16 @@ export default function DiarioView({ obras, equipes, agenda, diarios, obraInicia
   }
 
   // ── Nível 1: escolher a obra ──
+  // Um card por obra (cliente), não por proposta: a BOL com quatro contratos aparecia quatro
+  // vezes seguidas. O caderno continua sendo por contrato — é ele que o registro do dia amarra
+  // (a tabela `diarios` tem único em obra_id + dia) — então o card lista os contratos dentro.
   const termo = busca.trim().toLowerCase();
-  const lista = obras.filter(o => !termo ||
+  const casa = (o) => !termo ||
     String(o.numero).includes(termo) ||
     (o.cliente || "").toLowerCase().includes(termo) ||
-    (o.obra || "").toLowerCase().includes(termo));
+    (o.obra || "").toLowerCase().includes(termo);
+  // Se qualquer contrato casa, o grupo inteiro aparece — mesma regra da tela de Obras.
+  const lista = agruparSimples(obras).filter(g => g.contratos.some(casa));
 
   return (
     <div style={{ padding: "24px 28px", maxWidth: 1200, margin: "0 auto" }}>
@@ -262,21 +268,49 @@ export default function DiarioView({ obras, equipes, agenda, diarios, obraInicia
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
-        {lista.map(o => {
-          const meus = diarios.filter(d => d.obraId === o.id);
-          const ultimo = meus.reduce((max, d) => (d.dia > max ? d.dia : max), "");
+        {lista.map(g => {
+          const registrosDoGrupo = diarios.filter(d => g.contratos.some(o => o.id === d.obraId));
+          const ultimoGrupo = registrosDoGrupo.reduce((max, d) => (d.dia > max ? d.dia : max), "");
+          const varios = g.contratos.length > 1;
           return (
-            <div key={o.id} onClick={() => setObraId(o.id)}
-              style={{ ...painel, padding: 16, cursor: "pointer", borderLeft: `4px solid ${meus.length ? "#c9a227" : "#e2e8f0"}` }}
-              onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 4px 14px rgba(0,0,0,0.10)"; }}
-              onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; }}>
-              <div style={{ fontSize: 11, fontWeight: 800, color: "#94a3b8" }}>#{o.numero}</div>
-              <div style={{ fontSize: 14.5, fontWeight: 800, color: "#1a1a1a", marginTop: 2 }}>{o.cliente}</div>
-              <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{o.obra || "—"}</div>
-              <div style={{ fontSize: 11.5, color: meus.length ? "#475569" : "#cbd5e1", marginTop: 10, fontWeight: 600 }}>
-                {meus.length
-                  ? `${meus.length} registro${meus.length > 1 ? "s" : ""} · último em ${dataBR(ultimo)}`
-                  : "Nenhum registro ainda"}
+            <div key={g.chave}
+              style={{ ...painel, padding: 0, overflow: "hidden", borderLeft: `4px solid ${registrosDoGrupo.length ? "#c9a227" : "#e2e8f0"}` }}>
+              <div style={{ padding: "14px 16px 12px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 800, color: "#1a1a1a" }}>{g.nome}</div>
+                  {varios && (
+                    <span style={{ background: "#eff6ff", color: "#1d4ed8", border: "1px solid #bfdbfe", borderRadius: 999, padding: "1px 8px", fontSize: 10, fontWeight: 800 }}>
+                      {g.contratos.length} contratos
+                    </span>
+                  )}
+                </div>
+                <div style={{ fontSize: 11.5, color: registrosDoGrupo.length ? "#475569" : "#cbd5e1", marginTop: 6, fontWeight: 600 }}>
+                  {registrosDoGrupo.length
+                    ? `${registrosDoGrupo.length} registro${registrosDoGrupo.length > 1 ? "s" : ""} · último em ${dataBR(ultimoGrupo)}`
+                    : "Nenhum registro ainda"}
+                </div>
+              </div>
+
+              {/* Uma linha por contrato: é ele que o registro do dia amarra. */}
+              <div style={{ borderTop: "1px solid #e2e8f0", background: "#f8fafc" }}>
+                {g.contratos.map(o => {
+                  const meus = diarios.filter(d => d.obraId === o.id);
+                  return (
+                    <div key={o.id} onClick={() => setObraId(o.id)}
+                      title="Abrir o caderno deste contrato"
+                      style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 16px", borderTop: "1px solid #eef2f7", cursor: "pointer" }}
+                      onMouseEnter={e => { e.currentTarget.style.background = "#eef2f7"; }}
+                      onMouseLeave={e => { e.currentTarget.style.background = "transparent"; }}>
+                      <span style={{ fontSize: 11, fontWeight: 800, color: "#94a3b8", minWidth: 42 }}>#{o.numero}</span>
+                      <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: "#475569", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {o.obra || "—"}
+                      </span>
+                      <span style={{ fontSize: 10.5, fontWeight: 700, color: meus.length ? "#c9a227" : "#cbd5e1", flexShrink: 0 }}>
+                        {meus.length || "—"}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           );

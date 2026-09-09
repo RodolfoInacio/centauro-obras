@@ -31,6 +31,7 @@ src/
   api.js           CRUD do Supabase (obras, equipes, agenda, cronogramas, lembretes, diários) + upload das fotos.
   supabase.js      Cria o client a partir das env vars.
   cronograma.js    Motor de agendamento do Cronograma Comercial (dias úteis, dependências).
+  agrupamento.js   Chave de agrupamento de obras por cliente (usada pelo App e pelo Diário).
   Modal.jsx        Modal genérico com backdrop.
   PainelLembretes.jsx  Mural de lembretes da coluna direita do calendário.
   DiarioObra.jsx   Diário de Obras: escolha da obra, caderno, editor do dia e folha impressa.
@@ -242,8 +243,16 @@ de cogitação: o `id` da obra **é** o número da proposta, e agenda, cronogram
 guardam esse `obraId` — além de os `item.id` serem sequenciais **por obra**, então concatenar itens
 faria a O.S. impressa casar item errado. Então cada contrato continua sendo uma obra no banco e
 quem agrupa é a tela: `agruparObras` monta o grupo, e Dashboard, as duas pastas e o Financeiro
-passam a contar grupos. Calendário, Diário, Cronograma e Lembretes seguem contrato a contrato,
-porque lá é preciso saber em qual proposta o serviço está sendo lançado.
+passam a contar grupos. O **seletor de obra do Diário** também agrupa (a BOL aparecia quatro vezes
+seguidas), mas só o card: o caderno continua sendo por contrato, e é uma linha por contrato dentro
+do card que abre cada um — o registro do dia amarra num `obra_id` só, e `diarios` tem único em
+(obra_id, dia). Calendário, Cronograma e Lembretes seguem contrato a contrato, porque lá é preciso
+saber em qual proposta o serviço está sendo lançado.
+
+A chave (`chaveCliente`/`chaveGrupo`) mora em **`src/agrupamento.js`**, não no `App.jsx`: o
+`DiarioObra.jsx` precisa dela e importar do `App.jsx` faria ciclo, já que o `App` importa o diário.
+Lá também está `agruparSimples`, que só agrupa; `agruparObras`, que consolida financeiro e
+progresso, fica no `App.jsx` porque depende de `finObra` e `itemPercentual`.
 
 A chave vem de `chaveCliente` (maiúscula, sem acento, sem LTDA/ME/EIRELI), então grafia diferente
 ainda junta. `obra.grupo` é o override: `""` = automático, `"solo:<id>"` = separada à mão, qualquer
