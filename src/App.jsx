@@ -2,13 +2,14 @@ import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from "rea
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
-import { fetchObras, upsertObra, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario } from "./api";
+import { fetchObras, upsertObra, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens } from "./api";
 import { agendar, agendarMacro, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent } from "./cronograma";
 import Modal from "./Modal";
 import { chaveGrupo } from "./agrupamento";
 import PainelLembretes, { normLembrete } from "./PainelLembretes";
 import DiarioView, { DiarioPrint, normDiario } from "./DiarioObra";
 import ComprasObra, { comprasTotais, normCompras, fornecedoresConhecidos } from "./ComprasObra";
+import EstoqueView, { EstoqueDocumentoPrint, EtiquetasPrint, SaidasEstoqueObra } from "./Estoque";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 // Brand color (was navy #1a1a1a) — now charcoal black
@@ -526,7 +527,7 @@ function parseObraLines(allLines, filename) {
 }
 
 // ─── GANTT VIEW ───────────────────────────────────────────────────────────────
-function GanttView({ obra, onChange, equipes, fornecedores = [] }) {
+function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque }) {
   const [expandedId, setExpandedId] = useState(null);
   const [localObra, setLocalObra] = useState(obra);
 
@@ -736,6 +737,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [] }) {
         </div>
         <ComprasObra compras={localObra.compras} sugestoes={fornecedores}
           onChange={c => update({ ...localObra, compras: c })} />
+        <SaidasEstoqueObra obraId={obra.id} onAbrirDoc={onAbrirDocEstoque} />
       </div>
 
       {/* Team bar */}
@@ -2585,6 +2587,7 @@ function SideMenu({ open, onClose, onNav, onImport, current }) {
     { key: "calendar", label: "Calendário", icon: "📅" },
     { key: "diario", label: "Diário de Obras", icon: "📓" },
     { key: "equipes", label: "Equipes", icon: "👷" },
+    { key: "estoque", label: "Estoque", icon: "📦" },
     { key: "cronogramas", label: "Cronograma Comercial", icon: "📊" },
     { key: "financeiro", label: "Financeiro", icon: "🔒" },
   ];
@@ -3490,6 +3493,12 @@ export default function App() {
   const [agenda, setAgenda] = useState([]);   // serviços do dia (obra x equipe)
   const [lembretes, setLembretes] = useState([]); // mural fixo ao lado do calendário
   const [diarios, setDiarios] = useState([]);     // diário de obra: um registro por obra por dia
+  // Estoque: itens com saldo, sempre relidos do banco depois de gravar (ver Estoque.jsx).
+  const [estoqueItens, setEstoqueItens] = useState([]);
+  const [estoqueErro, setEstoqueErro] = useState("");
+  // QR da etiqueta abre o app em ?item=EST-00012. Lido uma vez só, antes do login, e
+  // guardado aqui para sobreviver à tela de login (ela é um early-return deste componente).
+  const [itemQR, setItemQR] = useState(() => new URLSearchParams(window.location.search).get("item"));
   // Navegação: view atual + pilha de histórico (botão voltar universal)
   const [view, setView] = useState({ type: "dashboard" });
   const [history, setHistory] = useState([]);
@@ -3556,6 +3565,30 @@ export default function App() {
     })();
     return () => { cancel = true; };
   }, [session]);
+
+  // Carga separada do Promise.all acima: sem a migration_estoque.sql rodada, o resto do
+  // app abre normal e só a tela de Estoque mostra o aviso.
+  const recarregarEstoque = useCallback(async () => {
+    try {
+      setEstoqueItens(await fetchEstoqueItens());
+      setEstoqueErro("");
+    } catch (err) {
+      console.warn("fetchEstoqueItens:", err.message);
+      setEstoqueErro(err.message);
+    }
+  }, []);
+  useEffect(() => {
+    if (!session) { setEstoqueItens([]); return; }
+    recarregarEstoque();
+  }, [session, recarregarEstoque]);
+
+  useEffect(() => {
+    if (!session || !itemQR) return;
+    setView({ type: "estoque", codigo: itemQR });
+    setHistory([]);
+    window.history.replaceState(null, "", window.location.pathname); // F5 não reabre o item
+    setItemQR(null);
+  }, [session, itemQR]);
 
   function showError(msg) {
     setImportError(msg);
@@ -3829,11 +3862,17 @@ export default function App() {
     return <DiarioPrint diarios={diarios} obras={obras} equipes={equipes}
       obraId={view.obraId} inicio={view.inicio} fim={view.fim} onBack={back} />;
   }
+  if (view.type === "estoqueDoc") {
+    return <EstoqueDocumentoPrint docId={view.docId} equipes={equipes} onBack={back} />;
+  }
+  if (view.type === "estoqueEtiquetas") {
+    return <EtiquetasPrint itens={estoqueItens} itemIds={view.itemIds} onBack={back} />;
+  }
 
   const userEmail = session.user?.email || "";
   const selectedObra = view.type === "gantt" ? obras.find(o => o.id === view.obraId) : null;
   const canGoBack = history.length > 0 || view.type !== "dashboard";
-  const tituloView = { dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", financeiro: "Financeiro", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
+  const tituloView = { dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
 
   return (
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
@@ -3879,7 +3918,8 @@ export default function App() {
       {loading
         ? <div style={{ textAlign: "center", padding: 80, color: "#64748b", fontSize: 15 }}>Carregando obras…</div>
         : view.type === "gantt"
-          ? (selectedObra ? <GanttView obra={selectedObra} onChange={updateObra} equipes={equipes} fornecedores={fornecedoresConhecidos(obras)} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>)
+          ? (selectedObra ? <GanttView obra={selectedObra} onChange={updateObra} equipes={equipes} fornecedores={fornecedoresConhecidos(obras)}
+              onAbrirDocEstoque={docId => navTo({ type: "estoqueDoc", docId })} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>)
           : view.type === "calendar"
             ? <CalendarView obras={obras} equipes={equipes} agenda={agenda} lembretes={lembretes}
                 onSalvarAgendamento={handleSaveAgendamento} onExcluirAgendamento={handleDeleteAgendamento}
@@ -3908,6 +3948,12 @@ export default function App() {
                           dataBaseEfetiva={macro.mapa[view.id]?.origemId ? macro.mapa[view.id].dataBaseEfetiva : ""}
                           origemInicio={macro.mapa[view.id]?.origemId ? cronogramas.find(x => x.id === macro.mapa[view.id].origemId)?.titulo : ""} />
                       : <CenteredMsg>Cronograma não encontrado</CenteredMsg>)
+                  : view.type === "estoque"
+                    ? <EstoqueView itens={estoqueItens} erroCarga={estoqueErro} obras={obras} equipes={equipes}
+                        fornecedores={fornecedoresConhecidos(obras)} codigoInicial={view.codigo || null}
+                        onRecarregar={recarregarEstoque}
+                        onImprimirDoc={docId => navTo({ type: "estoqueDoc", docId })}
+                        onImprimirEtiquetas={itemIds => navTo({ type: "estoqueEtiquetas", itemIds })} />
                   : view.type === "financeiro"
                     ? <FinanceiroView obras={obras} unlocked={financeiroUnlocked} onUnlock={() => setFinanceiroUnlocked(true)} />
                     : view.type === "obrasPasta"

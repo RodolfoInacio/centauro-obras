@@ -5,8 +5,9 @@
 App web interno para acompanhar obras de esquadrias de alumínio e vidro: importa o orçamento em
 PDF, controla itens/etapas/equipes, distribui obra × equipe no calendário e imprime a O.S. dali,
 mantém um mural de lembretes ao lado do calendário, registra o diário de obra de cada dia (com
-foto marcada à mão), monta cronograma estilo MS Project e
-acompanha o financeiro por obra (recebido, a receber, compras por categoria).
+foto marcada à mão), monta cronograma estilo MS Project,
+acompanha o financeiro por obra (recebido, a receber, compras por categoria) e controla o
+estoque (entrada/saída com documento numerado, etiqueta com QR e código de barras).
 Uso interno do escritório — sem cadastro público, login criado manualmente no Supabase.
 Produção: <https://obras.centauroesquadrias.com.br>
 
@@ -21,14 +22,16 @@ Produção: <https://obras.centauroesquadrias.com.br>
 | Hospedagem | GitHub Pages (domínio próprio via `public/CNAME`) |
 
 Sem framework de teste, sem linter, sem router, sem lib de gráfico, sem lib de UI. Estilo é
-`style={{}}` inline em tudo.
+`style={{}}` inline em tudo. As únicas libs além de React/Supabase são `qrcode` e `jsbarcode`, só
+para as etiquetas do estoque, carregadas com `import()` na tela de etiquetas (chunk próprio).
 
 ## Estrutura
 
 ```
 src/
   App.jsx          ~2.700 linhas — quase todos os componentes e telas.
-  api.js           CRUD do Supabase (obras, equipes, agenda, cronogramas, lembretes, diários) + upload das fotos.
+  api.js           CRUD do Supabase (obras, equipes, agenda, cronogramas, lembretes, diários) + upload das fotos
+                   + estoque (leituras paginadas e as chamadas RPC de lançamento/estorno).
   supabase.js      Cria o client a partir das env vars.
   cronograma.js    Motor de agendamento do Cronograma Comercial (dias úteis, dependências).
   agrupamento.js   Chave de agrupamento de obras por cliente (usada pelo App e pelo Diário).
@@ -37,6 +40,8 @@ src/
   ComprasObra.jsx  Compras por categoria da obra: modelo (normCompras), totais e a tela.
   DiarioObra.jsx   Diário de Obras: escolha da obra, caderno, editor do dia e folha impressa.
   FotoMarkup.jsx   Rabisco sobre a foto (seta/caneta/retângulo/texto) + campo de assinatura.
+  Estoque.jsx      Estoque: lista, ficha do item, lançar documento, documentos, bloco da obra e as
+                   duas folhas impressas (documento e etiquetas).
   index.css        CSS global mínimo.
   assets/          Logos.
 supabase/
@@ -48,6 +53,7 @@ supabase/
   migration_lembretes.sql    Tabela `lembretes` (rodar separado).
   migration_lembretes_ordem_bigint.sql  Conserta `lembretes.ordem` int → bigint (rodar separado).
   migration_diario.sql       Tabela `diarios` + bucket `diario` (rodar separado).
+  migration_estoque.sql      Estoque: tabelas, view de saldo, triggers de imutabilidade e RPCs (rodar separado).
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF.
   SETUP.md                   Passo a passo de criação do projeto Supabase.
 docs/
@@ -118,6 +124,22 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 - `diarios` tem índice **único em (obra_id, dia)**: um registro por obra por dia, e duas abas
   abertas não conseguem criar dois.
 
+### Estoque — a exceção ao padrão `jsonb`
+
+| Tabela | O que é |
+|---|---|
+| `estoque_itens` | cadastro: `codigo` (EST-00001, único, nunca muda), `nome`, `categoria`, `unidade`, `local`, `estoque_minimo`, `arquivado`, `data jsonb` só para extras |
+| `estoque_documentos` | cabeçalho de entrada/saída/ajuste/estorno: `tipo`, `numero` (único por tipo), `motivo`, `dia`, `obra_id` + `obra_rotulo`, `equipe_id`, fornecedor/NF, `responsavel`, `recebido_por`, `obs`, `estorna_id` |
+| `estoque_movimentos` | uma linha por item do documento, `quantidade` com sinal (+ entra, − sai), nome e unidade fotografados |
+| `estoque_contadores` | numeração dos itens e de cada tipo de documento |
+| `estoque_saldos` (view) | saldo = soma dos movimentos. **Nunca gravado.** |
+
+- Documentos e movimentos só têm policy de **SELECT**. Escrita só pelas funções `estoque_lancar`,
+  `estoque_estornar` e `estoque_novo_item` (`security definer`, conferem `is_admin()`).
+- Triggers dão `raise exception` em UPDATE/DELETE/TRUNCATE de documentos e movimentos — valem até
+  para o `service_role` e para o SQL Editor. Item não se apaga, não troca de código e só arquiva com saldo zero.
+- `obra_id` sem FK de propósito: a obra pode ser apagada, o documento não.
+
 ## Backend
 
 Não há backend próprio. O front fala direto com o Supabase (PostgREST + Auth), protegido por RLS.
@@ -156,14 +178,18 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   Tipos de view: `dashboard`, `obrasPasta` (`pasta: "andamento"|"concluidas"`), `gantt` (`obraId`),
   `print` (`obraId`), `calendar`, `equipes`, `osPrint` (`inicio`, `fim`),
   `cronogramas` (o **macro**: todas as obras, uma por linha), `cronograma` (`id`, o micro de uma
-  obra), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`).
-  `calendar` e `diario` navegam por dentro (estado local), sem empilhar view — `DiaAgenda` e as
-  três telas do diário são early-returns dos próprios componentes.
+  obra), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`),
+  `estoque` (`codigo` opcional, vindo do QR), `estoqueDoc` (`docId`), `estoqueEtiquetas` (`itemIds`).
+  `calendar`, `diario` e `estoque` navegam por dentro (estado local), sem empilhar view — `DiaAgenda`,
+  as três telas do diário e as quatro do estoque são early-returns dos próprios componentes.
+  O QR da etiqueta abre `/?item=EST-00012`: o `App` lê o parâmetro uma vez (sobrevive à tela de
+  login), abre `{type: "estoque", codigo}` e limpa a URL.
 - **Persistência**: o estado local muda na hora; a gravação é **debounced em 700 ms por entidade**
   (`persistObra`, `handleSaveCronograma`, `handleSaveAgendamento`, `handleSaveLembrete`,
   `handleSaveDiario`). Equipes gravam imediatamente,
   uma por vez (`upsertEquipe`/`deleteEquipe`). O cronograma é o único com indicador de "não salvo"
-  (`dirtyCronoIds`), botão Salvar e aviso ao sair.
+  (`dirtyCronoIds`), botão Salvar e aviso ao sair. **O estoque não segue nada disso**: todo
+  lançamento espera o banco responder e depois relê a lista (`recarregarEstoque`) — ver Decisões.
 - **Migração de schema**: nunca migrar o banco — os campos novos entram com default em `normObra`
   / `normItem`, sempre undefined-safe. Registro antigo continua abrindo.
 - **Erros**: `api.js` faz `throw` no que é essencial (obras, equipes) e `console.warn` + `[]` no
@@ -363,6 +389,34 @@ continua no banco, então o dia antigo e a O.S. daquele dia seguem mostrando nom
 Ela reaparece na tela do dia só onde já tem serviço, com selo "arquivada" e sem receber serviço
 novo. `deleteEquipe` continua na `api.js` para exclusão manual, mas **nenhuma tela chama**.
 
+**Estoque é livro-razão, não documento `jsonb`.** O pedido foi "itens que jamais podem se perder", e
+o padrão do resto do app é justamente o que perde dado: objeto inteiro + upsert debounced deixa uma
+aba atrasada gravar um saldo velho por cima do novo, em silêncio. Então aqui: o **saldo nunca é
+gravado** (é a soma dos movimentos — mesma regra do % do grupo e da etiqueta do lembrete); documento
+e movimento são **imutáveis** (errou, estorna: documento novo com as quantidades invertidas,
+apontando para o original, e o histórico mostra os dois); e o lançamento é **uma função no banco**
+que grava cabeçalho + linhas numa transação, trava os itens com `select … for update` (em ordem de
+id, para não dar deadlock) e **recusa saída maior que o saldo**. Duas pessoas tirando a última
+unidade ao mesmo tempo: uma passa, a outra recebe o erro. O saldo negativo foi decisão do usuário:
+bloqueia, e diferença física entra por **ajuste de inventário**, que pede justificativa. No ajuste
+a tela manda a **contagem**, não a diferença — a função calcula `contagem − saldo` com o item
+travado, então uma saída lançada entre abrir a tela e confirmar não estraga a contagem.
+
+A numeração vem de `estoque_contadores`, atualizada dentro da transação. `sequence` do Postgres
+pula número quando a transação falha (e saída bloqueada é falha), e buraco em ENT/SAI parece
+documento sumido. A obra só fica no documento em "saída para obra" e "devolução de obra" — se uma
+compra guardasse obra, o bloco "Saiu do estoque para esta obra" contaria como devolução.
+
+A etiqueta tem QR (URL de produção com `?item=`) e Code128 (só o código). O campo de busca aceita
+os dois, e `codigoDoTexto` procura só o `item=`: leitor 2D configurado como teclado americano num
+Windows ABNT2 troca `/` e `?`, mas `=` e `-` ficam no lugar. Formatos de etiqueta são uma tabela
+em `FORMATOS_ETIQUETA` (mm) com deslocamento X/Y salvo por navegador, porque cada impressora erra
+alguns décimos. Etiqueta pequena e quase quadrada (térmica 50×30) põe o código de barras na largura
+inteira embaixo do QR: espremido ao lado ele fica fino demais para 203 dpi.
+
+`Exportar CSV` baixa itens e o livro inteiro: é a cópia que fica com a empresa, independente do
+plano de backup do Supabase.
+
 ## Armadilhas conhecidas
 
 - **`ordem` é `Date.now()`, então a coluna precisa ser `bigint`.** `lembretes` é a única tabela que
@@ -400,3 +454,10 @@ novo. `deleteEquipe` continua na `api.js` para exclusão manual, mas **nenhuma t
   está nas deps mas não é usado no `vite.config.js`.
 - **Deploy do Pages às vezes trava na fila** do GitHub (job `deploy` fica em `queued`
   indefinidamente com build já verde). Cancelar o run e disparar de novo resolve.
+- **O PostgREST devolve no máximo 1000 linhas e corta calado.** As leituras do estoque passam por
+  `todasAsLinhas` (`api.js`), que pagina com `.range()`. As outras tabelas ainda leem sem paginar —
+  com mais de 1000 obras ou serviços na agenda, a lista viria truncada sem erro.
+- **Etiqueta impressa do localhost aponta para produção** de propósito (`URL_ITEM` em
+  `Estoque.jsx`). Para testar o QR no dev, abra `http://localhost:<porta>/?item=EST-00001` à mão.
+- **`npm run dev` sobe na 5174 quando a 5173 está ocupada** — o `vite.config.js` não lê `PORT`,
+  então a porta que o preview anuncia pode não ser a real. Conferir no log do Vite.

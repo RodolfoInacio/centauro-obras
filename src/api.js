@@ -179,3 +179,174 @@ export async function removeFotoDiario(paths) {
   const { error } = await supabase.storage.from(BUCKET_DIARIO).remove(paths);
   if (error) console.warn("removeFotoDiario:", error.message); // sobra de arquivo não trava a UI
 }
+
+// ─── ESTOQUE (livro-razão) ───────────────────────────────────────────────────
+// Diferente do resto: documento e movimento só são gravados pelas funções do banco
+// (estoque_lancar / estoque_estornar), que travam os itens e conferem o saldo. O saldo
+// não é gravado em lugar nenhum — vem da view estoque_saldos. Aqui tudo faz throw:
+// estoque não é opcional, e erro engolido é lançamento que o usuário acha que existe.
+
+// O PostgREST devolve no máximo 1000 linhas por chamada e corta calado. Lista de estoque
+// truncada sem aviso é item "sumido", então tudo que pode crescer passa por aqui.
+const PAGINA = 1000;
+async function todasAsLinhas(montar) {
+  const out = [];
+  for (let de = 0; ; de += PAGINA) {
+    const { data, error } = await montar().range(de, de + PAGINA - 1);
+    if (error) throw error;
+    out.push(...(data || []));
+    if (!data || data.length < PAGINA) return out;
+  }
+}
+
+function itemEstoque(r, s) {
+  return {
+    id: r.id, codigo: r.codigo, nome: r.nome, categoria: r.categoria, unidade: r.unidade,
+    local: r.local || "", estoqueMinimo: Number(r.estoque_minimo) || 0, arquivado: !!r.arquivado,
+    data: r.data || {}, saldo: Number(s?.saldo) || 0, ultimaMov: s?.ultima_movimentacao || null,
+  };
+}
+
+function docEstoque(r) {
+  return {
+    id: r.id, tipo: r.tipo, numero: Number(r.numero), motivo: r.motivo, dia: r.dia,
+    obraId: r.obra_id || null, obraRotulo: r.obra_rotulo || "", equipeId: r.equipe_id || null,
+    fornecedor: r.fornecedor || "", nfNumero: r.nf_numero || "", responsavel: r.responsavel || "",
+    recebidoPor: r.recebido_por || "", obs: r.obs || "", estornaId: r.estorna_id || null, createdAt: r.created_at,
+  };
+}
+
+export async function fetchEstoqueItens() {
+  const [itens, saldos] = await Promise.all([
+    todasAsLinhas(() => supabase.from("estoque_itens").select("*").order("codigo")),
+    todasAsLinhas(() => supabase.from("estoque_saldos").select("*").order("item_id")),
+  ]);
+  const saldo = new Map(saldos.map(s => [s.item_id, s]));
+  return itens.map(r => itemEstoque(r, saldo.get(r.id)));
+}
+
+// Item novo passa pela função do banco, que tira o código do contador (EST-00001).
+export async function salvarItemEstoque(it) {
+  const campos = {
+    nome: (it.nome || "").trim(), categoria: it.categoria, unidade: it.unidade,
+    local: (it.local || "").trim() || null, estoque_minimo: Math.max(0, Number(it.estoqueMinimo) || 0),
+    data: it.data || {},
+  };
+  if (!it.id) {
+    const { data, error } = await supabase.rpc("estoque_novo_item", { item: campos });
+    if (error) throw error;
+    return data;
+  }
+  const { data, error } = await supabase.from("estoque_itens")
+    .update({ ...campos, arquivado: !!it.arquivado }).eq("id", it.id).select("id");
+  if (error) throw error;
+  // Mesmo caso do deleteEquipe: UPDATE barrado por RLS volta sem erro e sem linha.
+  if (!data || data.length === 0) throw new Error("O item não foi gravado — sem permissão ou ele não existe mais.");
+  return data[0];
+}
+
+// cab: { tipo, motivo, dia, obra_id, equipe_id, fornecedor, nf_numero, responsavel, recebido_por, obs }
+// linhas: [{ item_id, quantidade, valor_unitario }] ou, no ajuste, [{ item_id, contagem }]
+export async function lancarDocumentoEstoque(cab, linhas) {
+  const { data, error } = await supabase.rpc("estoque_lancar", { cab, linhas });
+  if (error) throw error;
+  return docEstoque(data);
+}
+
+export async function estornarDocumentoEstoque(docId, motivo, responsavel) {
+  const { data, error } = await supabase.rpc("estoque_estornar", { doc_id: docId, motivo, responsavel: responsavel || null });
+  if (error) throw error;
+  return docEstoque(data);
+}
+
+export async function fetchDocumentosEstoque({ inicio, fim } = {}) {
+  const [linhas, estornos] = await Promise.all([
+    todasAsLinhas(() => {
+      let q = supabase.from("estoque_documentos").select("*, estoque_movimentos(count)");
+      if (inicio) q = q.gte("dia", inicio);
+      if (fim) q = q.lte("dia", fim);
+      return q.order("created_at", { ascending: false });
+    }),
+    // Estorno é raro: vêm todos, para marcar o original mesmo que o estorno seja de outro mês.
+    todasAsLinhas(() => supabase.from("estoque_documentos").select("id, tipo, numero, estorna_id").eq("tipo", "estorno").order("numero")),
+  ]);
+  const idsOrig = [...new Set(linhas.filter(r => r.estorna_id).map(r => r.estorna_id))];
+  let originais = [];
+  if (idsOrig.length) {
+    const { data, error } = await supabase.from("estoque_documentos").select("id, tipo, numero").in("id", idsOrig);
+    if (error) throw error;
+    originais = data || [];
+  }
+  const porOriginal = new Map(estornos.map(e => [e.estorna_id, e]));
+  const orig = new Map(originais.map(o => [o.id, o]));
+  return linhas.map(r => ({
+    ...docEstoque(r),
+    qtdItens: r.estoque_movimentos?.[0]?.count ?? 0,
+    estornadoPor: porOriginal.get(r.id) || null,
+    estornaDe: r.estorna_id ? orig.get(r.estorna_id) || null : null,
+  }));
+}
+
+export async function fetchDocumentoEstoque(id) {
+  const { data, error } = await supabase.from("estoque_documentos")
+    .select("*, estoque_movimentos(id, item_id, quantidade, valor_unitario, item_nome, unidade, item:estoque_itens(codigo))")
+    .eq("id", id).maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error("Documento não encontrado.");
+  const [estorno, original] = await Promise.all([
+    supabase.from("estoque_documentos").select("id, tipo, numero, dia, obs").eq("estorna_id", id).maybeSingle(),
+    data.estorna_id
+      ? supabase.from("estoque_documentos").select("id, tipo, numero, dia").eq("id", data.estorna_id).maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+  ]);
+  if (estorno.error) throw estorno.error;
+  if (original.error) throw original.error;
+  return {
+    ...docEstoque(data),
+    linhas: (data.estoque_movimentos || []).sort((a, b) => a.id - b.id).map(m => ({
+      id: m.id, itemId: m.item_id, codigo: m.item?.codigo || "", nome: m.item_nome || "", unidade: m.unidade || "",
+      quantidade: Number(m.quantidade), valorUnitario: m.valor_unitario == null ? null : Number(m.valor_unitario),
+    })),
+    estornadoPor: estorno.data || null,
+    estornaDe: original.data || null,
+  };
+}
+
+export async function fetchMovimentosItem(itemId) {
+  const linhas = await todasAsLinhas(() => supabase.from("estoque_movimentos")
+    .select("id, quantidade, valor_unitario, created_at, doc:estoque_documentos(*)")
+    .eq("item_id", itemId).order("id", { ascending: false }));
+  return linhas.map(m => ({
+    id: m.id, quantidade: Number(m.quantidade), createdAt: m.created_at,
+    valorUnitario: m.valor_unitario == null ? null : Number(m.valor_unitario), doc: docEstoque(m.doc),
+  }));
+}
+
+// Resiliente como a agenda: é um bloco de consulta dentro da tela da obra. Sem a
+// migration rodada, devolve null e a tela da obra só não mostra o bloco.
+export async function fetchMovimentosObra(obraId) {
+  try {
+    const linhas = await todasAsLinhas(() => supabase.from("estoque_movimentos")
+      .select("id, item_id, quantidade, item_nome, unidade, item:estoque_itens(codigo), doc:estoque_documentos!inner(id, tipo, numero, dia, obra_id)")
+      .eq("doc.obra_id", obraId).order("id"));
+    return linhas.map(m => ({
+      id: m.id, itemId: m.item_id, codigo: m.item?.codigo || "", nome: m.item_nome || "", unidade: m.unidade || "",
+      quantidade: Number(m.quantidade), doc: { id: m.doc.id, tipo: m.doc.tipo, numero: Number(m.doc.numero), dia: m.doc.dia },
+    }));
+  } catch (err) {
+    console.warn("fetchMovimentosObra:", err.message);
+    return null;
+  }
+}
+
+// Para o CSV: o livro inteiro, na ordem em que foi lançado.
+export async function fetchTodosMovimentosEstoque() {
+  const linhas = await todasAsLinhas(() => supabase.from("estoque_movimentos")
+    .select("id, quantidade, valor_unitario, item_nome, unidade, created_at, item:estoque_itens(codigo), doc:estoque_documentos(*)")
+    .order("id"));
+  return linhas.map(m => ({
+    id: m.id, quantidade: Number(m.quantidade), createdAt: m.created_at,
+    valorUnitario: m.valor_unitario == null ? null : Number(m.valor_unitario),
+    codigo: m.item?.codigo || "", nome: m.item_nome || "", unidade: m.unidade || "", doc: docEstoque(m.doc),
+  }));
+}
