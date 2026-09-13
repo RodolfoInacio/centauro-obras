@@ -8,6 +8,7 @@ import Modal from "./Modal";
 import { chaveGrupo } from "./agrupamento";
 import PainelLembretes, { normLembrete } from "./PainelLembretes";
 import DiarioView, { DiarioPrint, normDiario } from "./DiarioObra";
+import ComprasObra, { comprasTotais, normCompras, fornecedoresConhecidos } from "./ComprasObra";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 // Brand color (was navy #1a1a1a) — now charcoal black
@@ -32,24 +33,8 @@ const STATUS_COLORS = {
 };
 const STATUS_OPTIONS = ["Aguardando", "Em andamento", "Concluído", "Atrasado"];
 
-// Compras por categoria (Perfil/Pintura/Acessório/Vidro) — previsto x realizado em R$.
-const CATEGORIAS_COMPRA = ["perfil", "pintura", "acessorio", "vidro"];
-const CATEGORIA_LABEL = { perfil: "Perfil", pintura: "Pintura", acessorio: "Acessório", vidro: "Vidro" };
-
-// Previsto e realizado são grandezas independentes: previsto é a estimativa de gasto daquele
-// material, realizado é o que de fato saiu. Nunca se somam nem se subtraem — o que está no
-// previsto e ainda não foi comprado É o próprio previsto, e é ele que falta comprar.
-function comprasTotais(obra) {
-  const compras = obra.compras || {};
-  let previsto = 0, realizado = 0;
-  for (const cat of CATEGORIAS_COMPRA) {
-    const v = compras[cat] || {};
-    if (v.naoSeAplica) continue;   // categoria riscada não entra em nenhum total
-    previsto += Number(v.previsto) || 0;
-    realizado += Number(v.realizado) || 0;
-  }
-  return { previsto, realizado, aComprar: previsto };
-}
+// Compras por categoria: modelo, totais e tela moram em ComprasObra.jsx.
+// "A comprar" = orçamentos lançados que ainda não viraram compra (ver comprasTotais).
 // Flag vermelha: o que ainda falta comprar é maior do que o que ainda vai entrar de caixa dessa obra.
 function precisaAlertaCompras(obra) {
   const { aComprar } = comprasTotais(obra);
@@ -70,7 +55,7 @@ function novaFlag(cor) {
 }
 
 // ─── FINANCEIRO CONSOLIDADO ──────────────────────────────────────────────────
-// O que ainda entra (a receber) e o que ainda sai (a pagar = previsto de compras, ver
+// O que ainda entra (a receber) e o que ainda sai (a pagar = orçado e não comprado, ver
 // comprasTotais). `aEntregar` é o valor de obra ainda não executado — o saldo físico.
 function finObra(o) {
   const itens = o.itens || [];
@@ -220,18 +205,9 @@ function normObra(o) {
     statusCompras: o.statusCompras || "Aguardando",
     statusFabricacao: o.statusFabricacao || "Aguardando",
     statusInstalacao: o.statusInstalacao || "Aguardando",
-    // Compras por categoria: valores (R$), datas e marcação de "não se aplica".
-    compras: CATEGORIAS_COMPRA.reduce((acc, cat) => {
-      const v = (o.compras || {})[cat] || {};
-      acc[cat] = {
-        previsto: Number(v.previsto) || 0,
-        realizado: Number(v.realizado) || 0,
-        dataCompra: v.dataCompra || "",
-        previsaoEntrega: v.previsaoEntrega || "",
-        naoSeAplica: !!v.naoSeAplica,
-      };
-      return acc;
-    }, {}),
+    // Compras por categoria: tipo, estoque e fornecedores (orçamento → compra → entrega + NF).
+    // O formato antigo (previsto/realizado soltos) é convertido em normCompras.
+    compras: normCompras(o.compras),
     itens: o.itens.map(normItem),
   };
 }
@@ -359,7 +335,7 @@ function PanoramaFinanceiro({ obras }) {
   const blocos = [
     { label: "● Recebido",  value: t.recebido,  cor: "#10b981", sub: t.total ? `${Math.round(t.recebido / t.total * 100)}% do contratado` : "—" },
     { label: "● A Receber", value: t.aReceber,  cor: "#f59e0b", sub: "ainda entra no caixa" },
-    { label: "● A Pagar",   value: t.aPagar,    cor: "#dc2626", sub: "compras previstas" },
+    { label: "● A Pagar",   value: t.aPagar,    cor: "#dc2626", sub: "orçado, ainda não comprado" },
     { label: "A Entregar",  value: t.aEntregar, cor: "#3b82f6", sub: "valor de obra não executado" },
   ];
   return (
@@ -550,7 +526,7 @@ function parseObraLines(allLines, filename) {
 }
 
 // ─── GANTT VIEW ───────────────────────────────────────────────────────────────
-function GanttView({ obra, onChange, equipes }) {
+function GanttView({ obra, onChange, equipes, fornecedores = [] }) {
   const [expandedId, setExpandedId] = useState(null);
   const [localObra, setLocalObra] = useState(obra);
 
@@ -630,12 +606,6 @@ function GanttView({ obra, onChange, equipes }) {
   const diasContrato = diasDesdeContrato(localObra);
   const compras = comprasTotais(localObra);
   const alertaCompras = precisaAlertaCompras(localObra);
-  function updCompraCategoria(cat, campo, valor) {
-    const atual = localObra.compras?.[cat] || { previsto: 0, realizado: 0 };
-    // Só previsto/realizado são dinheiro; datas são texto e naoSeAplica é booleano.
-    const v = (campo === "previsto" || campo === "realizado") ? Math.max(0, Number(valor) || 0) : valor;
-    update({ ...localObra, compras: { ...localObra.compras, [cat]: { ...atual, [campo]: v } } });
-  }
 
   const LEFT_COL = 340;
   const DAY_W = 18;
@@ -760,69 +730,12 @@ function GanttView({ obra, onChange, equipes }) {
           <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Compras por Categoria</span>
           {alertaCompras && (
             <span style={{ background: "#fee2e2", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 800 }}>
-              🚩 Falta comprar (R$ {fmt(compras.aComprar)}) mais do que ainda vai receber (R$ {fmt(valorAReceber)})
+              🚩 Orçado e ainda não comprado (R$ {fmt(compras.aComprar)}) é mais do que ainda vai receber (R$ {fmt(valorAReceber)})
             </span>
           )}
         </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: 640 }}>
-            <thead>
-              <tr style={{ color: "#94a3b8", textAlign: "left" }}>
-                <th style={{ padding: "2px 12px 4px 0", fontWeight: 700 }}>Categoria</th>
-                <th style={{ padding: "2px 12px 4px", fontWeight: 700, textAlign: "right" }}>Previsto (falta comprar)</th>
-                <th style={{ padding: "2px 12px 4px", fontWeight: 700, textAlign: "right" }}>Realizado</th>
-                <th style={{ padding: "2px 12px 4px", fontWeight: 700 }}>Data da compra</th>
-                <th style={{ padding: "2px 12px 4px", fontWeight: 700 }}>Previsão entrega</th>
-                <th style={{ padding: "2px 0 4px", fontWeight: 700, textAlign: "center" }}>N/A</th>
-              </tr>
-            </thead>
-            <tbody>
-              {CATEGORIAS_COMPRA.map(cat => {
-                const v = localObra.compras?.[cat] || { previsto: 0, realizado: 0 };
-                const na = !!v.naoSeAplica;
-                const inp = { border: "1px solid #e2e8f0", borderRadius: 5, padding: "3px 6px", fontSize: 12 };
-                return (
-                  <tr key={cat} style={na ? { opacity: 0.45, textDecoration: "line-through" } : undefined}>
-                    <td style={{ padding: "3px 12px 3px 0", fontWeight: 600, color: "#1e293b" }}>{CATEGORIA_LABEL[cat]}</td>
-                    <td style={{ padding: "3px 12px" }}>
-                      <input type="number" min={0} step="0.01" value={v.previsto} disabled={na}
-                        onChange={e => updCompraCategoria(cat, "previsto", e.target.value)}
-                        style={{ ...inp, width: 92, textAlign: "right", color: (!na && v.previsto > 0) ? "#dc2626" : "#1e293b", fontWeight: (!na && v.previsto > 0) ? 700 : 400 }} />
-                    </td>
-                    <td style={{ padding: "3px 12px" }}>
-                      <input type="number" min={0} step="0.01" value={v.realizado} disabled={na}
-                        onChange={e => updCompraCategoria(cat, "realizado", e.target.value)}
-                        style={{ ...inp, width: 92, textAlign: "right" }} />
-                    </td>
-                    <td style={{ padding: "3px 12px" }}>
-                      <input type="date" value={v.dataCompra || ""} disabled={na}
-                        onChange={e => updCompraCategoria(cat, "dataCompra", e.target.value)}
-                        style={inp} />
-                    </td>
-                    <td style={{ padding: "3px 12px" }}>
-                      <input type="date" value={v.previsaoEntrega || ""} disabled={na}
-                        onChange={e => updCompraCategoria(cat, "previsaoEntrega", e.target.value)}
-                        style={inp} />
-                    </td>
-                    <td style={{ padding: "3px 0", textAlign: "center" }}>
-                      <input type="checkbox" checked={na} title="Não se aplica a esta obra"
-                        onChange={e => updCompraCategoria(cat, "naoSeAplica", e.target.checked)}
-                        style={{ cursor: "pointer" }} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-            <tfoot>
-              <tr style={{ borderTop: "1px solid #e2e8f0" }}>
-                <td style={{ padding: "6px 12px 0 0", fontWeight: 800, color: "#1e293b" }}>Total</td>
-                <td style={{ padding: "6px 12px 0", textAlign: "right", fontWeight: 800, color: compras.aComprar > 0 ? "#dc2626" : "#1e293b" }}>R$ {fmt(compras.aComprar)}</td>
-                <td style={{ padding: "6px 12px 0", textAlign: "right", fontWeight: 800 }}>R$ {fmt(compras.realizado)}</td>
-                <td colSpan={3} />
-              </tr>
-            </tfoot>
-          </table>
-        </div>
+        <ComprasObra compras={localObra.compras} sugestoes={fornecedores}
+          onChange={c => update({ ...localObra, compras: c })} />
       </div>
 
       {/* Team bar */}
@@ -3966,7 +3879,7 @@ export default function App() {
       {loading
         ? <div style={{ textAlign: "center", padding: 80, color: "#64748b", fontSize: 15 }}>Carregando obras…</div>
         : view.type === "gantt"
-          ? (selectedObra ? <GanttView obra={selectedObra} onChange={updateObra} equipes={equipes} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>)
+          ? (selectedObra ? <GanttView obra={selectedObra} onChange={updateObra} equipes={equipes} fornecedores={fornecedoresConhecidos(obras)} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>)
           : view.type === "calendar"
             ? <CalendarView obras={obras} equipes={equipes} agenda={agenda} lembretes={lembretes}
                 onSalvarAgendamento={handleSaveAgendamento} onExcluirAgendamento={handleDeleteAgendamento}

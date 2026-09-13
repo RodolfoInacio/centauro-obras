@@ -34,6 +34,7 @@ src/
   agrupamento.js   Chave de agrupamento de obras por cliente (usada pelo App e pelo Diário).
   Modal.jsx        Modal genérico com backdrop.
   PainelLembretes.jsx  Mural de lembretes da coluna direita do calendário.
+  ComprasObra.jsx  Compras por categoria da obra: modelo (normCompras), totais e a tela.
   DiarioObra.jsx   Diário de Obras: escolha da obra, caderno, editor do dia e folha impressa.
   FotoMarkup.jsx   Rabisco sobre a foto (seta/caneta/retângulo/texto) + campo de assinatura.
   index.css        CSS global mínimo.
@@ -147,7 +148,8 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   (`valorRecebido`, `statusCompras`).
 - **Componentes**: por padrão tudo em `App.jsx`, na ordem em que aparece na navegação. Só sai para
   arquivo próprio o que é genérico e reutilizado (`Modal.jsx`, `FotoMarkup.jsx`) ou uma tela inteira
-  grande o bastante para afogar o `App.jsx` (`DiarioObra.jsx`, `PainelLembretes.jsx` — ver Decisões).
+  grande o bastante para afogar o `App.jsx` (`DiarioObra.jsx`, `PainelLembretes.jsx`, `ComprasObra.jsx`
+  — ver Decisões).
 - **Navegação**: sem router. Estado `view = {type, ...params}` no `App` + pilha `history`.
   `navTo` empilha, `navReplace` troca, `back` desempilha, `goHome` limpa. Todos passam por
   `guardNav`, que intercepta a saída se houver cronograma com gravação pendente.
@@ -187,11 +189,29 @@ metade já estava concluída. A tela inicial mostra só os KPIs gerais + duas pa
 real aparece dentro de "Em Andamento". Pasta é só um filtro por `status`, sem campo novo: mudar o
 status move a obra sozinha.
 
-**"A comprar" = o previsto, sem subtrair o realizado.** Previsto e realizado são grandezas
-independentes no processo da Centauro (previsto é estimativa daquele material; realizado é o que
-saiu). Subtrair zerava o pendente sempre que a obra já tinha gasto mais que o previsto restante.
-Por isso `comprasTotais().aComprar === previsto`, ignorando categorias marcadas `naoSeAplica`.
-A flag 🚩 acende quando `aComprar > (valorTotal − valorRecebido)`.
+**Compras: categoria → itens → orçamentos.** Desenhado com o setor de compras. Cada categoria
+(`obra.compras.perfil|pintura|acessorio|vidro`) tem `naoSeAplica` e uma lista `itens` — a mesma
+obra compra vários vidros diferentes. Cada item tem `tipo` (especificação técnica), `estoque`
+(`usado: ""|"sim"|"nao"` + `obs`) e uma lista `fornecedores`, que são os **orçamentos** daquele
+item. Cada um tem `aprovado`, `orcamento {data, valor, obs}`, `compra {data, valor, obs}`,
+`entrega {data, recebido, obs}` e `nf {numero, data}`. Status de orçamento e de item e o "valor
+total gasto" são **derivados**, nunca gravados.
+
+`normCompras` aceita três formatos: o atual (`itens`); a v1 de uma semana, com
+`tipo`/`estoque`/`fornecedores` direto na categoria (vira um item `it_0`, orçamentos sem a flag
+entram aprovados para manter a soma que ela fazia); e o antigo `previsto`/`realizado`/`dataCompra`/
+`previsaoEntrega` (vira um item `leg` com as linhas `leg_prev` — aprovada — e `leg_real`). Ids fixos
+porque `normObra` roda a cada carga; os totais antigos se mantêm e o registro só troca de formato
+na primeira gravação.
+
+**"A comprar" conta o orçamento aprovado; sem aprovação, o mais barato.** Pedir três orçamentos do
+mesmo vidro é o normal, e somá-los inflaria o A Pagar e acenderia a 🚩 à toa. Por item: se alguma
+linha está aprovada ou comprada, `aComprar` = soma dos orçamentos **aprovados ainda não comprados**
+(dois aprovados = compra dividida); senão, o **menor** orçamento do item, como estimativa da
+cotação. Uma linha conta como comprada quando a compra tem valor **ou** data, e aí entra em "gasto".
+Nunca se subtrai gasto de orçado — na tela antiga (previsto × realizado) subtrair zerava o pendente
+sempre que a obra já tinha gasto mais que o previsto restante. Categoria `naoSeAplica` fica fora de
+tudo. A flag 🚩 acende quando `aComprar > (valorTotal − valorRecebido)`.
 
 **Status de Compras/Fabricação/Instalação são campos manuais**, não derivados das etapas dos
 itens: a planilha que o escritório mantém já traz esses status prontos e é mais fiel que os
@@ -325,7 +345,7 @@ justamente a foto que existe para ser enxergada anularia a escolha.
 
 **Telas grandes saíram do `App.jsx`.** O diário sozinho passa de 900 linhas; empurrado para dentro,
 o `App.jsx` iria a ~4.500 e a cadeia de ternários do despacho ganharia mais um nível. `DiarioObra.jsx`
-e `PainelLembretes.jsx` são telas inteiras com estado próprio e interface estreita com o `App`
+e `PainelLembretes.jsx` (e depois `ComprasObra.jsx`) são telas inteiras com estado próprio e interface estreita com o `App`
 (props de dados + callbacks de gravação), então o custo de separar é zero e o ganho é navegar no
 arquivo. `FotoMarkup.jsx` é o caso clássico da regra antiga: genérico e reutilizado (o mesmo canvas
 serve o rabisco na foto e a assinatura no dedo). Componentes pequenos continuam no `App.jsx`.
