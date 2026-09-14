@@ -1,4 +1,5 @@
 import { Fragment, useState } from "react";
+import { Dinheiro, Oculto } from "./Sigilo";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Compras por categoria (Perfil/Pintura/Acessório/Vidro), do jeito que o setor de compras
@@ -15,9 +16,6 @@ export const CATEGORIA_LABEL = { perfil: "Perfil", pintura: "Pintura", acessorio
 function hojeLocal() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-function fmt(n) {
-  return Number(n).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 function fmtData(d) {
   if (!d) return "—";
@@ -43,6 +41,9 @@ function normFornecedor(f, idx, aprovadoPadrao = false) {
     compra:    { data: c.data || "", valor: dinheiro(c.valor), obs: c.obs || "" },
     entrega:   { data: e.data || "", recebido: !!e.recebido, obs: e.obs || "" },
     nf:        { numero: nf.numero || "", data: nf.data || "" },
+    // Entrada no estoque gerada pelo botão deste orçamento. Guardada para o botão virar o nº do
+    // documento e ninguém dar entrada duas vezes na mesma compra.
+    estoqueDoc: f.estoqueDoc && f.estoqueDoc.id ? { id: f.estoqueDoc.id, numero: f.estoqueDoc.numero || "" } : null,
   };
 }
 
@@ -207,12 +208,14 @@ function Chip({ cor, children, title }) {
 
 function CampoValor({ value, onChange }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-      <span style={{ fontSize: 11, color: "#64748b" }}>R$</span>
-      <input type="number" min={0} step="0.01" value={value || ""} placeholder="0,00"
-        onChange={e => onChange(dinheiro(e.target.value))}
-        style={{ ...inp, width: "100%", textAlign: "right" }} />
-    </div>
+    <Oculto>
+      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+        <span style={{ fontSize: 11, color: "#64748b" }}>R$</span>
+        <input type="number" min={0} step="0.01" value={value || ""} placeholder="0,00"
+          onChange={e => onChange(dinheiro(e.target.value))}
+          style={{ ...inp, width: "100%", textAlign: "right" }} />
+      </div>
+    </Oculto>
   );
 }
 
@@ -232,7 +235,7 @@ function Etapa({ titulo, cor, children }) {
   );
 }
 
-function CartaoFornecedor({ f, n, st, menor, onChange, onRemover }) {
+function CartaoFornecedor({ f, n, st, menor, onChange, onRemover, onEntradaEstoque, onAbrirDocEstoque }) {
   const set = (etapa, campo, valor) => onChange({ ...f, [etapa]: { ...f[etapa], [campo]: valor } });
   return (
     <div style={{ background: "#fff", border: `1px solid ${f.aprovado ? "#0891b255" : "#e2e8f0"}`, borderRadius: 8, padding: 10, opacity: st.apagado ? 0.6 : 1 }}>
@@ -292,12 +295,25 @@ function CartaoFornecedor({ f, n, st, menor, onChange, onRemover }) {
         <input value={f.nf.numero} placeholder="Nº da NF" onChange={e => set("nf", "numero", e.target.value)} style={{ ...inp, width: 140 }} />
         <span style={{ fontSize: 11, color: "#94a3b8" }}>emissão</span>
         <input type="date" value={f.nf.data} onChange={e => set("nf", "data", e.target.value)} style={inp} />
+        <div style={{ marginLeft: "auto" }}>
+          {f.estoqueDoc ? (
+            <button type="button" onClick={() => onAbrirDocEstoque && onAbrirDocEstoque(f.estoqueDoc.id)} title="Abrir o documento de entrada no estoque"
+              style={{ background: "#7c3aed1a", color: "#7c3aed", border: "1px solid #7c3aed55", borderRadius: 6, padding: "2px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+              📦 No estoque · {f.estoqueDoc.numero}
+            </button>
+          ) : comprado(f) && onEntradaEstoque ? (
+            <button type="button" onClick={onEntradaEstoque} title="Lança uma entrada no estoque já com o fornecedor e a NF deste orçamento"
+              style={{ background: "#fff", color: "#7c3aed", border: "1px solid #7c3aed", borderRadius: 6, padding: "2px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+              📦 Dar entrada no estoque
+            </button>
+          ) : null}
+        </div>
       </div>
     </div>
   );
 }
 
-function CartaoItem({ item, n, aberto, onAlternar, onChange, onRemover }) {
+function CartaoItem({ item, n, aberto, onAlternar, onChange, onRemover, onEntradaEstoque, onAbrirDocEstoque }) {
   const hoje = hojeLocal();
   const st = statusItem(item, hoje);
   const t = totaisItem(item);
@@ -325,8 +341,8 @@ function CartaoItem({ item, n, aberto, onAlternar, onChange, onRemover }) {
         </span>
         <Chip cor={st.cor}>{st.rotulo}</Chip>
         <span style={{ fontSize: 11, color: "#94a3b8", whiteSpace: "nowrap" }}>{qtdOrc} orçamento{qtdOrc === 1 ? "" : "s"}</span>
-        <span style={{ fontSize: 12, color: "#64748b", whiteSpace: "nowrap" }}>A comprar <b style={{ color: t.aComprar > 0 ? "#dc2626" : "#1e293b" }}>R$ {fmt(t.aComprar)}</b></span>
-        <span style={{ fontSize: 12, color: "#64748b", whiteSpace: "nowrap" }}>Gasto <b style={{ color: "#1e293b" }}>R$ {fmt(t.gasto)}</b></span>
+        <span style={{ fontSize: 12, color: "#64748b", whiteSpace: "nowrap" }}>A comprar <b style={{ color: t.aComprar > 0 ? "#dc2626" : "#1e293b" }}><Dinheiro v={t.aComprar} /></b></span>
+        <span style={{ fontSize: 12, color: "#64748b", whiteSpace: "nowrap" }}>Gasto <b style={{ color: "#1e293b" }}><Dinheiro v={t.gasto} /></b></span>
         <button type="button" onClick={e => { e.stopPropagation(); onRemover(); }} title="Remover este item"
           style={{ background: "transparent", color: "#94a3b8", border: "1px solid #e2e8f0", borderRadius: 6, padding: "2px 8px", fontSize: 12, cursor: "pointer" }}>
           Remover item
@@ -370,7 +386,8 @@ function CartaoItem({ item, n, aberto, onAlternar, onChange, onRemover }) {
             )}
             {item.fornecedores.map((f, i) => (
               <CartaoFornecedor key={f.id} f={f} n={i + 1} st={statusFornecedor(f, item, hoje)} menor={menor?.id === f.id && qtdOrc > 1}
-                onChange={novo => setForn(f.id, novo)} onRemover={() => removerOrcamento(f)} />
+                onChange={novo => setForn(f.id, novo)} onRemover={() => removerOrcamento(f)}
+                onEntradaEstoque={onEntradaEstoque && (() => onEntradaEstoque(item, f))} onAbrirDocEstoque={onAbrirDocEstoque} />
             ))}
           </div>
           <button type="button" onClick={adicionarOrcamento}
@@ -383,7 +400,7 @@ function CartaoItem({ item, n, aberto, onAlternar, onChange, onRemover }) {
   );
 }
 
-function CorpoCategoria({ v, onChange }) {
+function CorpoCategoria({ v, onChange, onEntradaEstoque, onAbrirDocEstoque }) {
   // Com um item só, já abre direto nele; com vários, começa tudo fechado para dar o panorama.
   const [abertos, setAbertos] = useState(() => new Set(v.itens.length === 1 ? [v.itens[0].id] : []));
   const t = totaisCategoria(v);
@@ -413,7 +430,8 @@ function CorpoCategoria({ v, onChange }) {
         )}
         {v.itens.map((it, i) => (
           <CartaoItem key={it.id} item={it} n={i + 1} aberto={abertos.has(it.id)} onAlternar={() => alternar(it.id)}
-            onChange={novo => setItem(it.id, novo)} onRemover={() => removerItem(it)} />
+            onChange={novo => setItem(it.id, novo)} onRemover={() => removerItem(it)}
+            onEntradaEstoque={onEntradaEstoque} onAbrirDocEstoque={onAbrirDocEstoque} />
         ))}
       </div>
 
@@ -423,15 +441,17 @@ function CorpoCategoria({ v, onChange }) {
           + Adicionar item
         </button>
         <div style={{ marginLeft: "auto", display: "flex", gap: 18, fontSize: 12 }}>
-          <span style={{ color: "#64748b" }}>A comprar: <b style={{ color: t.aComprar > 0 ? "#dc2626" : "#1e293b" }}>R$ {fmt(t.aComprar)}</b></span>
-          <span style={{ color: "#64748b" }}>Valor total gasto: <b style={{ color: "#1e293b", fontSize: 13 }}>R$ {fmt(t.gasto)}</b></span>
+          <span style={{ color: "#64748b" }}>A comprar: <b style={{ color: t.aComprar > 0 ? "#dc2626" : "#1e293b" }}><Dinheiro v={t.aComprar} /></b></span>
+          <span style={{ color: "#64748b" }}>Valor total gasto: <b style={{ color: "#1e293b", fontSize: 13 }}><Dinheiro v={t.gasto} /></b></span>
         </div>
       </div>
     </div>
   );
 }
 
-export default function ComprasObra({ compras, onChange, sugestoes = [] }) {
+// onEntradaEstoque recebe a origem (categoria/item/orçamento) e o que a entrada já pode trazer
+// preenchido. Quem monta o documento é a tela de Estoque; aqui é só o atalho.
+export default function ComprasObra({ compras, onChange, sugestoes = [], onEntradaEstoque, onAbrirDocEstoque }) {
   const [abertas, setAbertas] = useState(() => new Set());
   const hoje = hojeLocal();
   const c = normCompras(compras);
@@ -498,8 +518,8 @@ export default function ComprasObra({ compras, onChange, sugestoes = [] }) {
                     <span style={{ fontSize: 12, color: "#cbd5e1", fontStyle: "italic" }}>clique para lançar</span>
                   )}
                 </div>
-                <span style={{ textAlign: "right", fontSize: 12, fontWeight: 700, color: !na && t.aComprar > 0 ? "#dc2626" : "#1e293b" }}>R$ {fmt(na ? 0 : t.aComprar)}</span>
-                <span style={{ textAlign: "right", fontSize: 12, fontWeight: 700, color: "#1e293b" }}>R$ {fmt(na ? 0 : t.gasto)}</span>
+                <span style={{ textAlign: "right", fontSize: 12, fontWeight: 700, color: !na && t.aComprar > 0 ? "#dc2626" : "#1e293b" }}><Dinheiro v={na ? 0 : t.aComprar} /></span>
+                <span style={{ textAlign: "right", fontSize: 12, fontWeight: 700, color: "#1e293b" }}><Dinheiro v={na ? 0 : t.gasto} /></span>
                 <span style={{ fontSize: 12, fontWeight: prox && prox < hoje ? 800 : 400, color: prox && prox < hoje ? "#dc2626" : "#475569" }}>{fmtData(prox)}</span>
                 <span style={{ textAlign: "center" }} onClick={e => e.stopPropagation()}>
                   <input type="checkbox" checked={na} title="Não se aplica a esta obra"
@@ -507,7 +527,13 @@ export default function ComprasObra({ compras, onChange, sugestoes = [] }) {
                     style={{ cursor: "pointer" }} />
                 </span>
               </div>
-              {aberta && <CorpoCategoria v={v} onChange={nv => setCat(cat, nv)} />}
+              {aberta && <CorpoCategoria v={v} onChange={nv => setCat(cat, nv)} onAbrirDocEstoque={onAbrirDocEstoque}
+                onEntradaEstoque={onEntradaEstoque && ((item, f) => onEntradaEstoque({
+                  cat, itemId: item.id, fornId: f.id, categoria: CATEGORIA_LABEL[cat], tipo: item.tipo,
+                  fornecedor: f.nome, nf: f.nf.numero,
+                  // Previsão de entrega não é data de chegada: só usa se estiver marcada como entregue.
+                  dia: f.entrega.recebido && f.entrega.data ? f.entrega.data : "",
+                }))} />}
             </Fragment>
           );
         })}
@@ -516,8 +542,8 @@ export default function ComprasObra({ compras, onChange, sugestoes = [] }) {
           <span />
           <span style={{ fontWeight: 800, fontSize: 13 }}>Total</span>
           <span />
-          <span style={{ textAlign: "right", fontWeight: 800, fontSize: 13, color: total.aComprar > 0 ? "#dc2626" : "#1e293b" }}>R$ {fmt(total.aComprar)}</span>
-          <span style={{ textAlign: "right", fontWeight: 800, fontSize: 13 }}>R$ {fmt(total.gasto)}</span>
+          <span style={{ textAlign: "right", fontWeight: 800, fontSize: 13, color: total.aComprar > 0 ? "#dc2626" : "#1e293b" }}><Dinheiro v={total.aComprar} /></span>
+          <span style={{ textAlign: "right", fontWeight: 800, fontSize: 13 }}><Dinheiro v={total.gasto} /></span>
           <span />
           <span />
         </div>

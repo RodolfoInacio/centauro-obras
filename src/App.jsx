@@ -9,7 +9,8 @@ import { chaveGrupo } from "./agrupamento";
 import PainelLembretes, { normLembrete } from "./PainelLembretes";
 import DiarioView, { DiarioPrint, normDiario } from "./DiarioObra";
 import ComprasObra, { comprasTotais, normCompras, fornecedoresConhecidos } from "./ComprasObra";
-import EstoqueView, { EstoqueDocumentoPrint, EtiquetasPrint, SaidasEstoqueObra } from "./Estoque";
+import EstoqueView, { EstoqueDocumentoPrint, EtiquetasPrint, SaidasEstoqueObra, numeroDoc } from "./Estoque";
+import { SigiloProvider, Dinheiro, Oculto, OlhoFinanceiro, useSigilo, MASCARA } from "./Sigilo";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 // Brand color (was navy #1a1a1a) — now charcoal black
@@ -331,23 +332,30 @@ function FlagsObra({ flags, onChange, size = 13 }) {
 // ─── PANORAMA FINANCEIRO ─────────────────────────────────────────────────────
 // Consolidado das obras recebidas: quanto ainda entra, quanto ainda sai e quanto falta
 // entregar em valor de obra. Recalcula a cada render — mudou um valor, muda aqui.
+// Donut financeiro: com os valores ocultos vira só o anel cinza — as fatias entregariam a proporção.
+function PieSigilo(props) {
+  const { visivel } = useSigilo();
+  return <PieChart {...props} data={visivel ? props.data : []} />;
+}
+
 function PanoramaFinanceiro({ obras }) {
+  const { visivel } = useSigilo();
   const t = finTotais(obras);
   const blocos = [
-    { label: "● Recebido",  value: t.recebido,  cor: "#10b981", sub: t.total ? `${Math.round(t.recebido / t.total * 100)}% do contratado` : "—" },
+    { label: "● Recebido",  value: t.recebido,  cor: "#10b981", sub: !visivel ? `${MASCARA} do contratado` : t.total ? `${Math.round(t.recebido / t.total * 100)}% do contratado` : "—" },
     { label: "● A Receber", value: t.aReceber,  cor: "#f59e0b", sub: "ainda entra no caixa" },
     { label: "● A Pagar",   value: t.aPagar,    cor: "#dc2626", sub: "orçado, ainda não comprado" },
     { label: "A Entregar",  value: t.aEntregar, cor: "#3b82f6", sub: "valor de obra não executado" },
   ];
   return (
     <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", borderLeft: "4px solid #c9a227", marginBottom: 24, display: "flex", gap: 28, alignItems: "center", flexWrap: "wrap" }}>
-      <PieChart
+      <PieSigilo
         size={104} strokeWidth={15}
         data={[{ value: t.recebido, color: "#10b981" }, { value: t.aReceber, color: "#f59e0b" }]}
         centro={
           <>
             <div style={{ fontSize: 9, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Contratado</div>
-            <div style={{ fontSize: 12, fontWeight: 800, color: "#1e293b" }}>R$ {fmt(t.total)}</div>
+            <div style={{ fontSize: 12, fontWeight: 800, color: "#1e293b" }}><Dinheiro v={t.total} /></div>
           </>
         }
       />
@@ -355,7 +363,7 @@ function PanoramaFinanceiro({ obras }) {
         {blocos.map(b => (
           <div key={b.label}>
             <div style={{ fontSize: 10, color: b.cor, fontWeight: 700, textTransform: "uppercase" }}>{b.label}</div>
-            <div style={{ fontSize: 20, fontWeight: 800, color: b.cor }}>R$ {fmt(b.value)}</div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: b.cor }}><Dinheiro v={b.value} /></div>
             <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 2 }}>{b.sub}</div>
           </div>
         ))}
@@ -365,6 +373,7 @@ function PanoramaFinanceiro({ obras }) {
           🚩 {t.emAlerta} obra{t.emAlerta > 1 ? "s" : ""} com compras acima do que ainda vai receber
         </div>
       )}
+      <div style={{ alignSelf: "flex-start" }}><OlhoFinanceiro /></div>
     </div>
   );
 }
@@ -527,7 +536,7 @@ function parseObraLines(allLines, filename) {
 }
 
 // ─── GANTT VIEW ───────────────────────────────────────────────────────────────
-function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque }) {
+function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque, onEntradaEstoque }) {
   const [expandedId, setExpandedId] = useState(null);
   const [localObra, setLocalObra] = useState(obra);
 
@@ -627,7 +636,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
             <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Progresso — {totalPct}%</div>
             <ProgressBar value={totalPct} height={8} />
           </div>
-          <div style={{ fontWeight: 800, color: "#c9a227", fontSize: 15 }}>R$ {fmt(localObra.valorTotal)}</div>
+          <div style={{ fontWeight: 800, color: "#c9a227", fontSize: 15 }}><Dinheiro v={localObra.valorTotal} /></div>
           <div>
             <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 2 }}>Status</label>
             <select
@@ -655,7 +664,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
 
       {/* Resumo Financeiro */}
       <div style={{ background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "16px 20px", display: "flex", gap: 28, alignItems: "center", flexWrap: "wrap" }}>
-        <PieChart
+        <PieSigilo
           size={104} strokeWidth={15}
           data={[
             { value: localObra.valorRecebido || 0, color: "#10b981" },
@@ -664,23 +673,24 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
           centro={
             <>
               <div style={{ fontSize: 9, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Total</div>
-              <div style={{ fontSize: 12, fontWeight: 800, color: "#1e293b" }}>R$ {fmt(localObra.valorTotal)}</div>
+              <div style={{ fontSize: 12, fontWeight: 800, color: "#1e293b" }}><Dinheiro v={localObra.valorTotal} /></div>
             </>
           }
         />
 
         <div style={{ display: "flex", gap: 22, alignItems: "flex-start", flexWrap: "wrap" }}>
+          <div style={{ alignSelf: "center" }}><OlhoFinanceiro /></div>
           <div>
             <div style={{ fontSize: 10, color: "#10b981", fontWeight: 700, textTransform: "uppercase" }}>● Recebido</div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: "#10b981" }}>R$ {fmt(localObra.valorRecebido || 0)}</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#10b981" }}><Dinheiro v={localObra.valorRecebido || 0} /></div>
           </div>
           <div>
             <div style={{ fontSize: 10, color: "#f59e0b", fontWeight: 700, textTransform: "uppercase" }}>● A Receber</div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: "#f59e0b" }}>R$ {fmt(valorAReceber)}</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#f59e0b" }}><Dinheiro v={valorAReceber} /></div>
           </div>
           <div>
             <div style={{ fontSize: 10, color: "#dc2626", fontWeight: 700, textTransform: "uppercase" }}>● A Pagar</div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: "#dc2626" }}>R$ {fmt(compras.aComprar)}</div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: "#dc2626" }}><Dinheiro v={compras.aComprar} /></div>
           </div>
           <div>
             <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 2 }}>Data do Contrato</label>
@@ -694,9 +704,11 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
           </div>
           <div>
             <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 2 }}>Valor Recebido</label>
-            <input type="number" min={0} step="0.01" value={localObra.valorRecebido || 0}
-              onChange={e => update({ ...localObra, valorRecebido: Math.max(0, Number(e.target.value) || 0) })}
-              style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: "#1e293b", width: 120 }} />
+            <Oculto>
+              <input type="number" min={0} step="0.01" value={localObra.valorRecebido || 0}
+                onChange={e => update({ ...localObra, valorRecebido: Math.max(0, Number(e.target.value) || 0) })}
+                style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: "#1e293b", width: 120 }} />
+            </Oculto>
           </div>
           <div>
             <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 4 }}>Bandeiras</label>
@@ -731,12 +743,13 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
           <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Compras por Categoria</span>
           {alertaCompras && (
             <span style={{ background: "#fee2e2", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 800 }}>
-              🚩 Orçado e ainda não comprado (R$ {fmt(compras.aComprar)}) é mais do que ainda vai receber (R$ {fmt(valorAReceber)})
+              🚩 Orçado e ainda não comprado (<Dinheiro v={compras.aComprar} />) é mais do que ainda vai receber (<Dinheiro v={valorAReceber} />)
             </span>
           )}
         </div>
         <ComprasObra compras={localObra.compras} sugestoes={fornecedores}
-          onChange={c => update({ ...localObra, compras: c })} />
+          onChange={c => update({ ...localObra, compras: c })}
+          onEntradaEstoque={onEntradaEstoque} onAbrirDocEstoque={onAbrirDocEstoque} />
         <SaidasEstoqueObra obraId={obra.id} onAbrirDoc={onAbrirDocEstoque} />
       </div>
 
@@ -862,7 +875,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
                     </div>
                     <div style={{ background: "#fff", borderRadius: 10, padding: 14, border: "1px solid #e2e8f0", minWidth: 200, fontSize: 12 }}>
                       <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 8 }}>Especificações</div>
-                      {[["Dimensões", `${item.L} × ${item.H} mm`], ["Qtd", item.qtd], ["Perfil", item.perfil], ["Acessórios", item.acessorios], ["Vidro", item.vidro || "—"], ["Localização", item.localizacao || "—"], ["Vlr Unit.", `R$ ${fmt(item.vlrUnt)}`], ["Vlr Total", `R$ ${fmt(item.vlrTotal)}`]].map(([l, v]) => (
+                      {[["Dimensões", `${item.L} × ${item.H} mm`], ["Qtd", item.qtd], ["Perfil", item.perfil], ["Acessórios", item.acessorios], ["Vidro", item.vidro || "—"], ["Localização", item.localizacao || "—"], ["Vlr Unit.", <Dinheiro v={item.vlrUnt} />], ["Vlr Total", <Dinheiro v={item.vlrTotal} />]].map(([l, v]) => (
                         <div key={l} style={{ display: "flex", gap: 8, marginBottom: 4 }}>
                           <span style={{ color: "#64748b", minWidth: 80 }}>{l}</span>
                           <span style={{ fontWeight: 600 }}>{v}</span>
@@ -959,7 +972,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
 
           <div style={{ display: "flex", background: "#1a1a1a", color: "#fff", padding: "10px 14px", fontSize: 12, gap: 20 }}>
             <span style={{ width: LEFT_COL - 28, fontWeight: 700 }}>{localObra.itens.length} itens · Progresso: {totalPct}%</span>
-            <span style={{ fontWeight: 700, color: "#c9a227" }}>R$ {fmt(localObra.valorTotal)}</span>
+            <span style={{ fontWeight: 700, color: "#c9a227" }}><Dinheiro v={localObra.valorTotal} /></span>
           </div>
         </div>
       </div>
@@ -969,6 +982,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
 
 // ─── PRINT VIEW ───────────────────────────────────────────────────────────────
 function PrintView({ obra, onBack }) {
+  const { visivel } = useSigilo();
   return (
     <div style={{ fontFamily: "'Segoe UI', sans-serif", padding: 32, maxWidth: 960, margin: "0 auto", color: "#1e293b" }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 20 }}>
@@ -1013,11 +1027,14 @@ function PrintView({ obra, onBack }) {
           })}
         </tbody>
       </table>
-      <div style={{ marginTop: 20, display: "flex", justifyContent: "flex-end" }}>
-        <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: "8px 18px", fontWeight: 700, color: "#1a1a1a", fontSize: 14 }}>
-          Valor Total: R$ {fmt(obra.valorTotal)}
+      {/* Com os valores ocultos a nota sai sem o total, em vez de imprimir a máscara. */}
+      {visivel && (
+        <div style={{ marginTop: 20, display: "flex", justifyContent: "flex-end" }}>
+          <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: "8px 18px", fontWeight: 700, color: "#1a1a1a", fontSize: 14 }}>
+            Valor Total: R$ {fmt(obra.valorTotal)}
+          </div>
         </div>
-      </div>
+      )}
       <div style={{ marginTop: 40, display: "flex", gap: 60 }}>
         <div style={{ flex: 1, borderTop: "2px solid #1a1a1a", paddingTop: 6, textAlign: "center", fontSize: 12, color: "#64748b" }}>Encarregado / Responsável</div>
         <div style={{ flex: 1, borderTop: "2px solid #1a1a1a", paddingTop: 6, textAlign: "center", fontSize: 12, color: "#64748b" }}>Centauro Esquadrias</div>
@@ -1965,11 +1982,11 @@ function CardObra({ os, equipes, onSelect, onStatusChange, onFlagsChange, onAbri
           <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
             <div>
               <div style={{ fontSize: 10, color: "#f59e0b", fontWeight: 700, textTransform: "uppercase" }}>● A Receber</div>
-              <div style={{ fontSize: 15, fontWeight: 800, color: "#f59e0b" }}>R$ {fmt(fin.aReceber)}</div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: "#f59e0b" }}><Dinheiro v={fin.aReceber} /></div>
             </div>
             <div>
               <div style={{ fontSize: 10, color: "#dc2626", fontWeight: 700, textTransform: "uppercase" }}>● A Pagar</div>
-              <div style={{ fontSize: 15, fontWeight: 800, color: "#dc2626" }}>R$ {fmt(fin.aPagar)}</div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: "#dc2626" }}><Dinheiro v={fin.aPagar} /></div>
             </div>
           </div>
           <div style={{ fontSize: 11, color: "#94a3b8", display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -2040,11 +2057,11 @@ function CardGrupo({ g, equipes, onSelect, onStatusChange, onFlagsChange, onAbri
         <div style={{ display: "flex", gap: 18, flexWrap: "wrap" }}>
           <div>
             <div style={{ fontSize: 10, color: "#f59e0b", fontWeight: 700, textTransform: "uppercase" }}>● A Receber</div>
-            <div style={{ fontSize: 15, fontWeight: 800, color: "#f59e0b" }}>R$ {fmt(g.fin.aReceber)}</div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#f59e0b" }}><Dinheiro v={g.fin.aReceber} /></div>
           </div>
           <div>
             <div style={{ fontSize: 10, color: "#dc2626", fontWeight: 700, textTransform: "uppercase" }}>● A Pagar</div>
-            <div style={{ fontSize: 15, fontWeight: 800, color: "#dc2626" }}>R$ {fmt(g.fin.aPagar)}</div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: "#dc2626" }}><Dinheiro v={g.fin.aPagar} /></div>
           </div>
         </div>
         <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
@@ -2100,7 +2117,7 @@ function LinhaContrato({ os, equipes, onSelect, onStatusChange, onFlagsChange })
       <div style={{ flex: 1, minWidth: 170 }}>
         <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1e293b" }}>{os.obra || "—"}</div>
         <div style={{ fontSize: 11, color: "#94a3b8", marginTop: 1 }}>
-          {os.cidade || "—"} · A receber R$ {fmt(fin.aReceber)}
+          {os.cidade || "—"} · A receber <Dinheiro v={fin.aReceber} />
           {dias !== null && <span style={{ color: corDias(dias), fontWeight: 800 }}> · ⏱ {dias}d</span>}
         </div>
         <EquipesDaObra ids={os.equipes} equipes={equipes} />
@@ -2618,15 +2635,16 @@ function SideMenu({ open, onClose, onNav, onImport, current }) {
 }
 
 // ─── FINANCEIRO (protegido por senha) ─────────────────────────────────────────
-const SENHA_FINANCEIRO = "00centauro00";
-function FinanceiroView({ obras, unlocked, onUnlock }) {
+// A senha é a mesma do olho (Sigilo.jsx): liberar aqui mostra os valores no app inteiro, e vice-versa.
+function FinanceiroView({ obras }) {
+  const { visivel, desbloquear } = useSigilo();
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
 
-  if (!unlocked) {
+  if (!visivel) {
     return (
       <div style={{ padding: "60px 20px", display: "flex", justifyContent: "center" }}>
-        <form onSubmit={e => { e.preventDefault(); if (pw === SENHA_FINANCEIRO) onUnlock(); else { setErr("Senha incorreta."); setPw(""); } }}
+        <form onSubmit={e => { e.preventDefault(); if (!desbloquear(pw)) { setErr("Senha incorreta."); setPw(""); } }}
           style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 32, width: 340, maxWidth: "100%", boxShadow: "0 4px 20px rgba(0,0,0,0.08)" }}>
           <div style={{ fontSize: 34, textAlign: "center", marginBottom: 6 }}>🔒</div>
           <div style={{ fontSize: 18, fontWeight: 800, color: BRAND, textAlign: "center" }}>Área Financeira</div>
@@ -2654,7 +2672,10 @@ function FinanceiroView({ obras, unlocked, onUnlock }) {
     .sort((a, b) => b.valor - a.valor);
   return (
     <div style={{ padding: "24px 28px", maxWidth: 900, margin: "0 auto" }}>
-      <h2 style={{ fontSize: 20, fontWeight: 800, color: BRAND, marginBottom: 16 }}>Financeiro</h2>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <h2 style={{ fontSize: 20, fontWeight: 800, color: BRAND, margin: 0 }}>Financeiro</h2>
+        <div style={{ marginLeft: "auto" }}><OlhoFinanceiro rotulo /></div>
+      </div>
       <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", borderLeft: "4px solid #c9a227", marginBottom: 20 }}>
         <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Total em Obras</div>
         <div style={{ fontSize: 28, fontWeight: 800, color: "#c9a227" }}>R$ {fmt(total)}</div>
@@ -3485,6 +3506,7 @@ function LoginScreen() {
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [session, setSession] = useState(null);
+  const { ocultar: ocultarValores } = useSigilo();
   const [authReady, setAuthReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [obras, setObras] = useState([]);
@@ -3503,7 +3525,6 @@ export default function App() {
   const [view, setView] = useState({ type: "dashboard" });
   const [history, setHistory] = useState([]);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [financeiroUnlocked, setFinanceiroUnlocked] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState("");
   const fileRef = useRef();
@@ -3686,6 +3707,31 @@ export default function App() {
     persistObra(updated);
   }, [persistObra]);
 
+  // Entrada lançada pelo botão de um orçamento de Compras: grava no orçamento o documento que
+  // nasceu dele, e o botão vira "📦 No estoque · ENT-…" — não dá para dar entrada duas vezes.
+  const marcarEntradaEstoque = useCallback((origem, doc) => {
+    setObras(prev => prev.map(o => {
+      const cat = o.id === origem.obraId && o.compras ? o.compras[origem.cat] : null;
+      if (!cat) return o;
+      const marca = { id: doc.id, numero: numeroDoc(doc) };
+      const nova = {
+        ...o,
+        compras: {
+          ...o.compras,
+          [origem.cat]: {
+            ...cat,
+            itens: cat.itens.map(it => it.id !== origem.itemId ? it : {
+              ...it,
+              fornecedores: it.fornecedores.map(f => f.id !== origem.fornId ? f : { ...f, estoqueDoc: marca }),
+            }),
+          },
+        },
+      };
+      persistObra(nova);
+      return nova;
+    }));
+  }, [persistObra]);
+
   const handleStatusChange = useCallback((id, status) => {
     setObras(prev => {
       const next = prev.map(o => o.id === id ? { ...o, status } : o);
@@ -3843,7 +3889,7 @@ export default function App() {
     }
   };
 
-  const handleLogout = async () => { await supabase.auth.signOut(); goHome(); };
+  const handleLogout = async () => { ocultarValores(); await supabase.auth.signOut(); goHome(); };
 
   // Portões de acesso
   if (!authReady) return <CenteredMsg>Carregando…</CenteredMsg>;
@@ -3907,6 +3953,7 @@ export default function App() {
             <button onClick={() => navTo({ type: "print", obraId: selectedObra.id })}
               style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Nota de Serviço</button>
           )}
+          <OlhoFinanceiro escuro size={16} />
           <span style={{ color: "#9ca3af", fontSize: 12, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={userEmail}>👤 {userEmail}</span>
           <button onClick={handleLogout} title="Sair"
             style={{ background: "transparent", color: "#9ca3af", border: "1px solid #333", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Sair</button>
@@ -3919,7 +3966,10 @@ export default function App() {
         ? <div style={{ textAlign: "center", padding: 80, color: "#64748b", fontSize: 15 }}>Carregando obras…</div>
         : view.type === "gantt"
           ? (selectedObra ? <GanttView obra={selectedObra} onChange={updateObra} equipes={equipes} fornecedores={fornecedoresConhecidos(obras)}
-              onAbrirDocEstoque={docId => navTo({ type: "estoqueDoc", docId })} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>)
+              onAbrirDocEstoque={docId => navTo({ type: "estoqueDoc", docId })}
+              onEntradaEstoque={origem => navTo({ type: "estoque", entradaCompra: {
+                ...origem, obraId: selectedObra.id, obraRotulo: `#${selectedObra.numero} — ${selectedObra.cliente}`,
+              } })} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>)
           : view.type === "calendar"
             ? <CalendarView obras={obras} equipes={equipes} agenda={agenda} lembretes={lembretes}
                 onSalvarAgendamento={handleSaveAgendamento} onExcluirAgendamento={handleDeleteAgendamento}
@@ -3951,11 +4001,13 @@ export default function App() {
                   : view.type === "estoque"
                     ? <EstoqueView itens={estoqueItens} erroCarga={estoqueErro} obras={obras} equipes={equipes}
                         fornecedores={fornecedoresConhecidos(obras)} codigoInicial={view.codigo || null}
+                        entradaCompra={view.entradaCompra || null} onEntradaCompraLancada={marcarEntradaEstoque}
+                        onLimparParametros={() => navReplace({ type: "estoque" })}
                         onRecarregar={recarregarEstoque}
                         onImprimirDoc={docId => navTo({ type: "estoqueDoc", docId })}
                         onImprimirEtiquetas={itemIds => navTo({ type: "estoqueEtiquetas", itemIds })} />
                   : view.type === "financeiro"
-                    ? <FinanceiroView obras={obras} unlocked={financeiroUnlocked} onUnlock={() => setFinanceiroUnlocked(true)} />
+                    ? <FinanceiroView obras={obras} />
                     : view.type === "obrasPasta"
                       ? <ObrasPasta obras={obras} pasta={view.pasta} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} onFlagsChange={handleFlagsChange} onGrupoChange={handleGrupoChange} equipes={equipes} />
                       : <Dashboard obras={obras} onAbrirPasta={(pasta) => navTo({ type: "obrasPasta", pasta })} />

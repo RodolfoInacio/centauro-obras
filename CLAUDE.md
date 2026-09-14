@@ -42,6 +42,8 @@ src/
   FotoMarkup.jsx   Rabisco sobre a foto (seta/caneta/retângulo/texto) + campo de assinatura.
   Estoque.jsx      Estoque: lista, ficha do item, lançar documento, documentos, bloco da obra e as
                    duas folhas impressas (documento e etiquetas).
+  Sigilo.jsx       Oculta os valores em R$ do app inteiro até a senha: provider (em main.jsx),
+                   <Dinheiro>, <Oculto> e o botão do olho.
   index.css        CSS global mínimo.
   assets/          Logos.
 supabase/
@@ -417,6 +419,16 @@ inteira embaixo do QR: espremido ao lado ele fica fino demais para 203 dpi.
 `Exportar CSV` baixa itens e o livro inteiro: é a cópia que fica com a empresa, independente do
 plano de backup do Supabase.
 
+**Compras → estoque é um atalho, não uma integração.** O orçamento comprado ganha o botão
+"📦 Dar entrada no estoque", que abre a entrada já com fornecedor, NF e data (esta só se estiver
+marcado "Entregue" — previsão não é chegada). O item de estoque é escolhido à mão: o `tipo` de
+Compras é texto livre de especificação e não casa com cadastro. Ao lançar uma **entrada**, o
+orçamento grava `estoqueDoc {id, numero}` (em `normFornecedor`) e o botão vira o nº do documento,
+para a mesma compra não entrar duas vezes. A obra fica só na observação do documento: compra com
+`obra_id` contaria como devolução no bloco "Saiu do estoque para esta obra". A view chega em
+`{type: "estoque", entradaCompra}` e o `EstoqueView` troca por `{type: "estoque"}` com `navReplace`
+assim que abre o formulário — senão o "Voltar" da folha impressa reabriria a entrada.
+
 ## Armadilhas conhecidas
 
 - **`ordem` é `Date.now()`, então a coluna precisa ser `bigint`.** `lembretes` é a única tabela que
@@ -425,8 +437,13 @@ plano de backup do Supabase.
   mora só dentro do `jsonb`. Se um dia outra tabela ganhar coluna `ordem`, ela nasce `bigint`.
 - **`normObra` quebra se a obra não tiver `itens`**: faz `o.itens.map(...)` sem guarda, e isso
   roda na carga de todas as obras — um registro ruim derruba a tela inteira.
-- **A senha do Financeiro (`SENHA_FINANCEIRO`) é uma constante no código do cliente.** Está no
-  bundle publicado; qualquer um lê no devtools. É uma tranca visual, não segurança.
+- **A senha dos valores (`SENHA_FINANCEIRO`, em `Sigilo.jsx`) é uma constante no código do cliente.**
+  Está no bundle publicado; qualquer um lê no devtools. É uma tranca visual, não segurança: os
+  valores chegam ao navegador do mesmo jeito. Todo R$ nasce oculto; a mesma senha libera o app
+  inteiro (olho da barra do topo, olho do bloco, clique no valor ou a tela Financeiro) até
+  recarregar, sair ou clicar no olho de novo. Valor novo na tela passa por `<Dinheiro v={...} />`,
+  campo de valor por `<Oculto>`; folha impressa **omite** o valor quando oculto, em vez de imprimir
+  a máscara. O CSV do estoque exporta o valor unitário mesmo com os valores ocultos.
 - **`pdf.js` vem de CDN em runtime**, injetado por `useEffect` no `App`. Sem internet (ou com o
   CDN fora), a importação de PDF falha com "pdf.js não carregado". Não usar `<script>` no JSX
   para carregá-lo: o React não executa esse script — foi exatamente esse o bug que quebrou o

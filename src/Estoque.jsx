@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import Modal from "./Modal";
+import { Oculto, useSigilo } from "./Sigilo";
 import {
   salvarItemEstoque, lancarDocumentoEstoque, estornarDocumentoEstoque,
   fetchDocumentosEstoque, fetchDocumentoEstoque, fetchMovimentosItem, fetchMovimentosObra,
@@ -164,7 +165,7 @@ function baixarCSV(nome, linhas) {
 const numCSV = n => (n == null || n === "" ? "" : String(n).replace(".", ","));
 
 // ─── TELA PRINCIPAL ──────────────────────────────────────────────────────────
-export default function EstoqueView({ itens, erroCarga, obras, equipes, fornecedores = [], codigoInicial, onRecarregar, onImprimirDoc, onImprimirEtiquetas }) {
+export default function EstoqueView({ itens, erroCarga, obras, equipes, fornecedores = [], codigoInicial, entradaCompra, onEntradaCompraLancada, onLimparParametros, onRecarregar, onImprimirDoc, onImprimirEtiquetas }) {
   const [tela, setTela] = useState({ tipo: "lista" });
   const [editando, setEditando] = useState(null); // item em edição no modal ({} = novo)
   const [aviso, setAviso] = useState("");
@@ -180,6 +181,16 @@ export default function EstoqueView({ itens, erroCarga, obras, equipes, forneced
     if (alvo) setTela({ tipo: "item", id: alvo.id });
     else setAviso(`Nenhum item com o código ${cod}.`);
   }, [codigoInicial, itens]);
+
+  // Veio do botão "Dar entrada no estoque" de Compras: abre a entrada já preenchida. Depois limpa
+  // o parâmetro da view, senão o "Voltar" da folha impressa reabriria o formulário.
+  const abriuEntrada = useRef(null);
+  useEffect(() => {
+    if (!entradaCompra || abriuEntrada.current === entradaCompra) return;
+    abriuEntrada.current = entradaCompra;
+    setTela({ tipo: "lancar", tipoDoc: "entrada", preset: entradaCompra, volta: { tipo: "lista" } });
+    if (onLimparParametros) onLimparParametros();
+  }, [entradaCompra, onLimparParametros]);
 
   const irLancar = (tipoDoc, item) => setTela({ tipo: "lancar", tipoDoc, itemId: item?.id || null, volta: tela });
 
@@ -248,10 +259,15 @@ export default function EstoqueView({ itens, erroCarga, obras, equipes, forneced
     );
   } else if (tela.tipo === "lancar") {
     conteudo = (
-      <LancarDocumento tipoInicial={tela.tipoDoc} itemInicialId={tela.itemId} itens={itens} obras={obras}
-        equipes={equipes} fornecedores={fornecedores}
+      <LancarDocumento tipoInicial={tela.tipoDoc} itemInicialId={tela.itemId} preset={tela.preset || null}
+        itens={itens} obras={obras} equipes={equipes} fornecedores={fornecedores}
         onCancelar={() => setTela(tela.volta || { tipo: "lista" })}
-        onLancado={async doc => { await onRecarregar(); onImprimirDoc(doc.id); }} />
+        onLancado={async doc => {
+          // Só entrada marca o orçamento: se trocaram para saída no meio, não foi a compra que chegou.
+          if (tela.preset && doc.tipo === "entrada" && onEntradaCompraLancada) onEntradaCompraLancada(tela.preset, doc);
+          await onRecarregar();
+          onImprimirDoc(doc.id);
+        }} />
     );
   } else if (tela.tipo === "documentos") {
     conteudo = (
@@ -652,17 +668,20 @@ function ItemForm({ item, onSalvar, onFechar }) {
 }
 
 // ─── LANÇAR DOCUMENTO ────────────────────────────────────────────────────────
-function LancarDocumento({ tipoInicial, itemInicialId, itens, obras, equipes, fornecedores, onLancado, onCancelar }) {
+// preset: entrada vinda de um orçamento de Compras ({ fornecedor, nf, dia, obraRotulo, categoria, tipo }).
+function LancarDocumento({ tipoInicial, itemInicialId, preset, itens, obras, equipes, fornecedores, onLancado, onCancelar }) {
   const [tipo, setTipo] = useState(tipoInicial || "saida");
   const [motivo, setMotivo] = useState(MOTIVOS[tipoInicial || "saida"][0].k);
-  const [dia, setDia] = useState(hojeLocal());
+  const [dia, setDia] = useState(preset?.dia || hojeLocal());
   const [obraId, setObraId] = useState("");
   const [equipeId, setEquipeId] = useState("");
-  const [fornecedor, setFornecedor] = useState("");
-  const [nf, setNf] = useState("");
+  const [fornecedor, setFornecedor] = useState(preset?.fornecedor || "");
+  const [nf, setNf] = useState(preset?.nf || "");
   const [responsavel, setResponsavel] = useState("");
   const [recebidoPor, setRecebidoPor] = useState("");
-  const [obs, setObs] = useState("");
+  // A obra não vai para o documento (compra não guarda obra, ver estoque_lancar) — fica na obs.
+  const [obs, setObs] = useState(preset
+    ? `Compra da obra ${preset.obraRotulo} — ${preset.categoria}${preset.tipo ? ": " + preset.tipo : ""}` : "");
   // qtd serve para entrada e saída; contagem, para o ajuste. Bipar de novo soma 1 no campo da vez.
   const [linhas, setLinhas] = useState(() => itemInicialId ? [{ itemId: itemInicialId, qtd: "1", contagem: "", valor: "" }] : []);
   const [busca, setBusca] = useState("");
@@ -765,6 +784,13 @@ function LancarDocumento({ tipoInicial, itemInicialId, itens, obras, equipes, fo
   return (
     <>
       <Voltar onClick={cancelar}>← Cancelar</Voltar>
+      {preset && (
+        <Faixa cor="#7c3aed">
+          Entrada da compra de <b>{preset.fornecedor || "fornecedor sem nome"}</b>{preset.nf ? ` · NF ${preset.nf}` : ""} — obra {preset.obraRotulo},
+          {" "}{preset.categoria}{preset.tipo ? `: ${preset.tipo}` : ""}.
+          {" "}Bipe ou busque o item de estoque que chegou e informe a quantidade. Ao lançar, o orçamento fica marcado com o nº do documento.
+        </Faixa>
+      )}
       <div style={{ ...card, padding: 18, marginBottom: 14, borderTop: `4px solid ${cor}` }}>
         <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
           {["entrada", "saida", "ajuste"].map(t => (
@@ -874,8 +900,10 @@ function LancarDocumento({ tipoInicial, itemInicialId, itens, obras, equipes, fo
                   </td>
                   {tipo === "entrada" && (
                     <td style={{ ...td, textAlign: "right" }}>
-                      <input value={l.valor} onChange={e => setLinha(l.itemId, "valor", e.target.value)} inputMode="decimal" placeholder="opcional"
-                        style={{ ...inp, width: 100, textAlign: "right" }} />
+                      <Oculto prefixo="">
+                        <input value={l.valor} onChange={e => setLinha(l.itemId, "valor", e.target.value)} inputMode="decimal" placeholder="opcional"
+                          style={{ ...inp, width: 100, textAlign: "right" }} />
+                      </Oculto>
                     </td>
                   )}
                   <td style={{ ...td, textAlign: "right", fontWeight: 800, whiteSpace: "nowrap", color: falta ? "#dc2626" : tipo === "ajuste" ? (delta > 0 ? "#059669" : delta < 0 ? "#dc2626" : "#94a3b8") : "#1e293b" }}>
@@ -1105,6 +1133,7 @@ const ASSINATURAS = {
 const VIAS = { saida: ["Estoque", "Retirante / obra"], entrada: ["Estoque", "Financeiro"], ajuste: ["Estoque", "Escritório"], estorno: ["Estoque", "Escritório"] };
 
 export function EstoqueDocumentoPrint({ docId, equipes, onBack }) {
+  const { visivel: valoresVisiveis } = useSigilo();
   const [doc, setDoc] = useState(null);
   const [erro, setErro] = useState("");
   const [vias, setVias] = useState(1);
@@ -1137,7 +1166,8 @@ export function EstoqueDocumentoPrint({ docId, equipes, onBack }) {
 
   const thP = { padding: "6px 8px", fontSize: 10, fontWeight: 800, textAlign: "left", textTransform: "uppercase", letterSpacing: 0.4, borderBottom: "2px solid #1a1a1a", whiteSpace: "nowrap" };
   const tdP = { padding: "6px 8px", fontSize: 11.5, borderBottom: "1px solid #e2e8f0", verticalAlign: "top" };
-  const comValor = doc.tipo === "entrada" && doc.linhas.some(l => l.valorUnitario != null);
+  // Com os valores ocultos a folha sai sem as colunas de valor, em vez de imprimir a máscara.
+  const comValor = valoresVisiveis && doc.tipo === "entrada" && doc.linhas.some(l => l.valorUnitario != null);
   const comSinal = doc.tipo === "ajuste" || doc.tipo === "estorno";
   const total = comValor ? doc.linhas.reduce((s, l) => s + (l.valorUnitario || 0) * Math.abs(l.quantidade), 0) : 0;
   const campos = [
