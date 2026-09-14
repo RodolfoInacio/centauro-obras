@@ -443,7 +443,7 @@ assim que abre o formulário — senão o "Voltar" da folha impressa reabriria a
   inteiro (olho da barra do topo, olho do bloco, clique no valor ou a tela Financeiro) até
   recarregar, sair ou clicar no olho de novo. Valor novo na tela passa por `<Dinheiro v={...} />`,
   campo de valor por `<Oculto>`; folha impressa **omite** o valor quando oculto, em vez de imprimir
-  a máscara. O CSV do estoque exporta o valor unitário mesmo com os valores ocultos.
+  a máscara. O CSV de movimentos do estoque sai sem a coluna "Valor unit." quando oculto.
 - **`pdf.js` vem de CDN em runtime**, injetado por `useEffect` no `App`. Sem internet (ou com o
   CDN fora), a importação de PDF falha com "pdf.js não carregado". Não usar `<script>` no JSX
   para carregá-lo: o React não executa esse script — foi exatamente esse o bug que quebrou o

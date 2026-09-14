@@ -170,6 +170,7 @@ export default function EstoqueView({ itens, erroCarga, obras, equipes, forneced
   const [editando, setEditando] = useState(null); // item em edição no modal ({} = novo)
   const [aviso, setAviso] = useState("");
   const [exportando, setExportando] = useState(false);
+  const { visivel: valoresVisiveis } = useSigilo();
 
   // Veio pelo QR (?item=EST-00012): abre a ficha assim que os itens chegarem, uma vez só.
   const abriuQR = useRef(false);
@@ -234,12 +235,16 @@ export default function EstoqueView({ itens, erroCarga, obras, equipes, forneced
         ...itens.map(i => [i.codigo, i.nome, CATEGORIA_ROTULO[i.categoria] || i.categoria, i.unidade, i.local, numCSV(i.saldo), numCSV(i.estoqueMinimo),
           i.arquivado ? "sim" : "", i.data.descricao, i.data.acabamento, i.data.codFornecedor]),
       ]);
+      const cabecalho = ["Documento", "Tipo", "Data", "Motivo", "Obra", "Equipe", "Fornecedor", "NF", "Responsável", "Recebido por", "Código", "Item", "Unidade", "Quantidade", "Valor unit.", "Lançado em", "Obs"];
+      // Com os valores ocultos (Sigilo.jsx) a coluna de valor sai do arquivo inteira.
+      const iValor = cabecalho.indexOf("Valor unit.");
+      const semValor = linha => valoresVisiveis ? linha : linha.filter((_, i) => i !== iValor);
       baixarCSV(`estoque-movimentos-${hoje}.csv`, [
-        ["Documento", "Tipo", "Data", "Motivo", "Obra", "Equipe", "Fornecedor", "NF", "Responsável", "Recebido por", "Código", "Item", "Unidade", "Quantidade", "Valor unit.", "Lançado em", "Obs"],
+        cabecalho,
         ...movs.map(m => [numeroDoc(m.doc), TIPOS_DOC[m.doc.tipo]?.rotulo, dataBR(m.doc.dia), rotuloMotivo(m.doc.tipo, m.doc.motivo), m.doc.obraRotulo,
           nomeEquipe(equipes, m.doc.equipeId), m.doc.fornecedor, m.doc.nfNumero, m.doc.responsavel, m.doc.recebidoPor,
           m.codigo, m.nome, m.unidade, numCSV(m.quantidade), numCSV(m.valorUnitario), dataHoraBR(m.createdAt), m.doc.obs]),
-      ]);
+      ].map(semValor));
     } catch (e) {
       setAviso("Erro ao exportar: " + e.message);
     } finally {
