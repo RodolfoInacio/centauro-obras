@@ -1,22 +1,49 @@
 import { supabase } from "./supabase";
 
 // ─── OBRAS ───────────────────────────────────────────────────────────────────
+// Cada obra volta com a `versao` (updated_at) que esta aba leu. É ela que impede uma aba
+// atrasada de gravar por cima do que outra pessoa acabou de salvar (ver salvarObra).
 export async function fetchObras() {
-  const { data, error } = await supabase.from("obras").select("data");
-  if (error) throw error;
-  return (data || []).map(r => r.data);
+  const linhas = await todasAsLinhas(() => supabase.from("obras").select("data, updated_at").order("id"));
+  return linhas.map(r => ({ obra: r.data, versao: r.updated_at || null }));
 }
 
-export async function upsertObra(obra) {
-  const row = {
-    id: obra.id,
-    numero: obra.numero,
-    cliente: obra.cliente,
-    updated_at: new Date().toISOString(),
-    data: obra,
-  };
-  const { error } = await supabase.from("obras").upsert(row);
+export async function fetchObra(id) {
+  const { data, error } = await supabase.from("obras").select("data, updated_at").eq("id", id).maybeSingle();
   if (error) throw error;
+  if (!data) throw new Error("A obra não existe mais no banco.");
+  return { obra: data.data, versao: data.updated_at || null };
+}
+
+function linhaObra(obra) {
+  return { numero: obra.numero, cliente: obra.cliente, updated_at: new Date().toISOString(), data: obra };
+}
+
+// Trava otimista: só grava se o banco ainda estiver na versão que esta aba leu. Antes era um
+// upsert cego — a última gravação vencia, e quem editou a mesma obra em outra aba ou outro
+// computador perdia a alteração sem aviso. Sem linha de volta = alguém gravou antes (ou a obra
+// sumiu): nada é gravado e o erro sai marcado com `conflito`, para a tela avisar.
+export async function salvarObra(obra, versao) {
+  let q = supabase.from("obras").update(linhaObra(obra)).eq("id", obra.id);
+  q = versao ? q.eq("updated_at", versao) : q.is("updated_at", null);
+  const { data, error } = await q.select("updated_at");
+  if (error) throw error;
+  if (!data || data.length === 0) {
+    const err = new Error("A obra foi alterada em outro lugar depois que você abriu.");
+    err.conflito = true;
+    throw err;
+  }
+  return data[0].updated_at;
+}
+
+// Obra nova é INSERT, nunca upsert: proposta repetida dá erro em vez de sobrescrever a existente.
+export async function inserirObra(obra) {
+  const { data, error } = await supabase.from("obras").insert({ id: obra.id, ...linhaObra(obra) }).select("updated_at");
+  if (error) {
+    if (error.code === "23505") throw new Error(`A proposta #${obra.numero} já está cadastrada.`);
+    throw error;
+  }
+  return data[0].updated_at;
 }
 
 export async function deleteObra(id) {
@@ -337,6 +364,116 @@ export async function fetchMovimentosObra(obraId) {
     console.warn("fetchMovimentosObra:", err.message);
     return null;
   }
+}
+
+// ─── ANEXOS DA OBRA (tabela obra_anexos + bucket privado "obras") ────────────
+// Uma linha por arquivo, fora do jsonb da obra (dois envios ao mesmo tempo não se apagam).
+// Nada é apagado: remover marca `removido_em` (lixeira) e o arquivo continua no Storage.
+const BUCKET_OBRAS = "obras";
+
+function anexo(r) {
+  return {
+    id: r.id, obraId: r.obra_id, nome: r.nome, path: r.path, mime: r.mime || "",
+    tamanho: Number(r.tamanho) || 0, categoria: r.categoria, autor: r.autor || "",
+    createdAt: r.created_at, removidoEm: r.removido_em || null, removidoPor: r.removido_por || "",
+  };
+}
+
+// Resiliente: sem a migration_ficha_obra.sql, devolve null e o bloco mostra o aviso.
+export async function fetchAnexosObra(obraId) {
+  try {
+    const linhas = await todasAsLinhas(() => supabase.from("obra_anexos").select("*").eq("obra_id", obraId).order("created_at"));
+    return linhas.map(anexo);
+  } catch (err) {
+    console.warn("fetchAnexosObra:", err.message);
+    return null;
+  }
+}
+
+// Nome de arquivo seguro para a chave do Storage (sem acento, espaço nem símbolo).
+function saneado(nome) {
+  return (nome || "arquivo").normalize("NFD").replace(/[̀-ͯ]/g, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "_").replace(/_+/g, "_").slice(-80);
+}
+
+// Sobe o arquivo e só depois registra a linha. `upsert: false` + uuid no caminho: um envio
+// nunca sobrescreve outro arquivo.
+export async function enviarAnexoObra({ obraId, blob, nome, mime, categoria, autor }) {
+  const path = `${saneado(String(obraId))}/${crypto.randomUUID()}-${saneado(nome)}`;
+  const up = await supabase.storage.from(BUCKET_OBRAS).upload(path, blob, { contentType: mime || blob.type || "application/octet-stream", upsert: false });
+  if (up.error) throw up.error;
+  const { data, error } = await supabase.from("obra_anexos").insert({
+    obra_id: obraId, nome, path, mime: mime || blob.type || null, tamanho: blob.size || null,
+    categoria: categoria || "outro", autor: autor || null,
+  }).select("*").single();
+  if (error) throw new Error(`"${nome}" subiu, mas não foi registrado na obra: ${error.message}`);
+  return anexo(data);
+}
+
+async function atualizarAnexo(id, campos) {
+  const { data, error } = await supabase.from("obra_anexos").update(campos).eq("id", id).select("*");
+  if (error) throw error;
+  // Mesmo caso do deleteEquipe: UPDATE barrado por RLS volta sem erro e sem linha.
+  if (!data || data.length === 0) throw new Error("O anexo não foi alterado — sem permissão ou ele não existe.");
+  return anexo(data[0]);
+}
+export const removerAnexo = (id, por) => atualizarAnexo(id, { removido_em: new Date().toISOString(), removido_por: por || null });
+export const restaurarAnexo = (id) => atualizarAnexo(id, { removido_em: null, removido_por: null });
+export const mudarCategoriaAnexo = (id, categoria) => atualizarAnexo(id, { categoria });
+
+// Bucket privado: o link é assinado e vence em 1 h. Várias de uma vez para as miniaturas.
+export async function urlsAssinadas(paths, segundos = 3600) {
+  const unicos = [...new Set(paths.filter(Boolean))];
+  if (!unicos.length) return {};
+  const { data, error } = await supabase.storage.from(BUCKET_OBRAS).createSignedUrls(unicos, segundos);
+  if (error) throw error;
+  return Object.fromEntries((data || []).filter(d => d.signedUrl).map(d => [d.path, d.signedUrl]));
+}
+
+// ─── COMENTÁRIOS E ATIVIDADE DA OBRA ─────────────────────────────────────────
+// Imutáveis no banco: não se editam nem se apagam, só se ocultam.
+function comentario(r) {
+  return { id: r.id, obraId: r.obra_id, tipo: r.tipo, texto: r.texto, autor: r.autor || "", createdAt: r.created_at, ocultoEm: r.oculto_em || null };
+}
+
+export async function fetchComentariosObra(obraId) {
+  try {
+    const linhas = await todasAsLinhas(() => supabase.from("obra_comentarios").select("*").eq("obra_id", obraId).order("created_at", { ascending: false }));
+    return linhas.map(comentario);
+  } catch (err) {
+    console.warn("fetchComentariosObra:", err.message);
+    return null;
+  }
+}
+
+export async function inserirComentario({ obraId, texto, autor, tipo = "comentario" }) {
+  const { data, error } = await supabase.from("obra_comentarios")
+    .insert({ obra_id: obraId, texto, autor: autor || null, tipo }).select("*").single();
+  if (error) throw error;
+  return comentario(data);
+}
+
+export async function ocultarComentario(id, oculto) {
+  const { data, error } = await supabase.from("obra_comentarios")
+    .update({ oculto_em: oculto ? new Date().toISOString() : null }).eq("id", id).select("*");
+  if (error) throw error;
+  if (!data || data.length === 0) throw new Error("O comentário não foi alterado — sem permissão ou ele não existe.");
+  return comentario(data[0]);
+}
+
+// ─── BACKUP COMPLETO (botão "Exportar dados") ────────────────────────────────
+// Todas as tabelas, paginadas. Obras é obrigatória; o resto vira null se a tabela não existir.
+// Os arquivos em si (anexos, fotos, desenhos) ficam no Storage e não entram aqui.
+export async function fetchBackupCompleto() {
+  const tabela = (nome) => todasAsLinhas(() => supabase.from(nome).select("*").order("id"));
+  const opcional = async (nome) => {
+    try { return await tabela(nome); } catch (err) { console.warn(`backup ${nome}:`, err.message); return null; }
+  };
+  const obras = await tabela("obras");
+  const nomes = ["equipes", "agenda", "cronogramas", "lembretes", "diarios", "obra_anexos", "obra_comentarios",
+    "obras_historico", "estoque_itens", "estoque_documentos", "estoque_movimentos"];
+  const resto = await Promise.all(nomes.map(opcional));
+  return { geradoEm: new Date().toISOString(), obras, ...Object.fromEntries(nomes.map((n, i) => [n, resto[i]])) };
 }
 
 // Para o CSV: o livro inteiro, na ordem em que foi lançado.

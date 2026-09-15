@@ -2,7 +2,7 @@ import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from "rea
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
-import { fetchObras, upsertObra, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens } from "./api";
+import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens } from "./api";
 import { agendar, agendarMacro, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent } from "./cronograma";
 import Modal from "./Modal";
 import { chaveGrupo } from "./agrupamento";
@@ -11,6 +11,10 @@ import DiarioView, { DiarioPrint, normDiario } from "./DiarioObra";
 import ComprasObra, { comprasTotais, normCompras, fornecedoresConhecidos } from "./ComprasObra";
 import EstoqueView, { EstoqueDocumentoPrint, EtiquetasPrint, SaidasEstoqueObra, numeroDoc } from "./Estoque";
 import { SigiloProvider, Dinheiro, Oculto, OlhoFinanceiro, useSigilo, MASCARA } from "./Sigilo";
+import CadastroObra, { normCadastro } from "./CadastroObra";
+import AnexosObra, { enviarArquivos, urlsComCache } from "./AnexosObra";
+import ComentariosObra, { lerAutor } from "./ComentariosObra";
+import NovoContrato from "./NovoContrato";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 // Brand color (was navy #1a1a1a) — now charcoal black
@@ -210,8 +214,55 @@ function normObra(o) {
     // Compras por categoria: tipo, estoque e fornecedores (orçamento → compra → entrega + NF).
     // O formato antigo (previsto/realizado soltos) é convertido em normCompras.
     compras: normCompras(o.compras),
-    itens: o.itens.map(normItem),
+    // Ficha da obra (o que morava no cartão do Trello). Anexos e comentários NÃO ficam aqui:
+    // são tabelas próprias (obra_anexos / obra_comentarios), ver AnexosObra e ComentariosObra.
+    cadastro: normCadastro(o.cadastro),
+    checklist: normChecklist(o.checklist),
+    capa: o.capa && o.capa.path ? { anexoId: o.capa.anexoId || "", path: o.capa.path } : null,
+    // Obra cadastrada à mão nasce sem itens (entram depois pelo PDF) — e um registro sem
+    // `itens` derrubava a carga de todas as obras.
+    itens: (Array.isArray(o.itens) ? o.itens : []).map(normItem),
   };
+}
+
+// Checklist de abertura, com os itens que o escritório usava no Trello. Ids fixos porque
+// normObra roda a cada carga: o padrão só entra quando a obra ainda não tem checklist.
+const CHECKLIST_PADRAO = [
+  { id: "ck_projeto", texto: "Anexado projeto e fotos" },
+  { id: "ck_orcamento", texto: "Orçamento" },
+  { id: "ck_contrato", texto: "Contrato assinado" },
+  { id: "ck_perfis", texto: "Relação de perfis" },
+  { id: "ck_vidro", texto: "Relação de vidro" },
+  { id: "ck_acessorios", texto: "Relação de acessórios" },
+  { id: "ck_compras", texto: "Enviar para compras" },
+];
+function normChecklist(c) {
+  if (!Array.isArray(c)) return CHECKLIST_PADRAO.map(x => ({ ...x, feito: false, feitoEm: "" }));
+  return c.filter(x => x && x.id).map(x => ({ id: x.id, texto: String(x.texto || ""), feito: !!x.feito, feitoEm: x.feitoEm || "" }));
+}
+
+// Reimportar o PDF de uma obra que já existe: troca itens e valor, e mais nada. Antes o objeto
+// importado substituía a obra inteira e levava junto compras, financeiro, bandeiras, grupo e as
+// etapas/datas de cada item. Item casa por id (o nº do item no orçamento); o que o usuário
+// preencheu no item fica. Cabeçalho do PDF só preenche o que está vazio.
+function mesclarImportacao(atual, lida) {
+  const antigos = new Map((atual.itens || []).map(i => [i.id, i]));
+  const itens = (lida.itens || []).map(n => {
+    const a = antigos.get(n.id);
+    if (!a) return n;
+    return {
+      ...n,
+      etapas: a.etapas, inicio: a.inicio, diasExec: a.diasExec, obs: a.obs,
+      localizacao: a.localizacao || n.localizacao, desenho: a.desenho || n.desenho,
+    };
+  });
+  const vazio = (campo) => atual[campo] || lida[campo] || "";
+  return normObra({
+    ...atual,
+    cliente: vazio("cliente"), obra: vazio("obra"), cidade: vazio("cidade"), vendedor: vazio("vendedor"), data: vazio("data"),
+    valorTotal: Number(lida.valorTotal) || atual.valorTotal || 0,
+    itens,
+  });
 }
 
 // ─── EQUIPES (TEAMS) ─────────────────────────────────────────────────────────
@@ -536,9 +587,86 @@ function parseObraLines(allLines, filename) {
 }
 
 // ─── GANTT VIEW ───────────────────────────────────────────────────────────────
-function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque, onEntradaEstoque }) {
+// ─── SEÇÃO RECOLHÍVEL (tela da obra) ─────────────────────────────────────────
+// Título + resumo de uma linha; o conteúdo só monta quando aberta (Compras fechada nem busca o
+// estoque). Aberta/fechada é preferência de tela, lembrada por navegador — não é dado da obra.
+function Secao({ id, titulo, icone, resumo, padraoAberta = false, children }) {
+  const chave = "obra.secao." + id;
+  const [aberta, setAberta] = useState(() => lerPref(chave, padraoAberta ? "1" : "0") === "1");
+  useEffect(() => { gravarPref(chave, aberta ? "1" : "0"); }, [chave, aberta]);
+  return (
+    <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, marginBottom: 10 }}>
+      <div role="button" tabIndex={0} onClick={() => setAberta(a => !a)}
+        onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setAberta(a => !a); } }}
+        style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 16px", cursor: "pointer", userSelect: "none" }}>
+        <span style={{ fontSize: 10, color: "#94a3b8", width: 10, display: "inline-block", transform: aberta ? "rotate(90deg)" : "none", transition: "transform .15s" }}>▶</span>
+        <span style={{ fontSize: 15 }}>{icone}</span>
+        <span style={{ fontWeight: 800, fontSize: 13.5, color: "#1a1a1a", whiteSpace: "nowrap" }}>{titulo}</span>
+        <span style={{ marginLeft: "auto", fontSize: 12, color: "#64748b", textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{resumo}</span>
+      </div>
+      {aberta && <div style={{ borderTop: "1px solid #f1f5f9" }}>{children}</div>}
+    </div>
+  );
+}
+
+// Checklist de abertura da obra. onChange(novaLista, textoDaAtividade?)
+function ChecklistObra({ itens, onChange }) {
+  const [novo, setNovo] = useState("");
+  const lista = itens || [];
+  const feitos = lista.filter(i => i.feito).length;
+  const pct = lista.length ? Math.round(feitos / lista.length * 100) : 0;
+  function alternar(it) {
+    const feito = !it.feito;
+    onChange(lista.map(x => x.id === it.id ? { ...x, feito, feitoEm: feito ? hoje() : "" } : x),
+      `Checklist: ${feito ? "✓ marcou" : "desmarcou"} "${it.texto}"`);
+  }
+  function adicionar() {
+    const t = novo.trim();
+    if (!t) return;
+    onChange([...lista, { id: "ck_" + Date.now().toString(36), texto: t, feito: false, feitoEm: "" }]);
+    setNovo("");
+  }
+  function remover(it) {
+    if (!window.confirm(`Tirar "${it.texto}" do checklist?`)) return;
+    onChange(lista.filter(x => x.id !== it.id), `Checklist: tirou "${it.texto}"`);
+  }
+  return (
+    <div style={{ padding: "12px 16px 16px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+        <span style={{ fontSize: 11, fontWeight: 800, color: "#64748b", width: 36 }}>{pct}%</span>
+        <div style={{ flex: 1 }}><ProgressBar value={pct} height={6} /></div>
+      </div>
+      {lista.map(it => (
+        <div key={it.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 0" }}>
+          <input type="checkbox" checked={it.feito} onChange={() => alternar(it)} style={{ width: 16, height: 16, accentColor: "#2563eb", cursor: "pointer" }} />
+          <span onClick={() => alternar(it)} style={{ flex: 1, fontSize: 13, cursor: "pointer", color: it.feito ? "#94a3b8" : "#1e293b", textDecoration: it.feito ? "line-through" : "none" }}>{it.texto}</span>
+          {it.feito && it.feitoEm && <span style={{ fontSize: 11, color: "#94a3b8" }}>{fmtDate(it.feitoEm)}</span>}
+          <button onClick={() => remover(it)} title="Tirar do checklist"
+            style={{ background: "none", border: "none", color: "#cbd5e1", fontSize: 15, cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+        <input value={novo} onChange={e => setNovo(e.target.value)} onKeyDown={e => { if (e.key === "Enter") adicionar(); }} placeholder="Adicionar um item"
+          style={{ flex: 1, border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 10px", fontSize: 12.5 }} />
+        <button onClick={adicionar} style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Adicionar</button>
+      </div>
+    </div>
+  );
+}
+
+function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque, onEntradaEstoque, onAtividade, atividadeVersao = 0 }) {
   const [expandedId, setExpandedId] = useState(null);
   const [localObra, setLocalObra] = useState(obra);
+  const [nAnexos, setNAnexos] = useState(null); // resumo da seção Anexos (conhecido quando ela abre)
+  const [capaUrl, setCapaUrl] = useState("");
+  const capaPath = obra.capa?.path || "";
+  useEffect(() => { setNAnexos(null); }, [obra.id]);
+  useEffect(() => {
+    if (!capaPath) { setCapaUrl(""); return; }
+    let cancel = false;
+    urlsComCache([capaPath]).then(u => { if (!cancel) setCapaUrl(u[capaPath] || ""); }).catch(() => {});
+    return () => { cancel = true; };
+  }, [capaPath]);
 
   useEffect(() => { setLocalObra(obra); }, [obra]);
 
@@ -621,175 +749,99 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
   const DAY_W = 18;
   const TIMELINE_W = Math.max(700, totalDays * DAY_W);
 
+  const cad = localObra.cadastro || {};
+  const semAgenda = schedule.filter(s => !s.agendado).length;
+  const checklist = localObra.checklist || [];
+  const checkFeitos = checklist.filter(c => c.feito).length;
+  const nomesEquipes = equipesObra.map(id => equipes.find(e => e.id === id)?.nome).filter(Boolean);
+
+  // Os quatro status mudam na hora e deixam rastro na coluna de comentários.
+  const ROTULO_STATUS = { status: "Status", statusCompras: "Compras", statusFabricacao: "Fabricação", statusInstalacao: "Instalação" };
+  function mudarStatus(campo, valor) {
+    if (localObra[campo] === valor) return;
+    onAtividade?.(`${ROTULO_STATUS[campo]}: ${localObra[campo] || "—"} → ${valor}`);
+    update({ ...localObra, [campo]: valor });
+  }
+  const campoData = { border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: "#1e293b" };
+
   return (
     <div style={{ fontFamily: "'Segoe UI', sans-serif", color: "#1e293b" }}>
-      {/* Summary bar */}
-      <div style={{ background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "12px 20px", display: "flex", gap: 24, alignItems: "center", flexWrap: "wrap" }}>
-        <div>
-          <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Pedido #{localObra.numero}</div>
-          <div style={{ fontWeight: 800, fontSize: 15, color: BRAND }}>{localObra.cliente}</div>
-          <div style={{ fontSize: 12, color: "#64748b" }}>{localObra.obra || localObra.cidade}</div>
+      {/* Cabeçalho da obra: quem é, onde é, como está */}
+      <div style={{ background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "12px 20px", display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap" }}>
+        {capaUrl && <img src={capaUrl} alt="" style={{ width: 88, height: 66, objectFit: "cover", borderRadius: 8, border: "1px solid #e2e8f0", flexShrink: 0 }} />}
+        <div style={{ flex: "1 1 280px", minWidth: 0 }}>
+          <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>
+            Proposta #{localObra.numero}{cad.lojaFaturamento ? ` · ${cad.lojaFaturamento}` : ""}
+          </div>
+          <div style={{ fontWeight: 800, fontSize: 16, color: BRAND }}>{localObra.obra || localObra.cliente}</div>
+          <div style={{ fontSize: 12, color: "#64748b" }}>
+            {[localObra.obra ? localObra.cliente : "", cad.enderecoObra, localObra.cidade].filter(Boolean).join(" · ")}
+          </div>
         </div>
 
-        <div style={{ marginLeft: "auto", display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
-          <div style={{ minWidth: 160 }}>
+        <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ minWidth: 150 }}>
             <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Progresso — {totalPct}%</div>
             <ProgressBar value={totalPct} height={8} />
           </div>
           <div style={{ fontWeight: 800, color: "#c9a227", fontSize: 15 }}><Dinheiro v={localObra.valorTotal} /></div>
           <div>
             <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 2 }}>Status</label>
-            <select
-              value={localObra.status}
-              onChange={e => update({ ...localObra, status: e.target.value })}
-              style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: STATUS_COLORS[localObra.status] || "#64748b", fontWeight: 700 }}
-            >
+            <select value={localObra.status} onChange={e => mudarStatus("status", e.target.value)}
+              style={{ ...campoData, color: STATUS_COLORS[localObra.status] || "#64748b", fontWeight: 700 }}>
               {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
           <div>
             <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 2 }}>Início</label>
             <input type="date" value={localObra.dataInicio || ""}
-              onChange={e => update({ ...localObra, dataInicio: e.target.value })}
-              style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: "#1e293b" }} />
+              onChange={e => update({ ...localObra, dataInicio: e.target.value })} style={campoData} />
           </div>
           <div>
             <label style={{ fontSize: 11, color: "#94a3b8", display: "block", marginBottom: 2 }}>Limite Entrega</label>
             <input type="date" value={localObra.dataLimiteEntrega || ""}
-              onChange={e => update({ ...localObra, dataLimiteEntrega: e.target.value })}
-              style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: "#1e293b" }} />
+              onChange={e => update({ ...localObra, dataLimiteEntrega: e.target.value })} style={campoData} />
           </div>
         </div>
       </div>
 
-      {/* Resumo Financeiro */}
-      <div style={{ background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "16px 20px", display: "flex", gap: 28, alignItems: "center", flexWrap: "wrap" }}>
-        <PieSigilo
-          size={104} strokeWidth={15}
-          data={[
-            { value: localObra.valorRecebido || 0, color: "#10b981" },
-            { value: valorAReceber, color: "#f59e0b" },
-          ]}
-          centro={
-            <>
-              <div style={{ fontSize: 9, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Total</div>
-              <div style={{ fontSize: 12, fontWeight: 800, color: "#1e293b" }}><Dinheiro v={localObra.valorTotal} /></div>
-            </>
-          }
-        />
-
-        <div style={{ display: "flex", gap: 22, alignItems: "flex-start", flexWrap: "wrap" }}>
-          <div style={{ alignSelf: "center" }}><OlhoFinanceiro /></div>
-          <div>
-            <div style={{ fontSize: 10, color: "#10b981", fontWeight: 700, textTransform: "uppercase" }}>● Recebido</div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: "#10b981" }}><Dinheiro v={localObra.valorRecebido || 0} /></div>
-          </div>
-          <div>
-            <div style={{ fontSize: 10, color: "#f59e0b", fontWeight: 700, textTransform: "uppercase" }}>● A Receber</div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: "#f59e0b" }}><Dinheiro v={valorAReceber} /></div>
-          </div>
-          <div>
-            <div style={{ fontSize: 10, color: "#dc2626", fontWeight: 700, textTransform: "uppercase" }}>● A Pagar</div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: "#dc2626" }}><Dinheiro v={compras.aComprar} /></div>
-          </div>
-          <div>
-            <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 2 }}>Data do Contrato</label>
-            <input type="date" value={localObra.dataContrato || ""}
-              onChange={e => update({ ...localObra, dataContrato: e.target.value })}
-              style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: "#1e293b" }} />
-            <div style={{ fontSize: 11, fontWeight: 800, marginTop: 3, color: diasContrato === null ? "#94a3b8" : corDias(diasContrato) }}
-              title="Dias corridos desde a data do contrato">
-              {diasContrato === null ? "— sem data de contrato" : `⏱ ${diasContrato} dia${diasContrato === 1 ? "" : "s"} desde o contrato`}
+      <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap", padding: "16px 20px" }}>
+        {/* Esquerda: seções recolhíveis. Itens, Compras e Financeiro só abrem no clique. */}
+        <div style={{ flex: "999 1 600px", minWidth: 0 }}>
+          <Secao id="cadastro" titulo="Cadastro do cliente" icone="🪪" padraoAberta
+            resumo={[cad.contatoNome, cad.telefones].filter(Boolean).join(" · ") || "a preencher"}>
+            <div style={{ padding: 16 }}>
+              <CadastroObra obra={localObra} onChange={update} comLinks />
             </div>
-          </div>
-          <div>
-            <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 2 }}>Valor Recebido</label>
-            <Oculto>
-              <input type="number" min={0} step="0.01" value={localObra.valorRecebido || 0}
-                onChange={e => update({ ...localObra, valorRecebido: Math.max(0, Number(e.target.value) || 0) })}
-                style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 8px", fontSize: 13, color: "#1e293b", width: 120 }} />
-            </Oculto>
-          </div>
-          <div>
-            <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 4 }}>Bandeiras</label>
-            <FlagsObra flags={localObra.flags} onChange={fs => update({ ...localObra, flags: fs })} />
-          </div>
-        </div>
+          </Secao>
 
-        <div style={{ marginLeft: "auto", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 20px" }}>
-          {[
-            { label: "Compras", field: "statusCompras" },
-            { label: "Fabricação", field: "statusFabricacao" },
-            { label: "Instalação", field: "statusInstalacao" },
-            { label: "Geral", field: "status" },
-          ].map(({ label, field }) => {
-            const cor = STATUS_COLORS[localObra[field]] || "#94a3b8";
-            return (
-              <div key={field} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ fontSize: 11, color: "#64748b", width: 72 }}>{label}</span>
-                <select value={localObra[field]} onChange={e => update({ ...localObra, [field]: e.target.value })}
-                  style={{ background: cor + "22", color: cor, border: `1px solid ${cor}55`, borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
-                  {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
+          <Secao id="anexos" titulo="Anexos" icone="📎" padraoAberta
+            resumo={nAnexos === null ? "" : nAnexos === 0 ? "nenhum arquivo" : `${nAnexos} arquivo${nAnexos === 1 ? "" : "s"}`}>
+            <div style={{ padding: 16 }}>
+              <AnexosObra obraId={obra.id} capa={localObra.capa} recarregar={atividadeVersao}
+                onCapa={c => update({ ...localObra, capa: c })}
+                onAtividade={onAtividade} onContagem={l => setNAnexos(l.length)} />
+            </div>
+          </Secao>
+
+          <Secao id="checklist" titulo="Checklist de abertura" icone="☑️" resumo={`${checkFeitos}/${checklist.length}`}>
+            <ChecklistObra itens={checklist}
+              onChange={(ck, atividade) => { update({ ...localObra, checklist: ck }); if (atividade) onAtividade?.(atividade); }} />
+          </Secao>
+
+          <Secao id="itens" titulo="Itens e cronograma" icone="🪟"
+            resumo={localObra.itens.length === 0 ? "sem itens" : `${localObra.itens.length} ite${localObra.itens.length === 1 ? "m" : "ns"} · ${totalPct}%${semAgenda ? ` · ${semAgenda} sem agendamento` : ""}`}>
+            {localObra.itens.length === 0 && (
+              <div style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0", padding: "10px 20px", fontSize: 13, color: "#475569" }}>
+                📄 Esta obra ainda não tem itens. Importe o PDF do orçamento pelo menu <b>☰ → Importar PDF</b> — com o mesmo nº de
+                proposta (#{localObra.numero}) os itens entram aqui e o cadastro, os anexos e os comentários ficam como estão.
               </div>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Compras por categoria */}
-      <div style={{ background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "12px 20px 16px" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Compras por Categoria</span>
-          {alertaCompras && (
-            <span style={{ background: "#fee2e2", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 800 }}>
-              🚩 Orçado e ainda não comprado (<Dinheiro v={compras.aComprar} />) é mais do que ainda vai receber (<Dinheiro v={valorAReceber} />)
-            </span>
-          )}
-        </div>
-        <ComprasObra compras={localObra.compras} sugestoes={fornecedores}
-          onChange={c => update({ ...localObra, compras: c })}
-          onEntradaEstoque={onEntradaEstoque} onAbrirDocEstoque={onAbrirDocEstoque} />
-        <SaidasEstoqueObra obraId={obra.id} onAbrirDoc={onAbrirDocEstoque} />
-      </div>
-
-      {/* Team bar */}
-      <div style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0", padding: "10px 20px", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Equipe Responsável:</span>
-        {equipesObra.length === 0 && (
-          <span style={{ fontSize: 13, color: "#94a3b8", fontStyle: "italic" }}>Nenhuma equipe definida</span>
-        )}
-        {equipesObra.map(id => {
-          const eq = equipes.find(e => e.id === id);
-          if (!eq) return null;
-          return (
-            <span key={id} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: eq.cor + "1a", color: eq.cor, border: `1px solid ${eq.cor}55`, borderRadius: 999, padding: "4px 6px 4px 12px", fontSize: 13, fontWeight: 700 }}>
-              {eq.nome}
-              {eq.integrantes.length > 0 && (
-                <span style={{ fontWeight: 500, fontSize: 12, opacity: 0.85 }}>— {eq.integrantes.join(" + ")}</span>
-              )}
-              <button onClick={() => removeEquipe(id)} title="Remover"
-                style={{ background: eq.cor, color: "#fff", border: "none", borderRadius: "50%", width: 18, height: 18, fontSize: 12, lineHeight: "16px", cursor: "pointer", marginLeft: 2 }}>×</button>
-            </span>
-          );
-        })}
-        {equipes.length === 0 ? (
-          <span style={{ fontSize: 12, color: "#94a3b8" }}>(cadastre equipes na tela inicial em "Equipes")</span>
-        ) : equipesDisponiveis.length > 0 && (
-          <select value="" onChange={e => addEquipe(e.target.value)}
-            style={{ border: "1px dashed #c9a227", color: "#c9a227", background: "#fffbeb", borderRadius: 8, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-            <option value="">+ Adicionar Equipe</option>
-            {equipesDisponiveis.map(eq => <option key={eq.id} value={eq.id}>{eq.nome}</option>)}
-          </select>
-        )}
-      </div>
-
-      {/* Hint: define obra start date (timeline still shown below) */}
-      {!hasStart && (
-        <div style={{ background: "#fffbeb", borderBottom: "1px solid #fde68a", padding: "10px 20px", fontSize: 13, color: "#92400e" }}>
-          📅 Defina a <b>data de início</b> da obra no campo <b>Início</b> (ao lado de Status) para posicionar o cronograma e exibir a obra no calendário.
-        </div>
-      )}
+            )}
+            {!hasStart && localObra.itens.length > 0 && (
+              <div style={{ background: "#fffbeb", borderBottom: "1px solid #fde68a", padding: "10px 20px", fontSize: 13, color: "#92400e" }}>
+                📅 Defina a <b>data de início</b> da obra no campo <b>Início</b> (no cabeçalho) para posicionar o cronograma e exibir a obra no calendário.
+              </div>
+            )}
 
       {/* Gantt grid */}
       <div style={{ overflowX: "auto" }}>
@@ -974,6 +1026,141 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
             <span style={{ width: LEFT_COL - 28, fontWeight: 700 }}>{localObra.itens.length} itens · Progresso: {totalPct}%</span>
             <span style={{ fontWeight: 700, color: "#c9a227" }}><Dinheiro v={localObra.valorTotal} /></span>
           </div>
+        </div>
+      </div>
+          </Secao>
+
+          <Secao id="compras" titulo="Compras" icone="🛒"
+            resumo={<>{localObra.statusCompras}{alertaCompras && <span style={{ color: "#dc2626", fontWeight: 800 }}> · 🚩 a comprar acima do a receber</span>}</>}>
+            <div style={{ padding: "12px 16px 16px" }}>
+              {alertaCompras && (
+                <div style={{ marginBottom: 10 }}>
+                  <span style={{ background: "#fee2e2", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 999, padding: "2px 10px", fontSize: 11, fontWeight: 800 }}>
+                    🚩 Orçado e ainda não comprado (<Dinheiro v={compras.aComprar} />) é mais do que ainda vai receber (<Dinheiro v={valorAReceber} />)
+                  </span>
+                </div>
+              )}
+              <ComprasObra compras={localObra.compras} sugestoes={fornecedores}
+                onChange={c => update({ ...localObra, compras: c })}
+                onEntradaEstoque={onEntradaEstoque} onAbrirDocEstoque={onAbrirDocEstoque} />
+              <SaidasEstoqueObra obraId={obra.id} onAbrirDoc={onAbrirDocEstoque} />
+            </div>
+          </Secao>
+
+          <Secao id="financeiro" titulo="Financeiro" icone="💰"
+            resumo={<>Recebido <Dinheiro v={localObra.valorRecebido || 0} /> · A receber <Dinheiro v={valorAReceber} /></>}>
+            <div style={{ padding: 16, display: "flex", gap: 28, alignItems: "center", flexWrap: "wrap" }}>
+              <PieSigilo
+                size={104} strokeWidth={15}
+                data={[
+                  { value: localObra.valorRecebido || 0, color: "#10b981" },
+                  { value: valorAReceber, color: "#f59e0b" },
+                ]}
+                centro={
+                  <>
+                    <div style={{ fontSize: 9, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Total</div>
+                    <div style={{ fontSize: 12, fontWeight: 800, color: "#1e293b" }}><Dinheiro v={localObra.valorTotal} /></div>
+                  </>
+                }
+              />
+              <div style={{ display: "flex", gap: 22, alignItems: "flex-start", flexWrap: "wrap" }}>
+                <div style={{ alignSelf: "center" }}><OlhoFinanceiro /></div>
+                <div>
+                  <div style={{ fontSize: 10, color: "#10b981", fontWeight: 700, textTransform: "uppercase" }}>● Recebido</div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: "#10b981" }}><Dinheiro v={localObra.valorRecebido || 0} /></div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: "#f59e0b", fontWeight: 700, textTransform: "uppercase" }}>● A Receber</div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: "#f59e0b" }}><Dinheiro v={valorAReceber} /></div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 10, color: "#dc2626", fontWeight: 700, textTransform: "uppercase" }}>● A Pagar</div>
+                  <div style={{ fontSize: 16, fontWeight: 800, color: "#dc2626" }}><Dinheiro v={compras.aComprar} /></div>
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 2 }}>Data do Contrato</label>
+                  <input type="date" value={localObra.dataContrato || ""}
+                    onChange={e => update({ ...localObra, dataContrato: e.target.value })}
+                    style={campoData} />
+                  <div style={{ fontSize: 11, fontWeight: 800, marginTop: 3, color: diasContrato === null ? "#94a3b8" : corDias(diasContrato) }}
+                    title="Dias corridos desde a data do contrato">
+                    {diasContrato === null ? "— sem data de contrato" : `⏱ ${diasContrato} dia${diasContrato === 1 ? "" : "s"} desde o contrato`}
+                  </div>
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 2 }}>Valor Recebido</label>
+                  <Oculto>
+                    <input type="number" min={0} step="0.01" value={localObra.valorRecebido || 0}
+                      onChange={e => update({ ...localObra, valorRecebido: Math.max(0, Number(e.target.value) || 0) })}
+                      style={{ ...campoData, width: 120 }} />
+                  </Oculto>
+                </div>
+                <div>
+                  <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 4 }}>Bandeiras</label>
+                  <FlagsObra flags={localObra.flags} onChange={fs => update({ ...localObra, flags: fs })} />
+                </div>
+              </div>
+            </div>
+          </Secao>
+
+          <Secao id="equipe" titulo="Equipe e status" icone="👷"
+            resumo={nomesEquipes.length ? nomesEquipes.join(", ") : "sem equipe definida"}>
+            <div style={{ padding: "12px 16px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
+              <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Equipe Responsável:</span>
+                {equipesObra.length === 0 && (
+                  <span style={{ fontSize: 13, color: "#94a3b8", fontStyle: "italic" }}>Nenhuma equipe definida</span>
+                )}
+                {equipesObra.map(id => {
+                  const eq = equipes.find(e => e.id === id);
+                  if (!eq) return null;
+                  return (
+                    <span key={id} style={{ display: "inline-flex", alignItems: "center", gap: 6, background: eq.cor + "1a", color: eq.cor, border: `1px solid ${eq.cor}55`, borderRadius: 999, padding: "4px 6px 4px 12px", fontSize: 13, fontWeight: 700 }}>
+                      {eq.nome}
+                      {eq.integrantes.length > 0 && (
+                        <span style={{ fontWeight: 500, fontSize: 12, opacity: 0.85 }}>— {eq.integrantes.join(" + ")}</span>
+                      )}
+                      <button onClick={() => removeEquipe(id)} title="Remover"
+                        style={{ background: eq.cor, color: "#fff", border: "none", borderRadius: "50%", width: 18, height: 18, fontSize: 12, lineHeight: "16px", cursor: "pointer", marginLeft: 2 }}>×</button>
+                    </span>
+                  );
+                })}
+                {equipes.length === 0 ? (
+                  <span style={{ fontSize: 12, color: "#94a3b8" }}>(cadastre equipes na tela inicial em "Equipes")</span>
+                ) : equipesDisponiveis.length > 0 && (
+                  <select value="" onChange={e => addEquipe(e.target.value)}
+                    style={{ border: "1px dashed #c9a227", color: "#c9a227", background: "#fffbeb", borderRadius: 8, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                    <option value="">+ Adicionar Equipe</option>
+                    {equipesDisponiveis.map(eq => <option key={eq.id} value={eq.id}>{eq.nome}</option>)}
+                  </select>
+                )}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: "8px 20px" }}>
+                {[
+                  { label: "Compras", field: "statusCompras" },
+                  { label: "Fabricação", field: "statusFabricacao" },
+                  { label: "Instalação", field: "statusInstalacao" },
+                  { label: "Geral", field: "status" },
+                ].map(({ label, field }) => {
+                  const cor = STATUS_COLORS[localObra[field]] || "#94a3b8";
+                  return (
+                    <div key={field} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 11, color: "#64748b", width: 72 }}>{label}</span>
+                      <select value={localObra[field]} onChange={e => mudarStatus(field, e.target.value)}
+                        style={{ background: cor + "22", color: cor, border: `1px solid ${cor}55`, borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+                        {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </Secao>
+        </div>
+
+        {/* Direita: comentários e atividade, como no Trello */}
+        <div style={{ flex: "1 1 320px", minWidth: 280, position: "sticky", top: 12 }}>
+          <ComentariosObra obraId={obra.id} recarregar={atividadeVersao} />
         </div>
       </div>
     </div>
@@ -1945,7 +2132,7 @@ function EquipesDaObra({ ids, equipes }) {
 }
 
 // Obra com um contrato só — o card de sempre, sem mudança visual.
-function CardObra({ os, equipes, onSelect, onStatusChange, onFlagsChange, onAbrirGrupo, alca, dragProps, isDragging, isOver }) {
+function CardObra({ os, equipes, onSelect, onStatusChange, onFlagsChange, onAbrirGrupo, alca, dragProps, isDragging, isOver, capaUrl }) {
   const pct = os.itens.length > 0
     ? Math.round(os.itens.reduce((a, i) => a + itemPercentual(i), 0) / os.itens.length)
     : 0;
@@ -1963,6 +2150,7 @@ function CardObra({ os, equipes, onSelect, onStatusChange, onFlagsChange, onAbri
         <div style={{ background: "#1a1a1a", color: "#fff", borderRadius: 8, padding: "6px 14px", fontWeight: 800, fontSize: 18, minWidth: 60, textAlign: "center" }}>
           #{os.numero}
         </div>
+        {capaUrl && <img src={capaUrl} alt="" style={{ width: 64, height: 48, objectFit: "cover", borderRadius: 8, border: "1px solid #e2e8f0", flexShrink: 0 }} />}
         {precisaAlertaCompras(os) && (
           <span title="Falta comprar mais do que ainda vai receber dessa obra" style={{ alignSelf: "center", fontSize: 20, lineHeight: 1 }}>🚩</span>
         )}
@@ -2033,7 +2221,7 @@ function CardObra({ os, equipes, onSelect, onStatusChange, onFlagsChange, onAbri
 
 // Obra com dois ou mais contratos: cabeçalho consolidado + uma linha por contrato.
 // Status e bandeiras ficam na linha do contrato, não no cabeçalho — são dele.
-function CardGrupo({ g, equipes, onSelect, onStatusChange, onFlagsChange, onAbrirGrupo, alca, dragProps, isDragging, isOver }) {
+function CardGrupo({ g, equipes, onSelect, onStatusChange, onFlagsChange, onAbrirGrupo, alca, dragProps, isDragging, isOver, capaUrl }) {
   return (
     <div {...dragProps}
       style={{ ...cardBase(isOver, isDragging), borderLeft: "4px solid #1d4ed8", overflow: "hidden" }}
@@ -2042,6 +2230,7 @@ function CardGrupo({ g, equipes, onSelect, onStatusChange, onFlagsChange, onAbri
       {/* Cabeçalho da obra */}
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap", padding: "16px 22px 14px" }}>
         {alca}
+        {capaUrl && <img src={capaUrl} alt="" style={{ width: 64, height: 48, objectFit: "cover", borderRadius: 8, border: "1px solid #e2e8f0", flexShrink: 0 }} />}
         <div style={{ flex: 1, minWidth: 200 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <div style={{ fontWeight: 800, fontSize: 16, color: "#1e293b" }}>{g.nome}</div>
@@ -2234,7 +2423,7 @@ function ModalAgrupamento({ grupo, grupos, onFechar, onGrupoChange }) {
 // A unidade da tela é o GRUPO (um cliente, um ou vários contratos), não a obra solta: é ele que
 // filtra, ordena e arrasta. A pasta é decidida pelo grupo inteiro — enquanto sobrar um contrato
 // aberto, a obra não está concluída e o grupo fica em Em Andamento com todos os contratos juntos.
-function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, onFlagsChange, onGrupoChange, equipes }) {
+function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, onFlagsChange, onGrupoChange, equipes, onNovoContrato }) {
   const gruposTodos = agruparObras(todas);
   const grupos = gruposTodos.filter(g => pasta === "concluidas" ? g.concluido : !g.concluido);
   const obras = grupos.flatMap(g => g.contratos);   // os contratos desta pasta, para os KPIs
@@ -2252,6 +2441,16 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
   const [dragId, setDragId] = useState(null);       // chave do grupo sendo arrastado
   const [overId, setOverId] = useState(null);       // chave do grupo sob o cursor
   const [agrupando, setAgrupando] = useState(null); // grupo com o modal de agrupamento aberto
+
+  // Capas dos cards: bucket privado, então as URLs assinadas vêm de uma vez (e em cache).
+  const [capas, setCapas] = useState({});
+  const chaveCapas = todas.map(o => o.capa?.path).filter(Boolean).join("|");
+  useEffect(() => {
+    if (!chaveCapas) return;
+    let cancel = false;
+    urlsComCache(chaveCapas.split("|")).then(u => { if (!cancel) setCapas(u); }).catch(err => console.warn("capas:", err.message));
+    return () => { cancel = true; };
+  }, [chaveCapas]);
 
   // Um grupo casa se QUALQUER contrato dele casar — o grupo nunca se parte por busca ou filtro.
   const q = search.toLowerCase();
@@ -2358,6 +2557,12 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
         <div style={{ fontSize: 13, color: "#94a3b8", display: "flex", alignItems: "center" }}>
           {displayed.length} de {grupos.length} obras
         </div>
+        {onNovoContrato && (
+          <button onClick={onNovoContrato}
+            style={{ marginLeft: "auto", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+            + Novo cliente / contrato
+          </button>
+        )}
       </div>
 
       {/* Cards — a unidade é o grupo. Com um contrato só, o card é o de sempre. */}
@@ -2385,9 +2590,10 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
             onAbrirGrupo: () => setAgrupando(g),
             alca, dragProps, isDragging, isOver,
           };
+          const capaUrl = g.contratos.map(o => capas[o.capa?.path]).find(Boolean);
           return g.contratos.length === 1
-            ? <CardObra key={g.chave} os={g.contratos[0]} {...comum} />
-            : <CardGrupo key={g.chave} g={g} {...comum} />;
+            ? <CardObra key={g.chave} os={g.contratos[0]} {...comum} capaUrl={capaUrl} />
+            : <CardGrupo key={g.chave} g={g} {...comum} capaUrl={capaUrl} />;
         })}
         {displayed.length === 0 && (
           <div style={{ textAlign: "center", padding: 60, color: "#94a3b8", fontSize: 15 }}>
@@ -2404,7 +2610,7 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
 
 // Tela inicial de Obras: só os KPIs de tudo (sem separar por status) + as duas pastas.
 // A lista de obras em si mora dentro de cada pasta (ObrasPasta, acima).
-function Dashboard({ obras, onAbrirPasta }) {
+function Dashboard({ obras, onAbrirPasta, onNovoContrato }) {
   const totalPecas = obras.reduce((a, o) => a + o.itens.reduce((b, i) => b + (i.qtd || 0), 0), 0);
   const progMedio  = obras.length > 0
     ? Math.round(obras.reduce((a, o) => a + (o.itens.length > 0 ? o.itens.reduce((b, i) => b + itemPercentual(i), 0) / o.itens.length : 0), 0) / obras.length)
@@ -2417,6 +2623,14 @@ function Dashboard({ obras, onAbrirPasta }) {
 
   return (
     <div style={{ padding: "24px 28px" }}>
+      {onNovoContrato && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
+          <button onClick={onNovoContrato}
+            style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+            + Novo cliente / contrato
+          </button>
+        </div>
+      )}
       {/* KPI cards — todas as obras, sem filtro por pasta */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginBottom: 24 }}>
         {[
@@ -2598,7 +2812,7 @@ function OrdemServicoPrint({ agenda, obras, equipes, inicio, fim, onBack }) {
 
 
 // ─── MENU LATERAL ─────────────────────────────────────────────────────────────
-function SideMenu({ open, onClose, onNav, onImport, current }) {
+function SideMenu({ open, onClose, onNav, onImport, onExportar, current }) {
   const items = [
     { key: "dashboard", label: "Obras", icon: "🏠" },
     { key: "calendar", label: "Calendário", icon: "📅" },
@@ -2627,6 +2841,10 @@ function SideMenu({ open, onClose, onNav, onImport, current }) {
         <button onClick={onImport}
           style={{ textAlign: "left", background: "transparent", color: "#c9a227", border: "none", padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
           <span style={{ fontSize: 16 }}>📄</span> Importar PDF
+        </button>
+        <button onClick={onExportar} title="Baixa um arquivo com todos os dados do banco (os arquivos anexados ficam no Storage)"
+          style={{ textAlign: "left", background: "transparent", color: "#9ca3af", border: "none", padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
+          <span style={{ fontSize: 16 }}>💾</span> Exportar dados (backup)
         </button>
         <div style={{ marginTop: "auto", padding: "12px 22px", fontSize: 11, color: "#6b7280" }}>Centauro — Gestão de Obras</div>
       </div>
@@ -3506,7 +3724,7 @@ function LoginScreen() {
 // ─── ROOT APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [session, setSession] = useState(null);
-  const { ocultar: ocultarValores } = useSigilo();
+  const { ocultar: ocultarValores, visivel: valoresVisiveis, pedir: pedirSenha } = useSigilo();
   const [authReady, setAuthReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [obras, setObras] = useState([]);
@@ -3529,12 +3747,24 @@ export default function App() {
   const [importError, setImportError] = useState("");
   const fileRef = useRef();
   const saveTimers = useRef({});
+  // Trava de versão das obras (ver persistObra). Tudo em ref: fora do jsonb e fora do render.
+  const versaoObra = useRef({});   // id → updated_at que esta aba leu ou gravou por último
+  const filaObra = useRef({});     // id → promise da última gravação daquela obra
+  const revObra = useRef({});      // id → nº da última alteração local
+  const revSalva = useRef({});     // id → nº da última alteração confirmada pelo banco
+  const geracaoObra = useRef({});  // id → sobe ao recarregar; gravação velha na fila desiste
+  const conflitosRef = useRef(new Set());
+  const [conflitos, setConflitos] = useState([]);           // obras em conflito, para a faixa vermelha
+  const [atividadeVersao, setAtividadeVersao] = useState(0); // recarrega comentários e anexos da obra aberta
+  const [novoContratoAberto, setNovoContratoAberto] = useState(false);
+  const temObraPendente = () => Object.keys(revObra.current).some(id => (revObra.current[id] || 0) !== (revSalva.current[id] || 0));
   const [dirtyCronoIds, setDirtyCronoIds] = useState(() => new Set()); // cronogramas com gravação pendente (debounce)
   const [pendingExit, setPendingExit] = useState(null); // ação de navegação adiada até o usuário decidir sobre alterações não salvas
 
   // Avisa antes de fechar a aba/navegador se houver cronograma com gravação pendente
   useEffect(() => {
-    function handler(e) { if (dirtyCronoIds.size > 0) { e.preventDefault(); e.returnValue = ""; } }
+    // Também obra com alteração que ainda não chegou ao banco (debounce, gravação falhada ou conflito).
+    function handler(e) { if (dirtyCronoIds.size > 0 || temObraPendente()) { e.preventDefault(); e.returnValue = ""; } }
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
   }, [dirtyCronoIds]);
@@ -3567,7 +3797,8 @@ export default function App() {
           fetchObras(), fetchEquipes(), fetchCronogramas(), fetchAgenda(), fetchLembretes(), fetchDiarios(),
         ]);
         if (cancel) return;
-        setObras(obs.map(normObra).sort((a, b) => {
+        versaoObra.current = Object.fromEntries(obs.map(r => [r.obra.id, r.versao]));
+        setObras(obs.map(r => normObra(r.obra)).sort((a, b) => {
           const ao = Number.isFinite(a.ordem) ? a.ordem : 1e9 + (Number(a.numero) || 0);
           const bo = Number.isFinite(b.ordem) ? b.ordem : 1e9 + (Number(b.numero) || 0);
           return ao - bo;
@@ -3616,14 +3847,45 @@ export default function App() {
     setTimeout(() => setImportError(""), 6000);
   }
 
-  // Salva uma obra no banco (debounce por obra, evita gravar a cada tecla)
-  const persistObra = useCallback((obra) => {
-    const t = saveTimers.current;
-    if (t[obra.id]) clearTimeout(t[obra.id]);
-    t[obra.id] = setTimeout(() => {
-      upsertObra(obra).catch(err => showError("Erro ao salvar: " + err.message));
-    }, 700);
+  // Grava a obra no banco. Três camadas:
+  // - debounce de 700 ms por obra (não vale uma gravação por tecla);
+  // - fila por obra: duas gravações da mesma obra nunca voam juntas (a segunda levaria a
+  //   versão antiga e daria um falso conflito);
+  // - trava de versão: salvarObra só grava se ninguém gravou depois da versão que esta aba leu.
+  // Conflito não sobrescreve nada: a obra entra em `conflitos`, a faixa vermelha aparece e ela
+  // para de gravar até ser recarregada. Antes era upsert cego e a última gravação vencia.
+  const enfileirar = useCallback((id, tarefa) => {
+    const p = (filaObra.current[id] || Promise.resolve()).then(tarefa);
+    filaObra.current[id] = p.catch(() => {});
+    return p;
   }, []);
+
+  const persistObra = useCallback((obra) => {
+    const id = obra.id;
+    const rev = (revObra.current[id] || 0) + 1;
+    revObra.current[id] = rev;
+    if (conflitosRef.current.has(id)) return;
+    const geracao = geracaoObra.current[id] || 0;
+    const t = saveTimers.current;
+    if (t[id]) clearTimeout(t[id]);
+    t[id] = setTimeout(() => {
+      delete t[id];
+      enfileirar(id, async () => {
+        if (conflitosRef.current.has(id) || (geracaoObra.current[id] || 0) !== geracao) return;
+        try {
+          versaoObra.current[id] = await salvarObra(obra, versaoObra.current[id]);
+          revSalva.current[id] = Math.max(revSalva.current[id] || 0, rev);
+        } catch (err) {
+          if (err.conflito) {
+            conflitosRef.current.add(id);
+            setConflitos([...conflitosRef.current]);
+          } else {
+            showError("Erro ao salvar a obra — a alteração ainda não está no banco: " + err.message);
+          }
+        }
+      });
+    }, 700);
+  }, [enfileirar]);
 
   // Agenda: o estado muda na hora e a gravação é debounced por serviço (a descrição é digitada,
   // não vale um upsert por tecla). Mesmo padrão de persistObra.
@@ -3707,6 +3969,59 @@ export default function App() {
     persistObra(updated);
   }, [persistObra]);
 
+  // Obra nova passa pela fila: nenhuma gravação dela sai antes do INSERT voltar com a versão.
+  // INSERT, não upsert: proposta repetida é recusada em vez de sobrescrever a que existe.
+  const criarObra = useCallback(async (obra) => {
+    await enfileirar(obra.id, async () => { versaoObra.current[obra.id] = await inserirObra(obra); });
+    setObras(prev => [...prev, obra]);
+  }, [enfileirar]);
+
+  // Atividade automática na coluna de comentários (tipo 'sistema'). Se falhar, não trava nada.
+  const registrarAtividade = useCallback((obraId, texto) => {
+    inserirComentario({ obraId, texto, autor: lerAutor(), tipo: "sistema" })
+      .then(() => setAtividadeVersao(v => v + 1))
+      .catch(err => console.warn("registrarAtividade:", err.message));
+  }, []);
+
+  // Saída do conflito: descarta a edição local desta obra e traz a versão do banco.
+  const recarregarObra = useCallback(async (id) => {
+    try {
+      const { obra, versao } = await fetchObra(id);
+      const t = saveTimers.current;
+      if (t[id]) { clearTimeout(t[id]); delete t[id]; }
+      geracaoObra.current[id] = (geracaoObra.current[id] || 0) + 1;
+      versaoObra.current[id] = versao;
+      revObra.current[id] = 0;
+      revSalva.current[id] = 0;
+      conflitosRef.current.delete(id);
+      setConflitos([...conflitosRef.current]);
+      setObras(prev => prev.map(o => o.id === id ? normObra(obra) : o));
+    } catch (err) {
+      showError("Não deu para recarregar a obra: " + err.message);
+    }
+  }, []);
+
+  // "+ Novo cliente / contrato": grava a obra, sobe os anexos e só então abre a obra (senão o
+  // bloco de anexos carregaria antes de os arquivos chegarem). O checklist já nasce marcado
+  // no que veio anexado.
+  const handleNovoContrato = useCallback(async ({ obra, arquivos }) => {
+    const cats = new Set(arquivos.map(a => a.categoria));
+    const marca = { ck_projeto: cats.has("projeto") || cats.has("foto"), ck_orcamento: cats.has("orcamento"), ck_contrato: cats.has("contrato") };
+    const base = normObra(obra);
+    const nova = { ...base, checklist: base.checklist.map(c => marca[c.id] ? { ...c, feito: true, feitoEm: hoje() } : c) };
+    await criarObra(nova);
+    registrarAtividade(nova.id, "Obra cadastrada");
+    if (arquivos.length) {
+      const { ok, falhas } = await enviarArquivos(nova.id, arquivos);
+      if (ok.length) registrarAtividade(nova.id, `Anexou no cadastro: ${ok.map(a => a.nome).join(", ")}`);
+      const foto = ok.find(a => /^image\//.test(a.mime));
+      if (foto) updateObra({ ...nova, capa: { anexoId: foto.id, path: foto.path } });
+      if (falhas.length) showError("A obra foi cadastrada, mas estes anexos não subiram — anexe de novo na obra: " + falhas.join(" · "));
+    }
+    setNovoContratoAberto(false);
+    navTo({ type: "gantt", obraId: nova.id });
+  }, [criarObra, registrarAtividade, updateObra, navTo]);
+
   // Entrada lançada pelo botão de um orçamento de Compras: grava no orçamento o documento que
   // nasceu dele, e o botão vira "📦 No estoque · ENT-…" — não dá para dar entrada duas vezes.
   const marcarEntradaEstoque = useCallback((origem, doc) => {
@@ -3733,13 +4048,15 @@ export default function App() {
   }, [persistObra]);
 
   const handleStatusChange = useCallback((id, status) => {
+    const antes = obras.find(o => o.id === id);
+    if (antes && antes.status !== status) registrarAtividade(id, `Status: ${antes.status} → ${status}`);
     setObras(prev => {
       const next = prev.map(o => o.id === id ? { ...o, status } : o);
       const changed = next.find(o => o.id === id);
       if (changed) persistObra(changed);
       return next;
     });
-  }, [persistObra]);
+  }, [persistObra, obras, registrarAtividade]);
 
   // Bandeiras manuais da obra, alteradas direto no card da lista
   const handleFlagsChange = useCallback((id, flags) => {
@@ -3873,19 +4190,62 @@ export default function App() {
     setImporting(true);
     setImportError("");
     try {
-      const { _fallback, ...obra } = await parsePDFFileComIA(file);
-      if (!obra.numero) throw new Error("Número da proposta não encontrado");
-      const exists = obras.find(o => o.id === obra.id);
-      const merged = exists ? { ...obra, status: exists.status, dataInicio: exists.dataInicio, equipes: exists.equipes } : obra;
-      setObras(prev => exists ? prev.map(o => o.id === obra.id ? merged : o) : [...prev, merged]);
-      await upsertObra(merged);
+      const { _fallback, ...lida } = await parsePDFFileComIA(file);
+      if (!lida.numero) throw new Error("Número da proposta não encontrado");
+      const existente = obras.find(o => o.id === lida.id || String(o.numero) === String(lida.numero));
+      let id;
+      if (existente) {
+        // Obra que já existe: só troca itens e valor, e pergunta antes (ver mesclarImportacao).
+        const sairam = existente.itens.filter(i => !lida.itens.some(n => n.id === i.id)).length;
+        const ok = window.confirm(
+          `A proposta #${lida.numero} já está cadastrada.\n\n` +
+          `Atualizar os itens (${lida.itens.length}) e o valor total a partir deste PDF?` +
+          (sairam ? `\n${sairam} item(ns) que não estão no PDF novo saem da lista (a versão anterior fica no histórico).` : "") +
+          "\n\nCadastro, anexos, comentários, compras, financeiro e as etapas/datas dos itens são mantidos.");
+        if (!ok) return;
+        id = existente.id;
+        updateObra(mesclarImportacao(existente, lida));
+        registrarAtividade(id, `Itens e valor atualizados pelo PDF "${file.name}"`);
+      } else {
+        const nova = normObra(lida);
+        await criarObra(nova);
+        id = nova.id;
+        registrarAtividade(id, `Obra importada do PDF "${file.name}"`);
+      }
+      // O próprio PDF fica guardado na obra. Sem a migration de anexos, só não guarda.
+      enviarArquivos(id, [{ file, categoria: "orcamento" }])
+        .then(({ ok }) => { if (ok.length) setAtividadeVersao(v => v + 1); });
       if (_fallback) showError("Obra importada com extração local (IA indisponível) — confira os itens.");
-      navTo({ type: "gantt", obraId: obra.id });
+      navTo({ type: "gantt", obraId: id });
     } catch (err) {
       showError("Erro ao importar: " + err.message);
     } finally {
       setImporting(false);
       e.target.value = "";
+    }
+  };
+
+  // Cópia de tudo que está no banco, para ficar com a empresa (independe do plano do Supabase).
+  // Leva o financeiro inteiro, então pede os valores liberados — mesma regra do CSV do estoque.
+  const exportarDados = async () => {
+    setMenuOpen(false);
+    if (!valoresVisiveis) {
+      pedirSenha();
+      showError("Libere os valores e clique em Exportar dados de novo — o backup leva o financeiro completo.");
+      return;
+    }
+    try {
+      const backup = await fetchBackupCompleto();
+      const blob = new Blob([JSON.stringify(backup, null, 1)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `centauro-backup-${hoje()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    } catch (err) {
+      showError("Erro ao exportar: " + err.message);
     }
   };
 
@@ -3924,7 +4284,8 @@ export default function App() {
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
       <SideMenu open={menuOpen} onClose={() => setMenuOpen(false)} current={view.type}
         onNav={(key) => navTo({ type: key })}
-        onImport={() => { setMenuOpen(false); fileRef.current.click(); }} />
+        onImport={() => { setMenuOpen(false); fileRef.current.click(); }}
+        onExportar={exportarDados} />
 
       {/* Top bar: menu · logo · voltar · título — usuário · sair */}
       <div style={{ background: "#1a1a1a", padding: "12px 20px", display: "flex", alignItems: "center", gap: 14 }}>
@@ -3961,11 +4322,29 @@ export default function App() {
       </div>
       <input ref={fileRef} type="file" accept=".pdf" style={{ display: "none" }} onChange={handleImport} />
 
+      {/* Conflito de versão: fica até recarregar — não é a faixa temporária do showError */}
+      {conflitos.length > 0 && (
+        <div style={{ background: "#fef2f2", borderBottom: "1px solid #fecaca", padding: "10px 20px", fontSize: 13, color: "#991b1b", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ flex: 1, minWidth: 260 }}>
+            ⚠ A obra <b>{conflitos.map(id => "#" + (obras.find(o => o.id === id)?.numero || id)).join(", ")}</b> foi alterada em outra aba ou
+            outro computador depois que você abriu. Para não apagar o que a outra pessoa gravou, <b>suas últimas alterações nela não foram
+            salvas</b>. Recarregue a obra e refaça o que faltar.
+          </span>
+          {conflitos.map(id => (
+            <button key={id} onClick={() => recarregarObra(id)}
+              style={{ background: "#dc2626", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+              Recarregar #{obras.find(o => o.id === id)?.numero || id}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Conteúdo */}
       {loading
         ? <div style={{ textAlign: "center", padding: 80, color: "#64748b", fontSize: 15 }}>Carregando obras…</div>
         : view.type === "gantt"
-          ? (selectedObra ? <GanttView obra={selectedObra} onChange={updateObra} equipes={equipes} fornecedores={fornecedoresConhecidos(obras)}
+          ? (selectedObra ? <GanttView key={selectedObra.id} obra={selectedObra} onChange={updateObra} equipes={equipes} fornecedores={fornecedoresConhecidos(obras)}
+              onAtividade={texto => registrarAtividade(selectedObra.id, texto)} atividadeVersao={atividadeVersao}
               onAbrirDocEstoque={docId => navTo({ type: "estoqueDoc", docId })}
               onEntradaEstoque={origem => navTo({ type: "estoque", entradaCompra: {
                 ...origem, obraId: selectedObra.id, obraRotulo: `#${selectedObra.numero} — ${selectedObra.cliente}`,
@@ -4009,9 +4388,14 @@ export default function App() {
                   : view.type === "financeiro"
                     ? <FinanceiroView obras={obras} />
                     : view.type === "obrasPasta"
-                      ? <ObrasPasta obras={obras} pasta={view.pasta} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} onFlagsChange={handleFlagsChange} onGrupoChange={handleGrupoChange} equipes={equipes} />
-                      : <Dashboard obras={obras} onAbrirPasta={(pasta) => navTo({ type: "obrasPasta", pasta })} />
+                      ? <ObrasPasta obras={obras} pasta={view.pasta} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} onFlagsChange={handleFlagsChange} onGrupoChange={handleGrupoChange} equipes={equipes}
+                          onNovoContrato={() => setNovoContratoAberto(true)} />
+                      : <Dashboard obras={obras} onAbrirPasta={(pasta) => navTo({ type: "obrasPasta", pasta })}
+                          onNovoContrato={() => setNovoContratoAberto(true)} />
       }
+
+      <NovoContrato open={novoContratoAberto} obras={obras} onFechar={() => setNovoContratoAberto(false)}
+        onLerPdf={parsePDFFileComIA} onSalvar={handleNovoContrato} />
 
       <Modal open={pendingExit !== null} title="Alterações não salvas" onClose={() => setPendingExit(null)}>
         <div style={{ fontSize: 13, color: "#475569", marginBottom: 18 }}>

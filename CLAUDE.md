@@ -44,6 +44,10 @@ src/
                    duas folhas impressas (documento e etiquetas).
   Sigilo.jsx       Oculta os valores em R$ do app inteiro até a senha: provider (em main.jsx),
                    <Dinheiro>, <Oculto> e o botão do olho.
+  CadastroObra.jsx Campos do cadastro do cliente (o que era a descrição do cartão do Trello).
+  AnexosObra.jsx   Anexos da obra: bucket privado, categoria, capa, lixeira, envio múltiplo.
+  ComentariosObra.jsx  Coluna de comentários e atividade da obra + autor lembrado no navegador.
+  NovoContrato.jsx Popup "+ Novo cliente / contrato" (cliente novo ou contrato de obra existente).
   index.css        CSS global mínimo.
   assets/          Logos.
 supabase/
@@ -56,6 +60,8 @@ supabase/
   migration_lembretes_ordem_bigint.sql  Conserta `lembretes.ordem` int → bigint (rodar separado).
   migration_diario.sql       Tabela `diarios` + bucket `diario` (rodar separado).
   migration_estoque.sql      Estoque: tabelas, view de saldo, triggers de imutabilidade e RPCs (rodar separado).
+  migration_ficha_obra.sql   Histórico de versões da obra, trigger anti-DELETE em obras, `obra_anexos`,
+                             `obra_comentarios` e bucket privado `obras` (rodar separado).
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF.
   SETUP.md                   Passo a passo de criação do projeto Supabase.
 docs/
@@ -104,13 +110,16 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 
 | Tabela | PK | Colunas | `data` contém |
 |---|---|---|---|
-| `obras` | `id` (= nº da proposta, texto) | `numero`, `cliente`, `updated_at`, `data` | a obra inteira (itens, etapas, financeiro, compras) + `grupo` (override do agrupamento por cliente) |
+| `obras` | `id` (= nº da proposta, texto) | `numero`, `cliente`, `updated_at`, `data` | a obra inteira (itens, etapas, financeiro, compras) + `grupo` (override do agrupamento por cliente) + `cadastro` (ficha do cliente), `checklist` (abertura) e `capa` (`{anexoId, path}`) |
 | `equipes` | `id` | `nome`, `integrantes` (jsonb), `cor`, `arquivada` | — (essa não usa `data`) |
 | `ordens` | `id` | `numero`, `equipe_id`, `periodo_inicio`, `periodo_fim`, `data` | **histórica** — nenhum código lê ou grava (ver Decisões) |
 | `agenda` | `id` | `dia`, `equipe_id`, `obra_id`, `updated_at`, `data` | o serviço do dia: obra (ou avulso) × equipe × período + endereço, referência, descrição e `itens` (ids dos itens da obra que serão montados) |
 | `cronogramas` | `id` | `titulo`, `obra_id`, `updated_at`, `data` | o cronograma inteiro (tasks) + `predecessorasMacro` (ids de outros cronogramas) |
 | `lembretes` | `id` | `texto`, `prazo`, `arquivado`, `ordem`, `updated_at`, `data` | o lembrete: texto, prazo, obra vinculada, concluído/em andamento/arquivado |
 | `diarios` | `id` | `obra_id`, `dia`, `numero`, `updated_at`, `data` | o registro do dia: clima, equipes/presença, atividades, ocorrências, visitas, fotos, assinaturas |
+| `obra_anexos` | `id` (uuid) | `obra_id`, `nome`, `path`, `mime`, `tamanho`, `categoria`, `autor`, `created_at`, `removido_em`, `removido_por` | — (**não usa `data`**: uma linha por arquivo) |
+| `obra_comentarios` | `id` (uuid) | `obra_id`, `tipo` (`comentario`/`sistema`), `texto`, `autor`, `created_at`, `oculto_em` | — (**não usa `data`**: uma linha por comentário) |
+| `obras_historico` | `id` (bigserial) | `obra_id`, `operacao`, `gravado_em`, `data` | a versão anterior da obra, gravada por trigger |
 | `profiles` | `id` (= auth.users) | `nome`, `papel` | — |
 | `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (**vazia**, fundação para o futuro) |
 
@@ -119,6 +128,9 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 - Todo usuário novo vira `admin` automaticamente (trigger `handle_new_user`).
 - Storage: buckets públicos `desenhos` (desenhos técnicos do item) e `diario` (fotos do diário).
   Leitura pública, escrita autenticada. **Leitura pública mesmo**: quem tiver a URL vê a foto.
+  O bucket `obras` (anexos: contrato, comprovante, orçamento) é **privado**: só abre por URL
+  assinada, que vence em 1 h (`urlsAssinadas` + cache de 50 min em `urlsComCache`). Sem policy de
+  update nem de delete — arquivo enviado nunca é sobrescrito nem apagado pelo app.
 - `agenda`, `cronogramas`, `lembretes` e `diarios` **não estão no `schema.sql`** — são migrations
   separadas. Se esquecer de rodar, o app não quebra: os `fetch*` correspondentes capturam o erro e
   devolvem `[]`. A exceção é o upload de foto do diário, que falha visível com "Bucket not found"
@@ -188,7 +200,7 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   login), abre `{type: "estoque", codigo}` e limpa a URL.
 - **Persistência**: o estado local muda na hora; a gravação é **debounced em 700 ms por entidade**
   (`persistObra`, `handleSaveCronograma`, `handleSaveAgendamento`, `handleSaveLembrete`,
-  `handleSaveDiario`). Equipes gravam imediatamente,
+  `handleSaveDiario`). A obra ainda passa por fila e trava de versão (ver Decisões). Equipes gravam imediatamente,
   uma por vez (`upsertEquipe`/`deleteEquipe`). O cronograma é o único com indicador de "não salvo"
   (`dirtyCronoIds`), botão Salvar e aviso ao sair. **O estoque não segue nada disso**: todo
   lançamento espera o banco responder e depois relê a lista (`recarregarEstoque`) — ver Decisões.
@@ -429,14 +441,55 @@ para a mesma compra não entrar duas vezes. A obra fica só na observação do d
 `{type: "estoque", entradaCompra}` e o `EstoqueView` troca por `{type: "estoque"}` com `navReplace`
 assim que abre o formulário — senão o "Voltar" da folha impressa reabriria a entrada.
 
+**Obra não perde dado: trava de versão, histórico e nada de DELETE.** O `persistObra` era um upsert
+cego — duas pessoas na mesma obra e a última gravação apagava a outra em silêncio. Hoje:
+`fetchObras` traz o `updated_at` de cada obra (guardado em `versaoObra`, um ref, fora do `jsonb`);
+`salvarObra` faz `update … where updated_at = <versão lida>` e, sem linha de volta, **não grava** —
+a obra entra em `conflitos`, a faixa vermelha fica até o usuário clicar "Recarregar" e, até lá, a
+obra não grava mais nada. As gravações de uma mesma obra passam por uma fila (`enfileirar`), senão
+duas gravações lentas em voo dariam falso conflito; `revObra`/`revSalva` dizem se há alteração que
+ainda não chegou ao banco e alimentam o aviso do `beforeunload`. Obra nova é `inserirObra` (INSERT:
+proposta repetida é recusada). No banco, `obras_historico` guarda a versão anterior (no máximo uma
+a cada 10 min por obra, mais toda troca de itens ou de valor total), e um trigger recusa DELETE em
+`obras` — nenhuma tela apaga obra, e apagar exige desligar o trigger à mão.
+
+**Reimportar o PDF só troca itens e valor.** O import antigo substituía a obra inteira e levava
+junto compras, financeiro, bandeiras, grupo e as etapas/datas de cada item. `mesclarImportacao`
+casa item por `id`, preserva o que o usuário preencheu no item, e o cabeçalho do PDF só preenche
+campo vazio. Pergunta antes, e o próprio PDF entra nos anexos como orçamento.
+
+**A ficha da obra saiu do Trello, e comentário e anexo não moram no `jsonb`.** O escritório
+guardava descrição, anexos, checklist e comentários num cartão do Trello. Cadastro, checklist e
+capa são poucos campos e ficam no `jsonb` (`normObra`). Comentários e anexos **não**: lá valeria
+o "última gravação vence" e dois comentários ao mesmo tempo se apagariam. Viraram tabelas próprias,
+uma linha por registro, com trigger que recusa DELETE e só deixa mudar `oculto_em` (comentário) ou
+`categoria`/`removido_em` (anexo) — mesmo padrão do estoque. Remover anexo é lixeira; o arquivo fica
+no Storage. O autor é digitado e lembrado no navegador (`lerAutor`), nunca o e-mail do login — a
+mesma decisão do `responsavel` do diário. A atividade automática (`registrarAtividade`: status,
+anexos, checklist, obra cadastrada, import do PDF) é um comentário `tipo: 'sistema'`, fire-and-forget.
+
+**Tela da obra em seções recolhíveis.** Cabeçalho fixo (capa, proposta, status, datas) e, abaixo,
+`Secao` recolhíveis — Cadastro e Anexos abertas, Checklist, Itens, Compras, Financeiro e Equipe
+fechadas — com a coluna de comentários à direita. Fechada, a seção **não monta** (Compras fechada
+nem busca o estoque). Aberta/fechada é preferência por navegador (`obra.secao.<id>`).
+
+**Exportar dados.** O menu baixa um JSON com todas as tabelas (`fetchBackupCompleto`), independente
+do plano do Supabase. Pede os valores liberados, porque leva o financeiro. Os arquivos em si
+(anexos, fotos, desenhos) ficam só no Storage — o backup do banco do Supabase também não os inclui.
+
 ## Armadilhas conhecidas
 
 - **`ordem` é `Date.now()`, então a coluna precisa ser `bigint`.** `lembretes` é a única tabela que
   copia o `ordem` do app para uma coluna solta; ela nasceu `int` e recusava todo lembrete novo com
   `value "1788184147925" is out of range for type integer`. A agenda escapou porque lá o `ordem`
   mora só dentro do `jsonb`. Se um dia outra tabela ganhar coluna `ordem`, ela nasce `bigint`.
-- **`normObra` quebra se a obra não tiver `itens`**: faz `o.itens.map(...)` sem guarda, e isso
-  roda na carga de todas as obras — um registro ruim derruba a tela inteira.
+- **Obra sem `itens` é normal agora** (cadastro manual antes do PDF): `normObra` usa
+  `(o.itens || [])`. Código novo que lê itens deve contar com lista vazia.
+- **Gravar obra fora do `persistObra`/`criarObra` fura a trava de versão.** Não existe mais
+  `upsertObra`; qualquer escrita em `obras` precisa passar pela fila e atualizar `versaoObra`,
+  senão a próxima gravação da própria aba vai dar falso conflito.
+- **`obras_historico` cresce para sempre** (triggers recusam DELETE). Para podar, desligar o trigger
+  `obras_historico_imutavel` à mão no SQL Editor.
 - **A senha dos valores (`SENHA_FINANCEIRO`, em `Sigilo.jsx`) é uma constante no código do cliente.**
   Está no bundle publicado; qualquer um lê no devtools. É uma tranca visual, não segurança: os
   valores chegam ao navegador do mesmo jeito. Todo R$ nasce oculto; a mesma senha libera o app
