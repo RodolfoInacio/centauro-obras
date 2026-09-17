@@ -3,7 +3,8 @@ import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
 import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens } from "./api";
-import { agendar, agendarMacro, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent } from "./cronograma";
+import { agendar, agendarMacro, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent, normPredecessoras, parsePredecessoras, textoPredecessoras, inicioEstaFixo, toLocalISO } from "./cronograma";
+import CronogramaPrint from "./CronogramaPrint";
 import Modal from "./Modal";
 import { chaveGrupo } from "./agrupamento";
 import PainelLembretes, { normLembrete } from "./PainelLembretes";
@@ -2932,6 +2933,37 @@ function FinanceiroView({ obras }) {
 function clampPercent(v) { return Math.max(0, Math.min(100, Math.round(Number(v) || 0))); }
 function clampDuracao(v) { return Math.max(0, Math.min(999, Math.round((Number(v) || 0) * 10) / 10)); }
 
+// Campo de % sem zero à esquerda. Com `type="number"`, digitar 35 num campo em 0 mostrava "035":
+// o React não reescreve o DOM quando Number("035") === 35. Como texto numérico ele reescreve, e o
+// foco seleciona o valor para a digitação substituir em vez de somar dígitos.
+function InputPercent({ valor, onChange, style, ...resto }) {
+  return (
+    <input type="text" inputMode="numeric" value={String(valor ?? 0)} {...resto}
+      onFocus={e => e.target.select()}
+      onChange={e => onChange(clampPercent(e.target.value.replace(/\D/g, "")))}
+      style={style} />
+  );
+}
+
+// Dia e hora separados, sem borda até o foco: lê como texto e mostra a hora, coisa que o
+// datetime-local estreito cortava. `valor` e `onChange` usam "YYYY-MM-DDTHH:mm".
+function InputDataHora({ valor, onChange, disabled, cor = "#1e293b", title, horaPadrao = "08:00" }) {
+  const [dia = "", hora = ""] = (valor || "").split("T");
+  const campo = { border: "1px solid transparent", borderRadius: 4, background: "transparent", fontSize: 11.5, color: cor, padding: "1px 2px", fontFamily: "inherit", cursor: disabled ? "not-allowed" : "text" };
+  const foco = e => { if (!disabled) e.target.style.borderColor = "#cbd5e1"; };
+  const sai = e => { e.target.style.borderColor = "transparent"; };
+  return (
+    <span title={title} onClick={e => e.stopPropagation()} style={{ display: "inline-flex", alignItems: "center", gap: 1 }}>
+      <input type="date" value={dia} disabled={disabled} onFocus={foco} onBlur={sai}
+        onChange={e => { if (e.target.value) onChange(`${e.target.value}T${hora || horaPadrao}`); }}
+        style={{ ...campo, width: 114 }} />
+      <input type="time" value={hora} disabled={disabled} onFocus={foco} onBlur={sai}
+        onChange={e => { if (e.target.value && dia) onChange(`${dia}T${e.target.value}`); }}
+        style={{ ...campo, width: 78 }} />
+    </span>
+  );
+}
+
 function novoCronograma(titulo, obra) {
   const hoje = new Date().toISOString().split("T")[0];
   return {
@@ -2991,12 +3023,6 @@ function novoCronogramaComModelo(titulo, obra, temVidros) {
     tasks: renumerarIds(tasks),
   };
 }
-function toLocalInput(date) {
-  if (!date) return "";
-  const p = n => String(n).padStart(2, "0");
-  return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
-}
-
 const CR_ROW_H = 28;
 const CR_DAY_MS = 86400000;
 
@@ -3009,7 +3035,7 @@ function ordemMacro(cronogramas) {
 
 // Input de predecessoras com rascunho local: sem ele, digitar "1," seria reescrito para "1"
 // no meio da digitação, porque o valor exibido é derivado da lista já normalizada.
-function PredInput({ valor, onCommit, titulo }) {
+function PredInput({ valor, onCommit, titulo, width = 52 }) {
   const [txt, setTxt] = useState(valor);
   useEffect(() => { setTxt(valor); }, [valor]);
   return (
@@ -3018,7 +3044,7 @@ function PredInput({ valor, onCommit, titulo }) {
       onChange={e => setTxt(e.target.value)}
       onBlur={() => onCommit(txt)}
       onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }}
-      style={{ border: "1px solid #e2e8f0", borderRadius: 5, padding: "2px 5px", fontSize: 12, boxSizing: "border-box", width: 52, textAlign: "center" }} />
+      style={{ border: "1px solid #e2e8f0", borderRadius: 5, padding: "2px 5px", fontSize: 12, boxSizing: "border-box", width, textAlign: "center" }} />
   );
 }
 
@@ -3295,7 +3321,7 @@ function CronogramaMacroView({ cronogramas, obras, macro, onNovo, onNovoComModel
   );
 }
 
-function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, dataBaseEfetiva, origemInicio }) {
+function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, dataBaseEfetiva, origemInicio, onImprimir }) {
   const [c, setC] = useState(cronograma);
   const [sel, setSel] = useState(null);
   const [zoom, setZoom] = useState("dia"); // dia | semana
@@ -3410,8 +3436,18 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
     setPercentValor(String(atual ?? 0));
   }
 
+  // 📌 alterna só o modo: a data digitada fica guardada em `inicioManual`, então desligar volta ao
+  // calculado e religar volta à última data manual. Sem data guardada, fixa o início calculado.
+  function alternarFixo(t, sc) {
+    if (inicioEstaFixo(t)) updTask(t.id, { inicioFixo: false });
+    else updTask(t.id, { inicioFixo: true, inicioManual: t.inicioManual || toLocalISO(sc.inicio) });
+  }
+
+  // Data base sem hora (cronogramas antigos) é lida como início do expediente.
+  const comHora = s => !s ? "" : s.includes("T") ? s : `${s}T${cfg.expediente[0]}`;
+
   const inp = { border: "1px solid #e2e8f0", borderRadius: 5, padding: "2px 5px", fontSize: 12, boxSizing: "border-box" };
-  const COL = { id: 34, nome: 240, dur: 116, pct: 60, ini: 122, term: 118, pred: 58 };
+  const COL = { id: 34, nome: 240, dur: 116, pct: 60, ini: 232, term: 118, pred: 78 };
   const GRID_W = Object.values(COL).reduce((a, b) => a + b, 0);
   const btn = { background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 10px", fontWeight: 700, fontSize: 12, cursor: "pointer" };
   const obraVinculada = c.obraId ? obras.find(o => o.id === c.obraId) : null;
@@ -3436,7 +3472,17 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
             ⛓ Início herdado de {origemInicio}
           </span>
         )}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: "#64748b", border: "1px solid #e2e8f0", borderRadius: 7, padding: "2px 6px", background: origemInicio ? "#f8fafc" : "#fff" }}>
+          Início do projeto
+          <InputDataHora valor={comHora(origemInicio ? dataBaseEfetiva : c.config?.dataBase)}
+            disabled={!!origemInicio} cor={origemInicio ? "#94a3b8" : "#1e293b"} horaPadrao={cfg.expediente[0]}
+            title={origemInicio
+              ? `Definido pelo macro: começa depois de "${origemInicio}". Remova a predecessora no macro para editar.`
+              : "Data de partida das tarefas automáticas (as fixadas com 📌 não se movem)"}
+            onChange={v => update({ ...c, config: { ...(c.config || {}), dataBase: v } }, "dataBase")} />
+        </span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button onClick={() => onImprimir && onImprimir(c.id)} style={btn} title="Gerar o cronograma para imprimir ou salvar em PDF">🖨️ Imprimir</button>
           <button onClick={addTarefa} style={btn}>+ Tarefa</button>
           <button onClick={() => indent(1)} style={btn} title="Indentar">→</button>
           <button onClick={() => indent(-1)} style={btn} title="Desindentar">←</button>
@@ -3504,23 +3550,37 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
                 </div>
                 <div style={{ width: COL.pct, textAlign: "center" }}>
                   {sc.isSummary ? <b onClick={e => { e.stopPropagation(); abrirPercent(t, sc.percent); }} style={{ cursor: "pointer", textDecoration: "underline dotted #cbd5e1" }} title="Definir o percentual deste grupo">{sc.percent}%</b>
-                    : <input type="number" min={0} max={100} value={t.percent} onClick={e => e.stopPropagation()} onChange={e => updTask(t.id, { percent: clampPercent(e.target.value) }, "percent")} style={{ ...inp, width: 54, textAlign: "center" }} />}
+                    : <InputPercent valor={t.percent} onClick={e => e.stopPropagation()} onChange={v => updTask(t.id, { percent: v }, "percent")} style={{ ...inp, width: 54, textAlign: "center" }} />}
                 </div>
-                <div style={{ width: COL.ini, textAlign: "center", fontSize: 11 }}>
-                  {t.inicioManual
-                    ? <span onClick={e => e.stopPropagation()} style={{ display: "inline-flex", gap: 2, alignItems: "center" }}>
-                        <input type="datetime-local" value={t.inicioManual} onChange={e => updTask(t.id, { inicioManual: e.target.value }, "inicioManual")} style={{ ...inp, width: 96 }} />
-                        <button onClick={() => updTask(t.id, { inicioManual: "" })} title="Auto" style={{ border: "none", background: "transparent", cursor: "pointer", color: "#94a3b8" }}>×</button>
-                      </span>
-                    : <span onClick={e => { e.stopPropagation(); if (!sc.isSummary) updTask(t.id, { inicioManual: toLocalInput(sc.inicio) }); }} title={sc.isSummary ? "" : "Fixar início"} style={{ cursor: sc.isSummary ? "default" : "pointer" }}>
-                        {fmtDataHora(sc.inicio)}{!sc.isSummary && <span style={{ color: "#cbd5e1" }}> 📌</span>}
-                      </span>}
+                <div style={{ width: COL.ini, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11 }}>
+                  {sc.isSummary
+                    ? <span style={{ color: "#64748b" }}>{fmtDataHora(sc.inicio)}</span>
+                    : (() => {
+                        const fixo = inicioEstaFixo(t);
+                        // O motor empurra para o próximo instante útil: se o digitado caiu num sábado ou
+                        // fora do expediente, avisa quando a tarefa começa de fato.
+                        const empurrado = fixo && sc.inicio && t.inicioManual && toLocalISO(sc.inicio) !== t.inicioManual;
+                        return (
+                          <>
+                            <button onClick={e => { e.stopPropagation(); alternarFixo(t, sc); }}
+                              title={fixo ? "Data fixada à mão — clique para voltar ao automático" : "Automático (pelas predecessoras) — clique para fixar a data"}
+                              style={{ flexShrink: 0, width: 20, height: 20, border: "1px solid " + (fixo ? "#f59e0b" : "#e2e8f0"), background: fixo ? "#fef3c7" : "transparent", borderRadius: 5, cursor: "pointer", fontSize: 10, padding: 0, filter: fixo ? "none" : "grayscale(1)", opacity: fixo ? 1 : 0.55 }}>📌</button>
+                            <InputDataHora valor={fixo ? t.inicioManual : toLocalISO(sc.inicio)} cor={fixo ? "#1e293b" : "#64748b"}
+                              horaPadrao={cfg.expediente[0]}
+                              onChange={v => updTask(t.id, { inicioManual: v, inicioFixo: true }, "inicioManual")} />
+                            {empurrado && <span title={`Fora do expediente — começa de fato em ${fmtDataHora(sc.inicio)}`} style={{ color: "#d97706", fontSize: 12, cursor: "help" }}>⚠</span>}
+                          </>
+                        );
+                      })()}
                 </div>
                 <div style={{ width: COL.term, textAlign: "center", fontSize: 11, color: "#64748b" }}>{fmtDataHora(sc.termino)}</div>
                 <div style={{ width: COL.pred, textAlign: "center" }}>
-                  <input value={(t.predecessoras || []).join(",")} onClick={e => e.stopPropagation()}
-                    onChange={e => updTask(t.id, { predecessoras: e.target.value.split(",").map(x => parseInt(x.trim(), 10)).filter(Boolean) }, "predecessoras")}
-                    style={{ ...inp, width: 48, textAlign: "center" }} placeholder="—" />
+                  <PredInput valor={textoPredecessoras(t.predecessoras)} width={70}
+                    titulo={"4 = começa quando a 4 termina\n4II = começa junto com a 4\nVárias: 3, 4II"}
+                    onCommit={txt => {
+                      const nova = parsePredecessoras(txt, t.id);
+                      if (textoPredecessoras(nova) !== textoPredecessoras(t.predecessoras)) updTask(t.id, { predecessoras: nova });
+                    }} />
                 </div>
               </div>
             );
@@ -3568,16 +3628,18 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
             ))}
             {/* setas de dependência */}
             <svg style={{ position: "absolute", top: 0, left: 0, width: TL_W, height: ROWS_H, pointerEvents: "none" }}>
-              {visIdxs.map((origI, i) => { const t = c.tasks[origI]; return (t.predecessoras || []).map(pid => {
+              {visIdxs.map((origI, i) => { const t = c.tasks[origI]; return normPredecessoras(t.predecessoras).map(({ id: pid, tipo }) => {
                 const pi = visIndexById[pid];
                 const ps = sched[pid], ss = sched[t.id];
                 if (pi === undefined || !ps || !ss) return null;
-                const x1 = ((ps.termino - tStart) / CR_DAY_MS) * DAY_W;
                 const y1 = pi * CR_ROW_H + CR_ROW_H / 2;
                 const x2 = ((ss.inicio - tStart) / CR_DAY_MS) * DAY_W;
                 const y2 = i * CR_ROW_H + CR_ROW_H / 2;
-                const mx = x1 + 6;
-                return <polyline key={pid + "-" + t.id} points={`${x1},${y1} ${mx},${y1} ${mx},${y2} ${x2},${y2}`} fill="none" stroke="#94a3b8" strokeWidth="1" markerEnd="url(#arr)" />;
+                // TI: sai do fim do predecessor. II: sai do início dele e contorna pela esquerda,
+                // para a seta chegar ao início do sucessor sem atravessar as barras.
+                const x1 = ((tipo === "II" ? ps.inicio : ps.termino) - tStart) / CR_DAY_MS * DAY_W;
+                const mx = tipo === "II" ? Math.min(x1, x2) - 8 : x1 + 6;
+                return <polyline key={`${pid}${tipo}-${t.id}`} points={`${x1},${y1} ${mx},${y1} ${mx},${y2} ${x2},${y2}`} fill="none" stroke="#94a3b8" strokeWidth="1" markerEnd="url(#arr)" />;
               }); })}
               <defs><marker id="arr" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#94a3b8" /></marker></defs>
             </svg>
@@ -3628,8 +3690,8 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
                 as primeiras completam antes de a próxima começar.
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-                <input type="number" min={0} max={100} value={percentValor} autoFocus
-                  onChange={e => setPercentValor(e.target.value)}
+                <InputPercent valor={percentValor} autoFocus
+                  onChange={v => setPercentValor(String(v))}
                   onKeyDown={e => { if (e.key === "Enter") aplicarPercentGrupo(percentAlvo, alvo); }}
                   style={{ border: "1px solid #e2e8f0", borderRadius: 7, padding: "7px 10px", fontSize: 15, fontWeight: 700, width: 90, textAlign: "center" }} />
                 <span style={{ fontSize: 13, color: "#64748b" }}>% de conclusão · {afetadas.length} tarefa(s) serão sobrescritas</span>
@@ -3951,6 +4013,10 @@ export default function App() {
 
   // Navega para uma nova view (empilha a atual no histórico)
   const navTo = useCallback((v) => guardNav(() => { setHistory(h => [...h, view]); setView(v); setMenuOpen(false); }), [view, guardNav]);
+  // Empilha sem o aviso de "não salvo". Só para abrir a impressão do cronograma: a lista
+  // `cronogramas` já tem a versão em edição e o timer de gravação mora aqui no App, então ele
+  // grava mesmo com o editor desmontado — o aviso só atrapalharia.
+  const navToSemGuarda = useCallback((v) => { setHistory(h => [...h, view]); setView(v); setMenuOpen(false); }, [view]);
   // Substitui a view atual sem empilhar
   const navReplace = useCallback((v) => guardNav(() => { setView(v); setMenuOpen(false); }), [guardNav]);
   // Volta para a view anterior
@@ -4271,6 +4337,15 @@ export default function App() {
   if (view.type === "estoqueDoc") {
     return <EstoqueDocumentoPrint docId={view.docId} equipes={equipes} onBack={back} />;
   }
+  if (view.type === "cronogramaPrint") {
+    const cr = cronogramas.find(x => x.id === view.id);
+    const m = macro.mapa[view.id];
+    return cr
+      ? <CronogramaPrint cronograma={cr} obras={obras} onBack={back}
+          dataBaseEfetiva={m?.origemId ? m.dataBaseEfetiva : ""}
+          origemInicio={m?.origemId ? cronogramas.find(x => x.id === m.origemId)?.titulo : ""} />
+      : <CenteredMsg>Cronograma não encontrado</CenteredMsg>;
+  }
   if (view.type === "estoqueEtiquetas") {
     return <EtiquetasPrint itens={estoqueItens} itemIds={view.itemIds} onBack={back} />;
   }
@@ -4374,6 +4449,7 @@ export default function App() {
                   ? (cronogramas.find(x => x.id === view.id)
                       ? <CronogramaEditor cronograma={cronogramas.find(x => x.id === view.id)} obras={obras} onChange={handleSaveCronograma}
                           dirty={dirtyCronoIds.has(view.id)} onSalvarAgora={handleSaveCronogramaNow}
+                          onImprimir={id => navToSemGuarda({ type: "cronogramaPrint", id })}
                           dataBaseEfetiva={macro.mapa[view.id]?.origemId ? macro.mapa[view.id].dataBaseEfetiva : ""}
                           origemInicio={macro.mapa[view.id]?.origemId ? cronogramas.find(x => x.id === macro.mapa[view.id].origemId)?.titulo : ""} />
                       : <CenteredMsg>Cronograma não encontrado</CenteredMsg>)

@@ -1,5 +1,5 @@
 // ─── MOTOR DE AGENDAMENTO (estilo MS Project) ───────────────────────────────
-// Calcula Início/Término das tarefas a partir de duração + predecessoras (Fim→Início)
+// Calcula Início/Término das tarefas a partir de duração + predecessoras (Término→Início ou Início→Início)
 // sobre um calendário de trabalho (dias úteis, expediente, almoço).
 
 export const MESES_ABBR = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
@@ -115,6 +115,12 @@ function minutosUteisEntre(a, b, config) {
   return total;
 }
 
+// Dias úteis (em horas de expediente) entre dois instantes — a duração "real" de um trecho do cronograma.
+export function diasUteisEntre(a, b, config) {
+  const cfg = normConfig(config);
+  return Math.round(minutosUteisEntre(a, b, cfg) / (cfg.horasDia * 60) * 100) / 100;
+}
+
 export function duracaoParaHoras(t, config) {
   const v = Number(t.durValor) || 0;
   return t.durUnid === "hrs" ? v : v * config.horasDia;
@@ -150,6 +156,45 @@ export function indicesVisiveis(tasks) {
   return idxs;
 }
 
+// ── predecessoras ──
+// Formato atual: [{ id, tipo: "TI" | "II" }]. TI = começa quando a outra termina (Término→Início);
+// II = começa junto com a outra (Início→Início). O formato antigo era só o número (sempre TI).
+export function normPredecessoras(lista) {
+  const out = [];
+  for (const p of (lista || [])) {
+    const id = typeof p === "object" && p !== null ? Number(p.id) : Number(p);
+    if (!Number.isInteger(id) || id < 1) continue;
+    const tipo = typeof p === "object" && p !== null && p.tipo === "II" ? "II" : "TI";
+    if (!out.some(x => x.id === id && x.tipo === tipo)) out.push({ id, tipo });
+  }
+  return out;
+}
+
+// "3, 4II, 5ti" → [{3,TI},{4,II},{5,TI}]. Descarta o que não casa e a auto-referência.
+export function parsePredecessoras(texto, proprioId) {
+  const itens = [];
+  for (const parte of String(texto || "").split(/[,;]/)) {
+    const m = parte.trim().match(/^(\d+)\s*(II|TI)?$/i);
+    if (!m) continue;
+    const id = parseInt(m[1], 10);
+    if (id === proprioId) continue;
+    itens.push({ id, tipo: (m[2] || "").toUpperCase() === "II" ? "II" : "TI" });
+  }
+  return normPredecessoras(itens);
+}
+
+// [{3,TI},{4,II}] → "3, 4II" — TI sai sem sufixo, como no MS Project.
+export function textoPredecessoras(lista) {
+  return normPredecessoras(lista).map(p => p.tipo === "II" ? `${p.id}II` : String(p.id)).join(", ");
+}
+
+// Registro antigo não tem `inicioFixo`: ter data digitada era estar fixado. Hoje a data
+// (`inicioManual`) fica guardada mesmo no automático, para o 📌 poder voltar a ela.
+export function inicioEstaFixo(t) {
+  const fixo = t.inicioFixo === undefined ? !!t.inicioManual : !!t.inicioFixo;
+  return fixo && !!t.inicioManual;
+}
+
 // Renumera IDs para 1..N (na ordem do array) e remapeia/limpa predecessoras órfãs.
 export function renumerarIds(tasks) {
   const mapa = {};
@@ -157,9 +202,9 @@ export function renumerarIds(tasks) {
   return tasks.map((t, i) => ({
     ...t,
     id: i + 1,
-    predecessoras: (t.predecessoras || [])
-      .filter(pid => mapa[pid] !== undefined)
-      .map(pid => mapa[pid]),
+    predecessoras: normPredecessoras(t.predecessoras)
+      .filter(p => mapa[p.id] !== undefined)
+      .map(p => ({ id: mapa[p.id], tipo: p.tipo })),
   }));
 }
 
@@ -227,12 +272,15 @@ export function agendar(tasks, config) {
       if (summary[i]) continue;
       const t = tasks[i];
       let inicio;
-      if (t.inicioManual) inicio = parseDT(t.inicioManual);
+      if (inicioEstaFixo(t)) inicio = parseDT(t.inicioManual);
       else {
+        // Várias predecessoras: começa depois da mais tardia. II conta o início dela, TI o término.
         let latest = null;
-        for (const pid of (t.predecessoras || [])) {
-          const s = sched[pid];
-          if (s && (!latest || s.termino > latest)) latest = s.termino;
+        for (const p of normPredecessoras(t.predecessoras)) {
+          const s = sched[p.id];
+          if (!s) continue;
+          const marco = p.tipo === "II" ? s.inicio : s.termino;
+          if (!latest || marco > latest) latest = marco;
         }
         inicio = latest ? new Date(latest) : new Date(base);
       }

@@ -34,6 +34,7 @@ src/
                    + estoque (leituras paginadas e as chamadas RPC de lançamento/estorno).
   supabase.js      Cria o client a partir das env vars.
   cronograma.js    Motor de agendamento do Cronograma Comercial (dias úteis, dependências).
+  CronogramaPrint.jsx  Folha impressa do cronograma (A4 paisagem, versão cliente/interna, nível de detalhe).
   agrupamento.js   Chave de agrupamento de obras por cliente (usada pelo App e pelo Diário).
   Modal.jsx        Modal genérico com backdrop.
   PainelLembretes.jsx  Mural de lembretes da coluna direita do calendário.
@@ -192,7 +193,7 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   Tipos de view: `dashboard`, `obrasPasta` (`pasta: "andamento"|"concluidas"`), `gantt` (`obraId`),
   `print` (`obraId`), `calendar`, `equipes`, `osPrint` (`inicio`, `fim`),
   `cronogramas` (o **macro**: todas as obras, uma por linha), `cronograma` (`id`, o micro de uma
-  obra), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`),
+  obra), `cronogramaPrint` (`id`), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`),
   `estoque` (`codigo` opcional, vindo do QR), `estoqueDoc` (`docId`), `estoqueEtiquetas` (`itemIds`).
   `calendar`, `diario` e `estoque` navegam por dentro (estado local), sem empilhar view — `DiaAgenda`,
   as três telas do diário e as quatro do estoque são early-returns dos próprios componentes.
@@ -296,6 +297,25 @@ fontes de verdade divergindo em silêncio. A coluna Pred. aceita **números de l
 MS Project) mas persiste **ids**, e a lista é ordenada por criação (não pelo `updated_at desc` do
 banco), senão os números mudariam sozinhos. Ciclo não trava: as arestas que o fecham são ignoradas
 e a tela avisa.
+
+**Predecessora tem tipo, e a data manual não some ao voltar para o automático.** No micro,
+`predecessoras` é `[{ id, tipo: "TI" | "II" }]`: `4` = começa quando a 4 termina, `4II` = começa junto
+com a 4. Registro antigo guardava só o número e continua valendo como TI — **toda leitura passa por
+`normPredecessoras`**, nunca `t.predecessoras` direto. A coluna Pred. usa o `PredInput` (rascunho +
+commit no blur): um input controlado reescreveria `4I` para `4` no meio da digitação. O início
+manual separou a data do modo: `inicioManual` guarda a última data digitada e `inicioFixo` diz se ela
+vale (ausente = `!!inicioManual`, o comportamento antigo); o 📌 só alterna `inicioFixo`, então
+desligar volta ao calculado e religar volta à data de antes. Use `inicioEstaFixo(t)`, não
+`t.inicioManual`, para saber se a tarefa está presa. `config.dataBase` agora é editável na toolbar,
+exceto quando o macro manda (`dataBaseEfetiva` venceria em silêncio).
+
+**Impressão do cronograma não é o Gantt da tela.** `CronogramaPrint` é uma tabela com um `<svg>`
+por linha: divs absolutas não imprimem cor sem `print-color-adjust`, e um SVG único da altura do
+documento é cortado no meio da página. Linha de tabela quebra certo e o `<thead>` repete a régua.
+As setas ficam de fora (atravessariam SVGs separados); coluna Pred. + legenda explicam a ligação.
+O nível de detalhe é só apresentação — tarefa oculta continua nas datas e no %. A ida para a
+impressão usa `navToSemGuarda`: o aviso de "não salvo" pularia a cada clique, e não há risco,
+porque `cronogramas` no `App` já tem a versão em edição e o timer de gravação mora no `App`.
 
 **Obra é um cliente com N contratos, e o agrupamento é só de apresentação.** Duas propostas do
 mesmo cliente (BOL #2597 e #2695) são uma obra com dois contratos. Fundir os registros estava fora
@@ -483,6 +503,9 @@ do plano do Supabase. Pede os valores liberados, porque leva o financeiro. Os ar
   copia o `ordem` do app para uma coluna solta; ela nasceu `int` e recusava todo lembrete novo com
   `value "1788184147925" is out of range for type integer`. A agenda escapou porque lá o `ordem`
   mora só dentro do `jsonb`. Se um dia outra tabela ganhar coluna `ordem`, ela nasce `bigint`.
+- **`<input type="number">` controlado mostra zero à esquerda.** Com o campo em `0`, digitar 35
+  exibia `035`: o React não reescreve o DOM quando `Number("035") === 35`. Campo de % usa
+  `InputPercent` (`type="text"` + `inputMode="numeric"`, limpa e seleciona no foco).
 - **Obra sem `itens` é normal agora** (cadastro manual antes do PDF): `normObra` usa
   `(o.itens || [])`. Código novo que lê itens deve contar com lista vazia.
 - **Gravar obra fora do `persistObra`/`criarObra` fura a trava de versão.** Não existe mais
