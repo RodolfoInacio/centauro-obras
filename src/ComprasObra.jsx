@@ -1,5 +1,6 @@
 import { Fragment, useState } from "react";
 import { Dinheiro, Oculto } from "./Sigilo";
+import { chaveCliente } from "./agrupamento";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Compras por categoria (Perfil/Pintura/Acessório/Vidro), do jeito que o setor de compras
@@ -95,6 +96,39 @@ export function normCompras(c) {
     acc[cat] = normCategoria((c || {})[cat]);
     return acc;
   }, {});
+}
+
+// Lança um documento lido pela IA (ver LeituraIA.jsx) numa categoria. `itemId` "" cria um item
+// novo com a especificação. Orçamento sempre vira linha nova — pedir três cotações é o normal.
+// Nota fiscal procura antes o orçamento do mesmo fornecedor ainda não comprado naquele item e
+// finaliza a compra nele; só cria linha se não achar, senão a cotação e a NF da mesma compra
+// virariam duas linhas e a cotação continuaria contando no A comprar.
+export function lancarDocumentoCompra(compras, { categoria, itemId, especificacao, fornecedor, ehNF, numeroNF, data, valor, obs }) {
+  const c = normCompras(compras);
+  const cat = c[categoria];
+  let item = cat.itens.find(it => it.id === itemId);
+  const novoItem = !item;
+  if (novoItem) item = normItemCompra({ id: novoId("it_"), tipo: especificacao }, 0);
+
+  const chave = chaveCliente(fornecedor);
+  const alvo = ehNF && chave && item.fornecedores.find(f => !comprado(f) && chaveCliente(f.nome) === chave);
+  let fornecedores;
+  if (alvo) {
+    fornecedores = item.fornecedores.map(f => f.id !== alvo.id ? f : {
+      ...f,
+      compra: { data, valor: dinheiro(valor), obs: f.compra.obs || obs },
+      nf: { numero: numeroNF, data },
+    });
+  } else {
+    const linha = ehNF
+      ? { id: novoId("fn_"), nome: fornecedor, compra: { data, valor, obs }, nf: { numero: numeroNF, data } }
+      : { id: novoId("fn_"), nome: fornecedor, orcamento: { data, valor, obs } };
+    fornecedores = [...item.fornecedores, normFornecedor(linha, 0)];
+  }
+  const itemNovo = { ...item, fornecedores };
+  const itens = novoItem ? [...cat.itens, itemNovo] : cat.itens.map(it => it.id === itemNovo.id ? itemNovo : it);
+  // Documento de compra numa categoria riscada é sinal de que ela se aplica, sim.
+  return { compras: { ...c, [categoria]: { ...cat, naoSeAplica: false, itens } }, finalizouOrcamento: !!alvo };
 }
 
 // A compra está finalizada quando tem valor ou data de compra — basta um dos dois.

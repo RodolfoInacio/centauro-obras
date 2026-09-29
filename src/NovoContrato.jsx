@@ -84,7 +84,7 @@ export default function NovoContrato({ open, obras, onFechar, onLerPdf, onSalvar
   async function lerPdf(file) {
     setLendo(true); setErro(""); setAviso("");
     try {
-      const { _fallback, ...o } = await onLerPdf(file);
+      const { _fallback, _motivo, ...o } = await onLerPdf(file);
       setF(prev => ({
         ...prev,
         numero: o.numero || prev.numero,
@@ -98,7 +98,7 @@ export default function NovoContrato({ open, obras, onFechar, onLerPdf, onSalvar
         itens: o.itens && o.itens.length ? o.itens : prev.itens,
       }));
       setArquivos(prev => prev.some(a => a.file === file) ? prev : [...prev, { file, categoria: "orcamento" }]);
-      setAviso(`${(o.itens || []).length} itens lidos do PDF${_fallback ? " pela extração local (IA indisponível) — confira os itens depois" : ""}. O PDF entra nos anexos como orçamento.`);
+      setAviso(`${(o.itens || []).length} itens lidos do PDF${_fallback ? ` pela extração local (IA indisponível: ${_motivo || "sem resposta"}) — confira os itens depois` : ""}. O PDF entra nos anexos como orçamento.`);
     } catch (err) {
       setErro("Não deu para ler o PDF: " + err.message);
     } finally {

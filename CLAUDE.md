@@ -47,6 +47,7 @@ src/
                    <Dinheiro>, <Oculto> e o botão do olho.
   CadastroObra.jsx Campos do cadastro do cliente (o que era a descrição do cartão do Trello).
   AnexosObra.jsx   Anexos da obra: bucket privado, categoria, capa, lixeira, envio múltiplo.
+  LeituraIA.jsx    "✨ Ler com IA" de um anexo: chama a function e mostra a conferência antes de aplicar.
   ComentariosObra.jsx  Coluna de comentários e atividade da obra + autor lembrado no navegador.
   NovoContrato.jsx Popup "+ Novo cliente / contrato" (cliente novo ou contrato de obra existente).
   index.css        CSS global mínimo.
@@ -63,7 +64,8 @@ supabase/
   migration_estoque.sql      Estoque: tabelas, view de saldo, triggers de imutabilidade e RPCs (rodar separado).
   migration_ficha_obra.sql   Histórico de versões da obra, trigger anti-DELETE em obras, `obra_anexos`,
                              `obra_comentarios` e bucket privado `obras` (rodar separado).
-  functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF.
+  functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF do orçamento.
+  functions/analisar-documento/  Edge Function que lê um anexo (contrato, comprovante, NF, orçamento de fornecedor).
   SETUP.md                   Passo a passo de criação do projeto Supabase.
 docs/
   integracao-erp.md      Spec completa da integração com o ERP (uso interno).
@@ -111,7 +113,7 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 
 | Tabela | PK | Colunas | `data` contém |
 |---|---|---|---|
-| `obras` | `id` (= nº da proposta, texto) | `numero`, `cliente`, `updated_at`, `data` | a obra inteira (itens, etapas, financeiro, compras) + `grupo` (override do agrupamento por cliente) + `cadastro` (ficha do cliente), `checklist` (abertura) e `capa` (`{anexoId, path}`) |
+| `obras` | `id` (= nº da proposta, texto) | `numero`, `cliente`, `updated_at`, `data` | a obra inteira (itens, etapas, financeiro, compras) + `grupo` (override do agrupamento por cliente) + `cadastro` (ficha do cliente), `checklist` (abertura), `capa` (`{anexoId, path}`) e `documentosLidos` (`{[anexoId]: {tipo, em}}`, anexos já aplicados pela IA) |
 | `equipes` | `id` | `nome`, `integrantes` (jsonb), `cor`, `arquivada` | — (essa não usa `data`) |
 | `ordens` | `id` | `numero`, `equipe_id`, `periodo_inicio`, `periodo_fim`, `data` | **histórica** — nenhum código lê ou grava (ver Decisões) |
 | `agenda` | `id` | `dia`, `equipe_id`, `obra_id`, `updated_at`, `data` | o serviço do dia: obra (ou avulso) × equipe × período + endereço, referência, descrição e `itens` (ids dos itens da obra que serão montados) |
@@ -158,11 +160,12 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 ## Backend
 
 Não há backend próprio. O front fala direto com o Supabase (PostgREST + Auth), protegido por RLS.
-A única peça server-side é uma Edge Function:
+As peças server-side são duas Edge Functions:
 
 | Função | Entrada | O que faz |
 |---|---|---|
 | `parse-obra-pdf` | `POST { lines: string[], filename }` + `Authorization: Bearer <jwt>` | Valida o usuário, manda o texto do PDF para a API da Anthropic (`claude-sonnet-5`, tool-use forçado) e devolve a obra estruturada. Erros → 400/401/500/502; o cliente cai no parser local. |
+| `analisar-documento` | `POST { anexoId, contexto }` + `Authorization: Bearer <jwt>` | Busca o anexo **pelo id** com o login do usuário (RLS de `obra_anexos` e do bucket `obras`), manda o PDF (`document`) ou a imagem (`image`) para `claude-opus-5` com structured outputs e `fallbacks: "default"`, e devolve `{tipo, resumo, contrato, pagamento, compra, avisos}`. **Não grava nada.** Até 20 MB. `contexto` = cliente e itens de compra da obra, sem valores. |
 
 Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro do ERP
 (contrato em `docs/integracao-erp-ti.md`).
@@ -224,6 +227,26 @@ linha diferentes). O regex puro exigia remendo a cada formato novo. Hoje o camin
 Edge Function com IA; se ela falhar **ou devolver zero itens**, cai automaticamente no parser
 regex antigo e avisa na tela. Descartado: só regex (frágil) e chamar a Anthropic do browser
 (exporia a chave).
+
+**Leitura de anexo com IA: a IA lê, o usuário aplica.** O botão "✨ Ler com IA" (PDF e imagem) manda
+o anexo para `analisar-documento`, que classifica em contrato / comprovante / nota fiscal /
+orçamento de fornecedor e devolve os campos. Nada entra na obra sem passar por `LeituraIA`: valor
+atual ao lado do lido, tudo editável, e só vem **marcado o que preenche campo vazio** — trocar um
+valor já digitado é decisão do usuário. Quem grava é o `update` da tela da obra, então a trava de
+versão vale. Descartado o "preenche direto": um R$ lido errado iria calado para o Recebido ou para
+Compras. O que entra: contrato → cliente, cidade, `cadastro`, datas, valor total e observações
+(acrescenta); comprovante → **soma** ao `valorRecebido`; NF e orçamento → `lancarDocumentoCompra`
+(`ComprasObra.jsx`) na categoria/item escolhidos. NF de um fornecedor que já tem orçamento não
+comprado no item finaliza a compra **nessa linha** (casando por `chaveCliente`), senão a cotação e
+a NF da mesma compra virariam duas linhas e a cotação continuaria no A comprar.
+
+A function recebe só o `anexoId` e baixa o arquivo ela mesma: o cliente não consegue pedir um
+caminho arbitrário do Storage. Com os valores ocultos (`Sigilo`), as linhas de dinheiro ficam
+travadas — não dá para conferir o que não se vê. `obra.documentosLidos` marca o anexo aplicado e
+a tela avisa na segunda vez (o mesmo comprovante somaria em dobro); ele não impede, porque
+reler um contrato para completar um campo é legítimo. O texto da atividade nunca leva o valor,
+porque a coluna de comentários aparece com os valores ocultos. `categoria` de `obra_anexos` tem
+`check` no banco, por isso não existe categoria "Nota fiscal": NF não troca a categoria do anexo.
 
 **Pastas por status em vez de lista única.** O "progresso médio" sobre todas as obras era falso —
 metade já estava concluída. A tela inicial mostra só os KPIs gerais + duas pastas; o progresso

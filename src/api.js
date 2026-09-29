@@ -430,6 +430,21 @@ export async function urlsAssinadas(paths, segundos = 3600) {
   return Object.fromEntries((data || []).filter(d => d.signedUrl).map(d => [d.path, d.signedUrl]));
 }
 
+// Leitura de um anexo pela IA (Edge Function analisar-documento). Só devolve os campos lidos —
+// nada é gravado aqui. A function busca o arquivo pelo id, com o login de quem pediu.
+export async function lerDocumentoComIA(anexoId, contexto) {
+  const { data, error } = await supabase.functions.invoke("analisar-documento", { body: { anexoId, contexto } });
+  if (error) {
+    // Erro HTTP da function: a mensagem útil está no corpo, não no `error.message` genérico.
+    let msg = error.message;
+    try { msg = (await error.context.json()).error || msg; } catch { /* corpo não é JSON */ }
+    if (/not found|404/i.test(msg) && !/Anexo/.test(msg)) msg = "A leitura com IA ainda não foi publicada no Supabase (function analisar-documento).";
+    throw new Error(msg);
+  }
+  if (!data || data.error) throw new Error((data && data.error) || "Resposta vazia da IA");
+  return data;
+}
+
 // ─── COMENTÁRIOS E ATIVIDADE DA OBRA ─────────────────────────────────────────
 // Imutáveis no banco: não se editam nem se apagam, só se ocultam.
 function comentario(r) {

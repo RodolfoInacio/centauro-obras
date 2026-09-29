@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import Modal from "./Modal";
+import InputData from "./InputData";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mural fixo de lembretes, ao lado do calendário.
@@ -292,7 +293,7 @@ function CardLembrete({ l, hoje, obras, aberto, arquivado, onAbrir, onSalvar, on
 
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <div style={{ fontSize: 10.5, color: "#94a3b8", fontWeight: 700, width: 42, flexShrink: 0 }}>Prazo</div>
-            <input type="date" value={l.prazo || ""} onChange={e => mudar({ prazo: e.target.value })}
+            <InputData value={l.prazo || ""} onChange={v => mudar({ prazo: v })}
               style={{ flex: 1, minWidth: 0, border: "1px solid #e2e8f0", borderRadius: 7, padding: "5px 8px", fontSize: 12, boxSizing: "border-box" }} />
             {l.prazo && <button onClick={() => mudar({ prazo: "" })} title="Tirar o prazo" style={btnMini}>✕</button>}
           </div>

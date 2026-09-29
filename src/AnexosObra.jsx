@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { fetchAnexosObra, enviarAnexoObra, removerAnexo, restaurarAnexo, mudarCategoriaAnexo, urlsAssinadas } from "./api";
 import { redimensionarImagem } from "./FotoMarkup";
 import { lerAutor } from "./ComentariosObra";
+import { podeLerComIA, TIPOS_DOC } from "./LeituraIA";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Anexos da obra: contrato assinado, orçamento, comprovante, projeto, fotos.
@@ -97,7 +98,8 @@ const btn = { background: "#fff", border: "1px solid #e2e8f0", borderRadius: 6, 
 
 // capa: { anexoId, path } | null. onCapa(novaCapa|null). onAtividade(texto) registra na lateral.
 // onContagem(anexosAtivos) avisa a seção (resumo de uma linha).
-export default function AnexosObra({ obraId, capa, onCapa, onAtividade, onContagem, recarregar = 0 }) {
+// onLerIA(anexo) abre a leitura com IA; lidos = obra.documentosLidos (marca o que já foi aplicado).
+export default function AnexosObra({ obraId, capa, onCapa, onAtividade, onContagem, onLerIA, lidos = {}, recarregar = 0 }) {
   const [lista, setLista] = useState(undefined); // undefined = carregando, null = sem migration
   const [urls, setUrls] = useState({});
   const [enviando, setEnviando] = useState(false);
@@ -221,6 +223,7 @@ export default function AnexosObra({ obraId, capa, onCapa, onAtividade, onContag
                 {a.autor && <span>· {a.autor}</span>}
                 {a.tamanho > 0 && <span>· {fmtTamanho(a.tamanho)}</span>}
                 {ehCapa && <span style={{ color: "#c9a227", fontWeight: 800 }}>· ★ capa</span>}
+                {lidos[a.id] && <span style={{ color: "#7c3aed", fontWeight: 700 }}>· ✨ aplicado pela IA como {TIPOS_DOC[lidos[a.id].tipo].rotulo.toLowerCase()}</span>}
                 {a.removidoEm && <span style={{ color: "#dc2626" }}>· removido {a.removidoPor ? "por " + a.removidoPor : ""}</span>}
               </div>
             </div>
@@ -232,6 +235,12 @@ export default function AnexosObra({ obraId, capa, onCapa, onAtividade, onContag
                   style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "3px 6px", fontSize: 11, background: "#fff", cursor: "pointer" }}>
                   {CATEGORIAS_ANEXO.map(c => <option key={c.id} value={c.id}>{c.icone} {c.rotulo}</option>)}
                 </select>
+                {onLerIA && podeLerComIA(a.mime) && (
+                  <button style={{ ...btn, color: "#7c3aed", borderColor: "#7c3aed55" }} onClick={() => onLerIA(a)}
+                    title="A IA lê o contrato, comprovante, nota fiscal ou orçamento e mostra o que preencher — nada é gravado antes de você conferir">
+                    ✨ Ler com IA
+                  </button>
+                )}
                 {img && (
                   <button style={{ ...btn, color: ehCapa ? "#c9a227" : "#475569" }} title={ehCapa ? "Tirar da capa" : "Usar como capa da obra"}
                     onClick={() => onCapa?.(ehCapa ? null : { anexoId: a.id, path: a.path })}>★</button>

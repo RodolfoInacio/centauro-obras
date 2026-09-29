@@ -54,18 +54,21 @@ VITE_SUPABASE_ANON_KEY=...
 O `.env` está no `.gitignore` — nunca vai para o GitHub. Depois disso, `npm run dev` já abre o
 sistema funcionando em http://localhost:5173.
 
-## 8. Importação de PDF por IA (Edge Function)
-A leitura automática do orçamento em PDF usa uma Edge Function que chama a API da Anthropic.
-Sem estes dois passos, a importação continua funcionando, mas cai no leitor local (menos preciso)
-e avisa na tela.
+## 8. IA: importação do orçamento e leitura de anexos (Edge Functions)
+Duas Edge Functions chamam a API da Anthropic, com a mesma chave:
+- `parse-obra-pdf` lê o orçamento em PDF. Sem ela, a importação cai no leitor local (menos
+  preciso) e avisa na tela.
+- `analisar-documento` é o botão **✨ Ler com IA** dos anexos da obra (contrato, comprovante,
+  nota fiscal, orçamento de fornecedor). Sem ela, o botão mostra o erro e nada é preenchido.
 
 1. **Chave da Anthropic**: crie em https://console.anthropic.com → Settings → API Keys.
 2. **Guardar a chave no Supabase**: painel do projeto → **Edge Functions → Secrets** →
    *Add new secret* → nome `ANTHROPIC_API_KEY`, valor = a chave.
    (Guarde por aqui, não pelo terminal — a CLI costuma dar `Unauthorized` nesse comando.)
-3. **Publicar a função**:
+3. **Publicar as funções**:
    ```bash
    npx supabase functions deploy parse-obra-pdf --project-ref <SEU-PROJECT-REF>
+   npx supabase functions deploy analisar-documento --project-ref <SEU-PROJECT-REF>
    ```
    O `project-ref` é o código do projeto (está em `supabase/config.toml` e na URL do Supabase).
    Este comando precisa de um **Personal Access Token**: painel → avatar → **Access Tokens** →

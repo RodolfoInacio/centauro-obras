@@ -101,6 +101,10 @@ Deno.serve(async (req: Request) => {
       body: JSON.stringify({
         model: "claude-sonnet-5",
         max_tokens: 16000,
+        // No Sonnet 5, omitir `thinking` liga o raciocínio adaptativo, e raciocínio + tool_choice
+        // forçado é recusado pela API (400) — era isso que mandava todo import para o parser local.
+        // Extração de campos não precisa de raciocínio.
+        thinking: { type: "disabled" },
         system: SYSTEM_PROMPT,
         messages: [{ role: "user", content: `Arquivo: ${filename || "(sem nome)"}\n\n${texto}` }],
         tools: [EXTRACT_TOOL],

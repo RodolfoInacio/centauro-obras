@@ -14,6 +14,7 @@ import EstoqueView, { EstoqueDocumentoPrint, EtiquetasPrint, SaidasEstoqueObra, 
 import { SigiloProvider, Dinheiro, Oculto, OlhoFinanceiro, useSigilo, MASCARA } from "./Sigilo";
 import CadastroObra, { normCadastro } from "./CadastroObra";
 import AnexosObra, { enviarArquivos, urlsComCache } from "./AnexosObra";
+import LeituraIA, { normDocumentosLidos } from "./LeituraIA";
 import ComentariosObra, { lerAutor } from "./ComentariosObra";
 import NovoContrato from "./NovoContrato";
 
@@ -220,6 +221,8 @@ function normObra(o) {
     cadastro: normCadastro(o.cadastro),
     checklist: normChecklist(o.checklist),
     capa: o.capa && o.capa.path ? { anexoId: o.capa.anexoId || "", path: o.capa.path } : null,
+    // Anexos já aplicados pela leitura com IA — avisa antes de somar o mesmo comprovante duas vezes.
+    documentosLidos: normDocumentosLidos(o.documentosLidos),
     // Obra cadastrada à mão nasce sem itens (entram depois pelo PDF) — e um registro sem
     // `itens` derrubava a carga de todas as obras.
     itens: (Array.isArray(o.itens) ? o.itens : []).map(normItem),
@@ -442,15 +445,30 @@ async function extractPdfLines(file) {
 
   let allLines = [];
   for (let p = 2; p <= pdfDoc.numPages; p++) {
-    const page = await pdfDoc.getPage(p);
-    const content = await page.getTextContent();
-    const pageText = content.items.map(i => i.str).join("\n");
-    for (const line of pageText.split("\n")) {
-      const trimmed = line.trim();
-      if (trimmed && !isJunk(trimmed)) allLines.push(trimmed);
+    for (const line of await linhasDaPagina(await pdfDoc.getPage(p))) {
+      if (line && !isJunk(line)) allLines.push(line);
     }
   }
   return allLines;
+}
+
+// O pdf.js devolve cada rótulo como um pedaço solto ("Tipo:" | "Qtd:" | "L:" …), e o parser
+// procura a linha inteira "Tipo: Qtd: L: H: …" — juntar os pedaços com "\n" dava 0 itens em
+// qualquer orçamento. Aqui os pedaços da mesma altura viram uma linha, da esquerda para a direita.
+async function linhasDaPagina(page) {
+  const content = await page.getTextContent();
+  const pecas = content.items
+    .filter(i => i.str && i.str.trim())
+    .map(i => ({ s: i.str.trim(), x: i.transform[4], y: i.transform[5], h: Math.abs(i.transform[3]) || 8 }))
+    .sort((a, b) => b.y - a.y || a.x - b.x);
+  const linhas = [];
+  for (const p of pecas) {
+    const l = linhas.find(l => Math.abs(l.y - p.y) <= Math.max(2, p.h * 0.4));
+    if (l) l.pecas.push(p); else linhas.push({ y: p.y, pecas: [p] });
+  }
+  return linhas
+    .sort((a, b) => b.y - a.y)
+    .map(l => l.pecas.sort((a, b) => a.x - b.x).map(p => p.s).join(" ").replace(/\s+/g, " ").trim());
 }
 
 // Extração local por regex (usada hoje e como fallback do caminho com IA, abaixo).
@@ -486,7 +504,12 @@ async function parsePDFFileComIA(file) {
   const allLines = await extractPdfLines(file);
   try {
     const { data, error } = await supabase.functions.invoke("parse-obra-pdf", { body: { lines: allLines, filename: file.name } });
-    if (error) throw error;
+    if (error) {
+      // Status ≠ 2xx: o motivo de verdade está no corpo da resposta, não no error.message genérico.
+      let motivo = error.message;
+      try { const corpo = await error.context.json(); if (corpo && corpo.error) motivo = corpo.error; } catch { /* sem corpo */ }
+      throw new Error(motivo);
+    }
     if (!data || data.error) throw new Error((data && data.error) || "resposta vazia da IA");
     const obra = montarObraDeDados(data, file.name);
     // Obra sem nenhum item quase sempre é resposta truncada/incompleta — melhor tentar o parser local.
@@ -495,7 +518,7 @@ async function parsePDFFileComIA(file) {
   } catch (err) {
     console.warn("Importação via IA falhou, usando extração local:", err);
     const obra = parseObraLines(allLines, file.name);
-    return { ...obra, _fallback: true };
+    return { ...obra, _fallback: true, _motivo: String(err?.message || err) };
   }
 }
 
@@ -659,6 +682,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
   const [expandedId, setExpandedId] = useState(null);
   const [localObra, setLocalObra] = useState(obra);
   const [nAnexos, setNAnexos] = useState(null); // resumo da seção Anexos (conhecido quando ela abre)
+  const [lendoAnexo, setLendoAnexo] = useState(null); // anexo aberto na leitura com IA
   const [capaUrl, setCapaUrl] = useState("");
   const capaPath = obra.capa?.path || "";
   useEffect(() => { setNAnexos(null); }, [obra.id]);
@@ -821,9 +845,14 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
             <div style={{ padding: 16 }}>
               <AnexosObra obraId={obra.id} capa={localObra.capa} recarregar={atividadeVersao}
                 onCapa={c => update({ ...localObra, capa: c })}
-                onAtividade={onAtividade} onContagem={l => setNAnexos(l.length)} />
+                onAtividade={onAtividade} onContagem={l => setNAnexos(l.length)}
+                lidos={localObra.documentosLidos} onLerIA={setLendoAnexo} />
             </div>
           </Secao>
+          {lendoAnexo && (
+            <LeituraIA obra={localObra} anexo={lendoAnexo} onFechar={() => setLendoAnexo(null)}
+              onAplicar={(nova, atividade) => { update(nova); onAtividade?.(atividade); setLendoAnexo(null); }} />
+          )}
 
           <Secao id="checklist" titulo="Checklist de abertura" icone="☑️" resumo={`${checkFeitos}/${checklist.length}`}>
             <ChecklistObra itens={checklist}
@@ -4256,7 +4285,7 @@ export default function App() {
     setImporting(true);
     setImportError("");
     try {
-      const { _fallback, ...lida } = await parsePDFFileComIA(file);
+      const { _fallback, _motivo, ...lida } = await parsePDFFileComIA(file);
       if (!lida.numero) throw new Error("Número da proposta não encontrado");
       const existente = obras.find(o => o.id === lida.id || String(o.numero) === String(lida.numero));
       let id;
@@ -4281,7 +4310,7 @@ export default function App() {
       // O próprio PDF fica guardado na obra. Sem a migration de anexos, só não guarda.
       enviarArquivos(id, [{ file, categoria: "orcamento" }])
         .then(({ ok }) => { if (ok.length) setAtividadeVersao(v => v + 1); });
-      if (_fallback) showError("Obra importada com extração local (IA indisponível) — confira os itens.");
+      if (_fallback) showError(`Obra importada com extração local (IA indisponível: ${_motivo || "sem resposta"}) — confira os itens.`);
       navTo({ type: "gantt", obraId: id });
     } catch (err) {
       showError("Erro ao importar: " + err.message);
