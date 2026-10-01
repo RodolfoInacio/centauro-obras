@@ -1,6 +1,7 @@
 import { Fragment, useState } from "react";
 import { Dinheiro, Oculto } from "./Sigilo";
 import { chaveCliente } from "./agrupamento";
+import { lerAutor } from "./ComentariosObra";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Compras por categoria (Perfil/Pintura/Acessório/Vidro), do jeito que o setor de compras
@@ -92,10 +93,15 @@ function normCategoria(v) {
 
 // Undefined-safe, no espírito de normObra: registro antigo abre e cai no formato novo.
 export function normCompras(c) {
-  return CATEGORIAS_COMPRA.reduce((acc, cat) => {
+  const out = CATEGORIAS_COMPRA.reduce((acc, cat) => {
     acc[cat] = normCategoria((c || {})[cat]);
     return acc;
   }, {});
+  // "Itens conferidos para compra": registro de quem conferiu a lista antes de comprar. Não
+  // trava a compra (medir não é pré-requisito para comprar); a central de avisos aponta a falta.
+  const cf = (c || {}).conferido;
+  out.conferido = cf && cf.em ? { por: String(cf.por || ""), em: String(cf.em) } : null;
+  return out;
 }
 
 // Lança um documento lido pela IA (ver LeituraIA.jsx) numa categoria. `itemId` "" cria um item
@@ -181,6 +187,42 @@ export function comprasTotais(obra) {
     gasto += t.gasto;
   }
   return { aComprar, gasto };
+}
+
+// ─── PENDÊNCIAS (trava da Produção e central de avisos) ───────────────────────
+// Uma lista do que falta em Compras, item a item. `nivel`: "orcar" (nada cotado), "aprovar"
+// (cotado sem escolha), "comprar" (aprovado sem compra), "previsao" (comprado sem previsão de
+// entrega), "atrasada" (passou a previsão e não chegou). Categoria "não se aplica" fica fora.
+export function pendenciasCompras(obra, hoje = hojeLocal()) {
+  const c = normCompras(obra.compras);
+  const out = [];
+  for (const cat of CATEGORIAS_COMPRA) {
+    const v = c[cat];
+    const rotulo = CATEGORIA_LABEL[cat];
+    if (v.naoSeAplica) continue;
+    if (!v.itens.length) { out.push({ cat, nivel: "orcar", texto: `${rotulo}: nada lançado (ou marque "não se aplica")` }); continue; }
+    v.itens.forEach((it, i) => {
+      const nome = `${rotulo} · ${it.tipo || `item ${i + 1}`}`;
+      if (it.estoque.usado === "sim" && !it.fornecedores.some(ativo)) return; // sai do estoque
+      const ativos = it.fornecedores.filter(ativo);
+      if (!ativos.length) {
+        const cotado = it.fornecedores.some(f => f.orcamento.valor > 0 || f.orcamento.data);
+        out.push({ cat, nivel: cotado ? "aprovar" : "orcar", texto: cotado ? `${nome}: orçado, falta aprovar` : `${nome}: falta orçar` });
+        return;
+      }
+      if (!ativos.every(comprado)) { out.push({ cat, nivel: "comprar", texto: `${nome}: aprovado, falta comprar` }); return; }
+      if (ativos.some(f => !f.entrega.recebido && !f.entrega.data)) { out.push({ cat, nivel: "previsao", texto: `${nome}: comprado sem previsão de entrega` }); return; }
+      if (ativos.some(f => atrasada(f, hoje))) out.push({ cat, nivel: "atrasada", texto: `${nome}: entrega atrasada` });
+    });
+  }
+  return out;
+}
+
+// Material garantido para produzir: tudo comprado (ou do estoque) e com previsão de entrega
+// preenchida. Entrega atrasada não trava — o material está pedido, só está atrasado.
+export function comprasLiberamProducao(obra) {
+  const faltas = pendenciasCompras(obra).filter(p => p.nivel !== "atrasada");
+  return { ok: faltas.length === 0, faltas };
 }
 
 // Status são DERIVADOS, nunca gravados (mesma regra da etiqueta do lembrete): gravam-se as
@@ -485,7 +527,7 @@ function CorpoCategoria({ v, onChange, onEntradaEstoque, onAbrirDocEstoque }) {
 
 // onEntradaEstoque recebe a origem (categoria/item/orçamento) e o que a entrada já pode trazer
 // preenchido. Quem monta o documento é a tela de Estoque; aqui é só o atalho.
-export default function ComprasObra({ compras, onChange, sugestoes = [], onEntradaEstoque, onAbrirDocEstoque }) {
+export default function ComprasObra({ compras, onChange, sugestoes = [], onEntradaEstoque, onAbrirDocEstoque, onAtividade }) {
   const [abertas, setAbertas] = useState(() => new Set());
   const hoje = hojeLocal();
   const c = normCompras(compras);
@@ -499,8 +541,28 @@ export default function ComprasObra({ compras, onChange, sugestoes = [], onEntra
   const setCat = (cat, v) => onChange({ ...c, [cat]: v });
 
   const th = { fontSize: 11, color: "#94a3b8", fontWeight: 700 };
+  const cf = c.conferido;
+  function alternarConferido() {
+    if (cf) {
+      if (!window.confirm(`Desfazer a conferência feita${cf.por ? ` por ${cf.por}` : ""} em ${fmtData(cf.em)}?`)) return;
+      onChange({ ...c, conferido: null });
+      onAtividade?.("Compras: conferência dos itens desfeita");
+    } else {
+      const por = window.prompt("Quem conferiu os itens para compra?", lerAutor() || "");
+      if (por === null) return;
+      onChange({ ...c, conferido: { por: por.trim(), em: hoje } });
+      onAtividade?.(`Compras: itens conferidos para compra${por.trim() ? ` por ${por.trim()}` : ""}`);
+    }
+  }
   return (
     <div style={{ overflowX: "auto" }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, padding: "8px 10px", borderRadius: 8, cursor: "pointer",
+        background: cf ? "#f0fdf4" : "#fffbeb", border: `1px solid ${cf ? "#bbf7d0" : "#fde68a"}`, fontSize: 12.5, color: cf ? "#166534" : "#92400e" }}>
+        <input type="checkbox" checked={!!cf} onChange={alternarConferido} />
+        {cf
+          ? <span>✓ Itens conferidos para compra{cf.por ? <> por <b>{cf.por}</b></> : ""} em {fmtData(cf.em)}</span>
+          : <span>Confirme aqui que <b>todos os itens da obra foram conferidos</b> (tipo, cor, vidro, quantidades) antes de comprar.</span>}
+      </label>
       <datalist id={DATALIST_ID}>
         {sugestoes.map(n => <option key={n} value={n} />)}
       </datalist>

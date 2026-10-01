@@ -51,10 +51,24 @@ export async function deleteObra(id) {
   if (error) throw error;
 }
 
+// Tabela de migration separada que ainda não foi rodada: aí sim vale devolver lista vazia.
+// Qualquer outro erro (rede, sessão vencida) sobe — antes virava [] calado, e um diário vazio
+// na tela levava o usuário a recriar um dia que já existia.
+function tabelaAusente(error) {
+  return error && (error.code === "42P01" || error.code === "PGRST205" || /does not exist|schema cache/i.test(error.message || ""));
+}
+async function lerOpcional(nome, montar) {
+  try {
+    return await todasAsLinhas(montar);
+  } catch (error) {
+    if (tabelaAusente(error)) { console.warn(`${nome}:`, error.message); return []; }
+    throw error;
+  }
+}
+
 // ─── EQUIPES ─────────────────────────────────────────────────────────────────
 export async function fetchEquipes() {
-  const { data, error } = await supabase.from("equipes").select("*");
-  if (error) throw error;
+  const data = await todasAsLinhas(() => supabase.from("equipes").select("*").order("id"));
   return (data || []).map(r => ({
     id: r.id, nome: r.nome, integrantes: r.integrantes || [], cor: r.cor,
     // Arquivada continua vindo do banco: é ela que segura o histórico do calendário.
@@ -87,9 +101,8 @@ export async function deleteEquipe(id) {
 // ─── CRONOGRAMAS ─────────────────────────────────────────────────────────────
 export async function fetchCronogramas() {
   // Resiliente: se a tabela ainda não existe, não quebra o app.
-  const { data, error } = await supabase.from("cronogramas").select("data").order("updated_at", { ascending: false });
-  if (error) { console.warn("fetchCronogramas:", error.message); return []; }
-  return (data || []).map(r => r.data);
+  const data = await lerOpcional("fetchCronogramas", () => supabase.from("cronogramas").select("data").order("updated_at", { ascending: false }).order("id"));
+  return data.map(r => r.data);
 }
 
 export async function upsertCronograma(c) {
@@ -109,9 +122,9 @@ export async function deleteCronograma(id) {
 // ─── AGENDA (serviços do dia por equipe) ─────────────────────────────────────
 export async function fetchAgenda() {
   // Resiliente: se a tabela ainda não existe (migration_agenda.sql), não quebra o app.
-  const { data, error } = await supabase.from("agenda").select("data").order("dia", { ascending: true });
-  if (error) { console.warn("fetchAgenda:", error.message); return []; }
-  return (data || []).map(r => r.data);
+  // Paginado: com mais de 1000 serviços o PostgREST cortava calado justamente os dias recentes.
+  const data = await lerOpcional("fetchAgenda", () => supabase.from("agenda").select("data").order("dia", { ascending: true }).order("id"));
+  return data.map(r => r.data);
 }
 
 export async function upsertAgendamento(ag) {
@@ -135,9 +148,8 @@ export async function deleteAgendamento(id) {
 // ─── LEMBRETES (mural do calendário) ─────────────────────────────────────────
 export async function fetchLembretes() {
   // Resiliente: se a tabela ainda não existe (migration_lembretes.sql), não quebra o app.
-  const { data, error } = await supabase.from("lembretes").select("data").order("ordem", { ascending: true });
-  if (error) { console.warn("fetchLembretes:", error.message); return []; }
-  return (data || []).map(r => r.data);
+  const data = await lerOpcional("fetchLembretes", () => supabase.from("lembretes").select("data").order("ordem", { ascending: true }).order("id"));
+  return data.map(r => r.data);
 }
 
 export async function upsertLembrete(l) {
@@ -167,9 +179,8 @@ export async function deleteLembrete(id) {
 // ─── DIÁRIO DE OBRAS ─────────────────────────────────────────────────────────
 export async function fetchDiarios() {
   // Resiliente: se a tabela ainda não existe (migration_diario.sql), não quebra o app.
-  const { data, error } = await supabase.from("diarios").select("data").order("dia", { ascending: false });
-  if (error) { console.warn("fetchDiarios:", error.message); return []; }
-  return (data || []).map(r => r.data);
+  const data = await lerOpcional("fetchDiarios", () => supabase.from("diarios").select("data").order("dia", { ascending: false }).order("id"));
+  return data.map(r => r.data);
 }
 
 export async function upsertDiario(d) {
@@ -386,6 +397,23 @@ export async function fetchAnexosObra(obraId) {
     return linhas.map(anexo);
   } catch (err) {
     console.warn("fetchAnexosObra:", err.message);
+    return null;
+  }
+}
+
+// Categorias de anexo de cada obra (sem os da lixeira), para a central de avisos apontar obra
+// sem contrato/orçamento/projeto. null = tabela ainda não existe ou leitura falhou.
+export async function fetchResumoAnexos() {
+  try {
+    const linhas = await todasAsLinhas(() => supabase.from("obra_anexos").select("id, obra_id, categoria").is("removido_em", null).order("id"));
+    const mapa = new Map();
+    for (const r of linhas) {
+      if (!mapa.has(r.obra_id)) mapa.set(r.obra_id, new Set());
+      mapa.get(r.obra_id).add(r.categoria);
+    }
+    return mapa;
+  } catch (err) {
+    console.warn("fetchResumoAnexos:", err.message);
     return null;
   }
 }

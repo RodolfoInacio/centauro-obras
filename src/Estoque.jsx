@@ -1,3 +1,4 @@
+import { useEstadoSessao } from "./rotas";
 import { useState, useEffect, useMemo, useRef } from "react";
 import Modal from "./Modal";
 import { Oculto, useSigilo } from "./Sigilo";
@@ -165,35 +166,39 @@ function baixarCSV(nome, linhas) {
 const numCSV = n => (n == null || n === "" ? "" : String(n).replace(".", ","));
 
 // ─── TELA PRINCIPAL ──────────────────────────────────────────────────────────
-export default function EstoqueView({ itens, erroCarga, obras, equipes, fornecedores = [], codigoInicial, entradaCompra, onEntradaCompraLancada, onLimparParametros, onRecarregar, onImprimirDoc, onImprimirEtiquetas }) {
-  const [tela, setTela] = useState({ tipo: "lista" });
+// A subtela (lista, ficha, lançar, documentos) vem da view do App (rotas.js): o voltar do
+// navegador anda entre elas, e voltar de uma folha impressa cai na tela de onde ela saiu.
+export default function EstoqueView({ itens, erroCarga, obras, equipes, fornecedores = [], tela: telaView, onTela, onVoltar, entradaCompra, onEntradaCompraLancada, onRecarregar, onImprimirDoc, onImprimirEtiquetas }) {
+  const tela = telaView || { tipo: "lista" };
+  const setTela = (t) => onTela(t, "push");
+  const abrirItem = (id) => setTela({ tipo: "item", id, codigo: itens.find(i => i.id === id)?.codigo || "" });
   const [editando, setEditando] = useState(null); // item em edição no modal ({} = novo)
   const [aviso, setAviso] = useState("");
   const [exportando, setExportando] = useState(false);
   const { visivel: valoresVisiveis } = useSigilo();
 
-  // Veio pelo QR (?item=EST-00012): abre a ficha assim que os itens chegarem, uma vez só.
-  const abriuQR = useRef(false);
+  // Ficha aberta por id (clique) ou por código (QR ?item=EST-00012, ou F5 em #/estoque/item/...).
+  const codigoTela = tela.tipo === "item" && tela.codigo ? codigoDoTexto(tela.codigo) : "";
+  const itemAberto = tela.tipo === "item"
+    ? itens.find(i => (tela.id && i.id === tela.id) || (codigoTela && i.codigo === codigoTela))
+    : null;
+  const avisouCodigo = useRef("");
   useEffect(() => {
-    if (!codigoInicial || abriuQR.current || itens.length === 0) return;
-    abriuQR.current = true;
-    const cod = codigoDoTexto(codigoInicial);
-    const alvo = itens.find(i => i.codigo === cod);
-    if (alvo) setTela({ tipo: "item", id: alvo.id });
-    else setAviso(`Nenhum item com o código ${cod}.`);
-  }, [codigoInicial, itens]);
+    if (tela.tipo !== "item" || itemAberto || itens.length === 0 || !codigoTela || avisouCodigo.current === codigoTela) return;
+    avisouCodigo.current = codigoTela;
+    setAviso(`Nenhum item com o código ${codigoTela}.`);
+  }, [tela.tipo, itemAberto, itens.length, codigoTela]);
 
-  // Veio do botão "Dar entrada no estoque" de Compras: abre a entrada já preenchida. Depois limpa
-  // o parâmetro da view, senão o "Voltar" da folha impressa reabriria o formulário.
+  // Veio do botão "Dar entrada no estoque" de Compras: troca a view (sem nova entrada no
+  // histórico) pela entrada já preenchida. Voltar sai para a obra de onde veio.
   const abriuEntrada = useRef(null);
   useEffect(() => {
     if (!entradaCompra || abriuEntrada.current === entradaCompra) return;
     abriuEntrada.current = entradaCompra;
-    setTela({ tipo: "lancar", tipoDoc: "entrada", preset: entradaCompra, volta: { tipo: "lista" } });
-    if (onLimparParametros) onLimparParametros();
-  }, [entradaCompra, onLimparParametros]);
+    onTela({ tipo: "lancar", tipoDoc: "entrada", preset: entradaCompra }, "replace");
+  }, [entradaCompra, onTela]);
 
-  const irLancar = (tipoDoc, item) => setTela({ tipo: "lancar", tipoDoc, itemId: item?.id || null, volta: tela });
+  const irLancar = (tipoDoc, item) => setTela({ tipo: "lancar", tipoDoc, itemId: item?.id || null });
 
   async function salvarItem(form) {
     const r = await salvarItemEstoque(form);
@@ -210,7 +215,7 @@ export default function EstoqueView({ itens, erroCarga, obras, equipes, forneced
     }
     await onRecarregar();
     setEditando(null);
-    if (!form.id) setTela({ tipo: "item", id: r.id });
+    if (!form.id) setTela({ tipo: "item", id: r.id, codigo: r.codigo || "" });
     if (erroInicial) setAviso(`O item foi criado, mas o saldo inicial não entrou: ${erroInicial}. Lance uma entrada de "Inventário inicial".`);
   }
 
@@ -252,12 +257,10 @@ export default function EstoqueView({ itens, erroCarga, obras, equipes, forneced
     }
   }
 
-  const itemAberto = tela.tipo === "item" ? itens.find(i => i.id === tela.id) : null;
-
   let conteudo;
   if (itemAberto) {
     conteudo = (
-      <FichaItem item={itemAberto} onVoltar={() => setTela({ tipo: "lista" })}
+      <FichaItem item={itemAberto} onVoltar={onVoltar}
         onEditar={() => setEditando(itemAberto)} onLancar={tipo => irLancar(tipo, itemAberto)}
         onEtiqueta={() => onImprimirEtiquetas([itemAberto.id])} onAbrirDoc={onImprimirDoc}
         onArquivar={() => alternarArquivo(itemAberto)} />
@@ -266,22 +269,25 @@ export default function EstoqueView({ itens, erroCarga, obras, equipes, forneced
     conteudo = (
       <LancarDocumento tipoInicial={tela.tipoDoc} itemInicialId={tela.itemId} preset={tela.preset || null}
         itens={itens} obras={obras} equipes={equipes} fornecedores={fornecedores}
-        onCancelar={() => setTela(tela.volta || { tipo: "lista" })}
+        onCancelar={onVoltar}
         onLancado={async doc => {
           // Só entrada marca o orçamento: se trocaram para saída no meio, não foi a compra que chegou.
           if (tela.preset && doc.tipo === "entrada" && onEntradaCompraLancada) onEntradaCompraLancada(tela.preset, doc);
           await onRecarregar();
+          // O formulário sai do histórico: voltar da folha impressa cai na lista (ou na ficha
+          // do item), não num formulário que lançaria o documento de novo.
+          onTela(tela.itemId ? { tipo: "item", id: tela.itemId, codigo: itens.find(i => i.id === tela.itemId)?.codigo || "" } : { tipo: "lista" }, "replace");
           onImprimirDoc(doc.id);
         }} />
     );
   } else if (tela.tipo === "documentos") {
     conteudo = (
-      <ListaDocumentos onVoltar={() => setTela({ tipo: "lista" })} onAbrirDoc={onImprimirDoc}
+      <ListaDocumentos onVoltar={onVoltar} onAbrirDoc={onImprimirDoc}
         onEstornado={onRecarregar} />
     );
   } else {
     conteudo = (
-      <ListaEstoque itens={itens} onAbrir={id => setTela({ tipo: "item", id })} onLancar={irLancar}
+      <ListaEstoque itens={itens} onAbrir={abrirItem} onLancar={irLancar}
         onNovoItem={() => setEditando({})} onDocumentos={() => setTela({ tipo: "documentos" })}
         onEtiquetas={onImprimirEtiquetas} onExportar={exportar} exportando={exportando} />
     );
@@ -310,10 +316,11 @@ function Kpi({ rotulo: r, valor, cor = "#1e293b", onClick, ativo }) {
 }
 
 function ListaEstoque({ itens, onAbrir, onLancar, onNovoItem, onDocumentos, onEtiquetas, onExportar, exportando }) {
-  const [busca, setBusca] = useState("");
-  const [categoria, setCategoria] = useState("");
-  const [soAbaixo, setSoAbaixo] = useState(false);
-  const [verArquivados, setVerArquivados] = useState(false);
+  // Filtros sobrevivem ao voltar da ficha ou da folha impressa (sessão da aba).
+  const [busca, setBusca] = useEstadoSessao("estoque.busca", "");
+  const [categoria, setCategoria] = useEstadoSessao("estoque.categoria", "");
+  const [soAbaixo, setSoAbaixo] = useEstadoSessao("estoque.soAbaixo", false);
+  const [verArquivados, setVerArquivados] = useEstadoSessao("estoque.verArquivados", false);
   const [sel, setSel] = useState(() => new Set());
 
   const termo = semAcento(busca.trim());

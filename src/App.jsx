@@ -17,6 +17,12 @@ import AnexosObra, { enviarArquivos, urlsComCache } from "./AnexosObra";
 import LeituraIA, { normDocumentosLidos } from "./LeituraIA";
 import ComentariosObra, { lerAutor } from "./ComentariosObra";
 import NovoContrato from "./NovoContrato";
+import { viewParaHash, hashParaView, paiDe, useEstadoSessao } from "./rotas";
+import MedicaoItem, { ChipMedicao, normMedicao, contagemMedicao } from "./MedicaoItem";
+import MedicaoPrint from "./MedicaoPrint";
+import CentralAvisos from "./CentralAvisos";
+import { avisosDaObra } from "./avisos";
+import { VERSAO_REGRAS, obraComTrava, liberacaoEtapa, liberacaoDesmarcar, liberacaoStatusFabricacao } from "./regrasEtapas";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 // Brand color (was navy #1a1a1a) — now charcoal black
@@ -191,6 +197,8 @@ function normItem(i) {
     diasExec: Number.isFinite(i.diasExec) ? i.diasExec : 0,   // own duration (0 = a definir)
     desenho: i.desenho || "",                                 // technical drawing (data URI)
     etapas: normEtapas(i.etapas),
+    // Medição (plano de corte) só existe depois que alguém mede — item antigo continua sem o campo.
+    ...(i.medicao ? { medicao: normMedicao(i.medicao, i.qtd) } : {}),
   };
 }
 
@@ -257,6 +265,7 @@ function mesclarImportacao(atual, lida) {
     return {
       ...n,
       etapas: a.etapas, inicio: a.inicio, diasExec: a.diasExec, obs: a.obs,
+      ...(a.medicao ? { medicao: a.medicao } : {}),
       localizacao: a.localizacao || n.localizacao, desenho: a.desenho || n.desenho,
     };
   });
@@ -294,7 +303,12 @@ function parsePDFNumber(s) {
 }
 // ─── HELPERS DE DATA ─────────────────────────────────────────────────────────
 const DOW_ABBR = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
-function hoje() { return new Date().toISOString().split("T")[0]; }
+function hojeISO() { return hoje(); }
+// Relógio local, não toISOString(): às 21h no Brasil o ISO já é o dia seguinte.
+function hoje() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 // "2025-06-25" → "25/06 (Qui)"
 function fmtDiaSemana(dStr) {
   if (!dStr) return "";
@@ -614,12 +628,19 @@ function parseObraLines(allLines, filename) {
 // ─── SEÇÃO RECOLHÍVEL (tela da obra) ─────────────────────────────────────────
 // Título + resumo de uma linha; o conteúdo só monta quando aberta (Compras fechada nem busca o
 // estoque). Aberta/fechada é preferência de tela, lembrada por navegador — não é dado da obra.
-function Secao({ id, titulo, icone, resumo, padraoAberta = false, children }) {
+function Secao({ id, titulo, icone, resumo, padraoAberta = false, foco = false, children }) {
   const chave = "obra.secao." + id;
-  const [aberta, setAberta] = useState(() => lerPref(chave, padraoAberta ? "1" : "0") === "1");
+  const [aberta, setAberta] = useState(() => foco || lerPref(chave, padraoAberta ? "1" : "0") === "1");
   useEffect(() => { gravarPref(chave, aberta ? "1" : "0"); }, [chave, aberta]);
+  // Veio da central de avisos apontando esta seção: abre e rola até ela.
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!foco) return;
+    setAberta(true);
+    ref.current?.scrollIntoView({ block: "start" });
+  }, [foco]);
   return (
-    <div style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, marginBottom: 10 }}>
+    <div ref={ref} style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, marginBottom: 10, scrollMarginTop: 8 }}>
       <div role="button" tabIndex={0} onClick={() => setAberta(a => !a)}
         onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setAberta(a => !a); } }}
         style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 16px", cursor: "pointer", userSelect: "none" }}>
@@ -629,6 +650,34 @@ function Secao({ id, titulo, icone, resumo, padraoAberta = false, children }) {
         <span style={{ marginLeft: "auto", fontSize: 12, color: "#64748b", textAlign: "right", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{resumo}</span>
       </div>
       {aberta && <div style={{ borderTop: "1px solid #f1f5f9" }}>{children}</div>}
+    </div>
+  );
+}
+
+// Pendências da obra no cabeçalho (mesmas regras da Central de avisos). Sem documentos e
+// agenda: aqui não há a lista de anexos de todas as obras nem a agenda, e o aviso sairia errado.
+function ChipPendencias({ obra }) {
+  const [aberto, setAberto] = useState(false);
+  if (obra.status === "Concluído") return null;
+  const lista = avisosDaObra(obra).filter(a => a.nivel !== "info" && a.area !== "docs" && a.area !== "agenda");
+  if (!lista.length) return <span style={{ fontSize: 11.5, fontWeight: 700, color: "#16a34a" }}>✓ Sem pendências</span>;
+  const criticos = lista.filter(a => a.nivel === "erro").length;
+  const cor = criticos ? "#dc2626" : "#d97706";
+  return (
+    <div style={{ position: "relative" }}>
+      <button onClick={() => setAberto(a => !a)}
+        style={{ background: cor + "14", color: cor, border: `1px solid ${cor}55`, borderRadius: 999, padding: "5px 12px", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
+        ⚠ {lista.length} pendência{lista.length > 1 ? "s" : ""}
+      </button>
+      {aberto && (
+        <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 20, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,.12)", padding: "10px 14px", width: 360 }}>
+          {lista.map((a, i) => (
+            <div key={i} style={{ fontSize: 12, color: "#334155", padding: "3px 0", display: "flex", gap: 6 }}>
+              <span style={{ color: a.nivel === "erro" ? "#dc2626" : "#d97706", fontWeight: 800 }}>{a.nivel === "erro" ? "✕" : "!"}</span>{a.texto}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -678,8 +727,10 @@ function ChecklistObra({ itens, onChange }) {
   );
 }
 
-function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque, onEntradaEstoque, onAtividade, atividadeVersao = 0 }) {
-  const [expandedId, setExpandedId] = useState(null);
+function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque, onEntradaEstoque, onAtividade, atividadeVersao = 0, itemAberto = null, onItemAberto, onImprimirMedicao, secaoFoco = null }) {
+  // Item expandido mora na view (#/obra/2729/item/5): voltar de outra tela reabre o mesmo item.
+  const expandedId = itemAberto;
+  const setExpandedId = (id) => onItemAberto?.(id);
   const [localObra, setLocalObra] = useState(obra);
   const [nAnexos, setNAnexos] = useState(null); // resumo da seção Anexos (conhecido quando ela abre)
   const [lendoAnexo, setLendoAnexo] = useState(null); // anexo aberto na leitura com IA
@@ -748,6 +799,10 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
     update(updated);
   }
   function toggleEtapa(id, etapa) {
+    // Obra nova: a etapa só marca com a anterior pronta (e a Produção, com o material comprado).
+    const item = localObra.itens.find(i => i.id === id);
+    const lib = item?.etapas?.[etapa]?.feito ? liberacaoDesmarcar(localObra, item, etapa) : liberacaoEtapa(localObra, item, etapa);
+    if (!lib.ok) { window.alert(lib.motivo); return; }
     const updated = { ...localObra, itens: localObra.itens.map(i => i.id === id
       ? { ...i, etapas: { ...i.etapas, [etapa]: { ...i.etapas[etapa], feito: !i.etapas[etapa].feito } } }
       : i) };
@@ -776,6 +831,12 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
 
   const cad = localObra.cadastro || {};
   const semAgenda = schedule.filter(s => !s.agendado).length;
+  // Obra nova (regras de etapas) sempre mostra o chip de medição; a antiga só depois de medir.
+  const precisaMedir = localObra.regrasEtapas === 2;
+  const medicaoObra = localObra.itens.reduce((acc, i) => {
+    const c = contagemMedicao(i);
+    return { feitas: acc.feitas + c.feitas, total: acc.total + c.total };
+  }, { feitas: 0, total: 0 });
   const checklist = localObra.checklist || [];
   const checkFeitos = checklist.filter(c => c.feito).length;
   const nomesEquipes = equipesObra.map(id => equipes.find(e => e.id === id)?.nome).filter(Boolean);
@@ -784,6 +845,10 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
   const ROTULO_STATUS = { status: "Status", statusCompras: "Compras", statusFabricacao: "Fabricação", statusInstalacao: "Instalação" };
   function mudarStatus(campo, valor) {
     if (localObra[campo] === valor) return;
+    if (campo === "statusFabricacao") {
+      const lib = liberacaoStatusFabricacao(localObra, valor);
+      if (!lib.ok) { window.alert(lib.motivo); return; }
+    }
     onAtividade?.(`${ROTULO_STATUS[campo]}: ${localObra[campo] || "—"} → ${valor}`);
     update({ ...localObra, [campo]: valor });
   }
@@ -827,20 +892,21 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
             <input type="date" value={localObra.dataLimiteEntrega || ""}
               onChange={e => update({ ...localObra, dataLimiteEntrega: e.target.value })} style={campoData} />
           </div>
+          <ChipPendencias obra={localObra} />
         </div>
       </div>
 
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap", padding: "16px 20px" }}>
         {/* Esquerda: seções recolhíveis. Itens, Compras e Financeiro só abrem no clique. */}
         <div style={{ flex: "999 1 600px", minWidth: 0 }}>
-          <Secao id="cadastro" titulo="Cadastro do cliente" icone="🪪" padraoAberta
+          <Secao id="cadastro" foco={secaoFoco === "cadastro"} titulo="Cadastro do cliente" icone="🪪" padraoAberta
             resumo={[cad.contatoNome, cad.telefones].filter(Boolean).join(" · ") || "a preencher"}>
             <div style={{ padding: 16 }}>
               <CadastroObra obra={localObra} onChange={update} comLinks />
             </div>
           </Secao>
 
-          <Secao id="anexos" titulo="Anexos" icone="📎" padraoAberta
+          <Secao id="anexos" foco={secaoFoco === "anexos"} titulo="Anexos" icone="📎" padraoAberta
             resumo={nAnexos === null ? "" : nAnexos === 0 ? "nenhum arquivo" : `${nAnexos} arquivo${nAnexos === 1 ? "" : "s"}`}>
             <div style={{ padding: 16 }}>
               <AnexosObra obraId={obra.id} capa={localObra.capa} recarregar={atividadeVersao}
@@ -854,13 +920,31 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
               onAplicar={(nova, atividade) => { update(nova); onAtividade?.(atividade); setLendoAnexo(null); }} />
           )}
 
-          <Secao id="checklist" titulo="Checklist de abertura" icone="☑️" resumo={`${checkFeitos}/${checklist.length}`}>
+          <Secao id="checklist" foco={secaoFoco === "checklist"} titulo="Checklist de abertura" icone="☑️" resumo={`${checkFeitos}/${checklist.length}`}>
             <ChecklistObra itens={checklist}
               onChange={(ck, atividade) => { update({ ...localObra, checklist: ck }); if (atividade) onAtividade?.(atividade); }} />
           </Secao>
 
-          <Secao id="itens" titulo="Itens e cronograma" icone="🪟"
+          <Secao id="itens" foco={secaoFoco === "itens"} titulo="Itens e cronograma" icone="🪟"
             resumo={localObra.itens.length === 0 ? "sem itens" : `${localObra.itens.length} ite${localObra.itens.length === 1 ? "m" : "ns"} · ${totalPct}%${semAgenda ? ` · ${semAgenda} sem agendamento` : ""}`}>
+            {obraComTrava(localObra) && localObra.itens.length > 0 && (
+              <div style={{ background: "#eff6ff", borderBottom: "1px solid #bfdbfe", padding: "8px 20px", fontSize: 12, color: "#1e40af" }}>
+                🔒 Etapas em sequência: <b>Conf. Medidas</b> libera com o item medido · <b>Produção</b> com Conf. Medidas feita e o material
+                comprado com previsão de entrega (seção Compras) · <b>Instalação</b> depois da Produção · <b>Acabamentos</b> depois da Instalação.
+              </div>
+            )}
+            {localObra.itens.length > 0 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 20px", borderBottom: "1px solid #e2e8f0", background: "#fff", flexWrap: "wrap" }}>
+                <span style={{ fontSize: 12, color: "#475569" }}>
+                  📐 Medição: <b style={{ color: medicaoObra.feitas >= medicaoObra.total ? "#16a34a" : "#b45309" }}>{medicaoObra.feitas}/{medicaoObra.total}</b> unidades medidas
+                  <span style={{ color: "#94a3b8" }}> · abra o item para lançar as medidas</span>
+                </span>
+                <button onClick={() => onImprimirMedicao?.("branco")} title="Folha em branco para anotar as medidas na obra"
+                  style={{ marginLeft: "auto", background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>🖨 Ordem de medição (em branco)</button>
+                <button onClick={() => onImprimirMedicao?.("preenchida")} title="Folha com as medidas lançadas"
+                  style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 7, padding: "6px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>🖨 Ordem de medição (preenchida)</button>
+              </div>
+            )}
             {localObra.itens.length === 0 && (
               <div style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0", padding: "10px 20px", fontSize: 13, color: "#475569" }}>
                 📄 Esta obra ainda não tem itens. Importe o PDF do orçamento pelo menu <b>☰ → Importar PDF</b> — com o mesmo nº de
@@ -869,7 +953,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
             )}
             {!hasStart && localObra.itens.length > 0 && (
               <div style={{ background: "#fffbeb", borderBottom: "1px solid #fde68a", padding: "10px 20px", fontSize: 13, color: "#92400e" }}>
-                📅 Defina a <b>data de início</b> da obra no campo <b>Início</b> (no cabeçalho) para posicionar o cronograma e exibir a obra no calendário.
+                📅 Defina a <b>data de início</b> da obra no campo <b>Início</b> (no cabeçalho) para posicionar a linha do tempo dos itens. O calendário é preenchido à parte, arrastando obra × equipe.
               </div>
             )}
 
@@ -904,7 +988,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
             const feitas = ETAPAS.filter(e => (item.etapas || {})[e] && item.etapas[e].feito);
             const etapaAtual = feitas.length ? feitas[feitas.length - 1] : ETAPAS[0];
             const barColor = ETAPA_COLORS[etapaAtual];
-            const expanded = expandedId === item.id;
+            const expanded = expandedId != null && String(expandedId) === String(item.id);
 
             return (
               <div key={item.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
@@ -916,6 +1000,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
                         <span style={{ color: "#94a3b8", marginRight: 6 }}>#{item.id}</span>
                         {item.tipo && <span style={{ color: "#c9a227", marginRight: 4 }}>{item.tipo}</span>}
                         {item.descricao}
+                        {(item.medicao || precisaMedir) && <ChipMedicao item={item} />}
                       </div>
                       <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 1 }}>
                         {item.L}×{item.H}mm · {item.qtd}un · {sch.agendado
@@ -972,14 +1057,18 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
                       </div>
                       {ETAPAS.map(etapa => {
                         const e = (item.etapas || {})[etapa] || { feito: false, inicio: "", entrega: "" };
+                        const lib = e.feito ? liberacaoDesmarcar(localObra, item, etapa) : liberacaoEtapa(localObra, item, etapa);
                         return (
                           <div key={etapa} onClick={ev => ev.stopPropagation()}
                             style={{ padding: "8px 10px", borderRadius: 7, background: e.feito ? ETAPA_COLORS[etapa] + "14" : "#f8fafc", border: `1px solid ${e.feito ? ETAPA_COLORS[etapa] + "55" : "#e2e8f0"}`, marginBottom: 6 }}>
-                            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 12, marginBottom: 6 }}>
-                              <input type="checkbox" checked={e.feito} onChange={() => toggleEtapa(item.id, etapa)} style={{ accentColor: ETAPA_COLORS[etapa] }} />
-                              <span style={{ fontWeight: 700, color: e.feito ? ETAPA_COLORS[etapa] : "#64748b" }}>{etapa}</span>
+                            <label title={lib.ok ? "" : lib.motivo} style={{ display: "flex", alignItems: "center", gap: 8, cursor: lib.ok ? "pointer" : "not-allowed", fontSize: 12, marginBottom: 6 }}>
+                              <input type="checkbox" checked={e.feito} disabled={!lib.ok} onChange={() => toggleEtapa(item.id, etapa)} style={{ accentColor: ETAPA_COLORS[etapa] }} />
+                              <span style={{ fontWeight: 700, color: e.feito ? ETAPA_COLORS[etapa] : "#64748b" }}>{!lib.ok && !e.feito ? "🔒 " : ""}{etapa}</span>
                               <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 700, color: "#94a3b8" }}>{PESOS[etapa]}%</span>
                             </label>
+                            {!lib.ok && !e.feito && (
+                              <div style={{ fontSize: 10.5, color: "#b45309", margin: "-2px 0 6px 22px", lineHeight: 1.35 }}>{lib.motivo}</div>
+                            )}
                             <div style={{ display: "flex", gap: 6 }}>
                               <div style={{ flex: 1 }}>
                                 <div style={{ fontSize: 9, color: "#94a3b8", marginBottom: 2 }}>Início previsto</div>
@@ -998,6 +1087,8 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
                         );
                       })}
                     </div>
+
+                    <MedicaoItem item={item} onChange={m => updateItem(item.id, "medicao", m)} />
 
                     <div style={{ background: "#fff", borderRadius: 10, padding: 14, border: "1px solid #e2e8f0", minWidth: 240, display: "flex", flexDirection: "column", gap: 12 }}>
                       <div style={{ fontSize: 10, fontWeight: 700, color: "#1a1a1a", textTransform: "uppercase", borderBottom: "1px solid #e2e8f0", paddingBottom: 6 }}>📅 Agendamento deste item</div>
@@ -1060,7 +1151,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
       </div>
           </Secao>
 
-          <Secao id="compras" titulo="Compras" icone="🛒"
+          <Secao id="compras" foco={secaoFoco === "compras"} titulo="Compras" icone="🛒"
             resumo={<>{localObra.statusCompras}{alertaCompras && <span style={{ color: "#dc2626", fontWeight: 800 }}> · 🚩 a comprar acima do a receber</span>}</>}>
             <div style={{ padding: "12px 16px 16px" }}>
               {alertaCompras && (
@@ -1072,12 +1163,12 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
               )}
               <ComprasObra compras={localObra.compras} sugestoes={fornecedores}
                 onChange={c => update({ ...localObra, compras: c })}
-                onEntradaEstoque={onEntradaEstoque} onAbrirDocEstoque={onAbrirDocEstoque} />
+                onEntradaEstoque={onEntradaEstoque} onAbrirDocEstoque={onAbrirDocEstoque} onAtividade={onAtividade} />
               <SaidasEstoqueObra obraId={obra.id} onAbrirDoc={onAbrirDocEstoque} />
             </div>
           </Secao>
 
-          <Secao id="financeiro" titulo="Financeiro" icone="💰"
+          <Secao id="financeiro" foco={secaoFoco === "financeiro"} titulo="Financeiro" icone="💰"
             resumo={<>Recebido <Dinheiro v={localObra.valorRecebido || 0} /> · A receber <Dinheiro v={valorAReceber} /></>}>
             <div style={{ padding: 16, display: "flex", gap: 28, alignItems: "center", flexWrap: "wrap" }}>
               <PieSigilo
@@ -1133,7 +1224,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
             </div>
           </Secao>
 
-          <Secao id="equipe" titulo="Equipe e status" icone="👷"
+          <Secao id="equipe" foco={secaoFoco === "equipe"} titulo="Equipe e status" icone="👷"
             resumo={nomesEquipes.length ? nomesEquipes.join(", ") : "sem equipe definida"}>
             <div style={{ padding: "12px 16px 16px", display: "flex", flexDirection: "column", gap: 14 }}>
               <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
@@ -1924,19 +2015,23 @@ function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar,
   );
 }
 
-function CalendarView({ obras, equipes, agenda, lembretes, onSalvarAgendamento, onExcluirAgendamento, onSalvarLembrete, onExcluirLembrete, onSelectObra, onEmitirOS }) {
+function CalendarView({ obras, equipes, agenda, lembretes, mesSel, diaSel, onNavegar, onVoltarDia, onSalvarAgendamento, onExcluirAgendamento, onSalvarLembrete, onExcluirLembrete, onSelectObra, onEmitirOS }) {
   const hoje = new Date();
   // O helper global hoje() está sombreado pelo Date acima, então monta a string a partir dele.
   const hojeISO = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}-${String(hoje.getDate()).padStart(2, "0")}`;
-  const [ano, setAno] = useState(hoje.getFullYear());
-  const [mes, setMes] = useState(hoje.getMonth()); // 0-11
-  const [diaAberto, setDiaAberto] = useState(null); // "YYYY-MM-DD" — dia expandido, sem router
+  // Mês e dia aberto vêm da view (rotas.js): voltar de uma obra aberta pelo dia cai no mesmo dia.
+  const mesValido = /^\d{4}-\d{2}$/.test(mesSel || "") ? mesSel : (diaSel ? diaSel.slice(0, 7) : "");
+  const ano = mesValido ? Number(mesValido.slice(0, 4)) : hoje.getFullYear();
+  const mes = mesValido ? Number(mesValido.slice(5, 7)) - 1 : hoje.getMonth(); // 0-11
+  const diaAberto = diaSel || null; // "YYYY-MM-DD" — dia expandido
+  const chaveMes = (a, m) => `${a}-${String(m + 1).padStart(2, "0")}`;
+  const irMes = (a, m) => onNavegar({ mes: chaveMes(a, m) }, "replace");
   const [emitindo, setEmitindo] = useState(false);
   const [osIni, setOsIni] = useState(hojeISO);
   const [osFim, setOsFim] = useState(hojeISO);
 
-  function prevMes() { if (mes === 0) { setMes(11); setAno(a => a - 1); } else setMes(m => m - 1); }
-  function nextMes() { if (mes === 11) { setMes(0); setAno(a => a + 1); } else setMes(m => m + 1); }
+  function prevMes() { if (mes === 0) irMes(ano - 1, 11); else irMes(ano, mes - 1); }
+  function nextMes() { if (mes === 11) irMes(ano + 1, 0); else irMes(ano, mes + 1); }
 
   // Build calendar grid (start on Sunday)
   const primeiroDia = new Date(ano, mes, 1);
@@ -1975,7 +2070,7 @@ function CalendarView({ obras, equipes, agenda, lembretes, onSalvarAgendamento, 
     return (
       <DiaAgenda dia={diaAberto} obras={obras} equipes={equipes} agenda={agenda}
         onSalvar={onSalvarAgendamento} onExcluir={onExcluirAgendamento}
-        onVoltar={() => setDiaAberto(null)} onAbrirObra={onSelectObra}
+        onVoltar={onVoltarDia} onAbrirObra={onSelectObra}
         onEmitirOS={onEmitirOS} />
     );
   }
@@ -1991,7 +2086,7 @@ function CalendarView({ obras, equipes, agenda, lembretes, onSalvarAgendamento, 
           <button onClick={prevMes} style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, width: 34, height: 34, fontSize: 16, cursor: "pointer" }}>‹</button>
           <div style={{ fontSize: 16, fontWeight: 800, color: "#1a1a1a", minWidth: 170, textAlign: "center" }}>{MESES[mes]} {ano}</div>
           <button onClick={nextMes} style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, width: 34, height: 34, fontSize: 16, cursor: "pointer" }}>›</button>
-          <button onClick={() => { setAno(hoje.getFullYear()); setMes(hoje.getMonth()); }}
+          <button onClick={() => irMes(hoje.getFullYear(), hoje.getMonth())}
             style={{ background: "#c9a227", color: "#fff", border: "none", borderRadius: 8, padding: "0 14px", height: 34, fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Hoje</button>
           <button onClick={() => { definirPeriodo(hojeISO, hojeISO); setEmitindo(true); }}
             title="Imprime a O.S. de um dia, de uma semana ou do período que você escolher"
@@ -2072,7 +2167,7 @@ function CalendarView({ obras, equipes, agenda, lembretes, onSalvarAgendamento, 
           const lista = dia ? agendaNoDia(dia) : [];
           return (
             <div key={i}
-              onClick={() => dia && setDiaAberto(diaStr(dia))}
+              onClick={() => dia && onNavegar({ mes: chaveMes(ano, mes), dia: diaStr(dia) }, "push")}
               title={dia ? "Clique para definir os serviços do dia" : undefined}
               style={{ minHeight: 110, minWidth: 0, background: dia ? "#fff" : "transparent", borderRadius: 8, border: dia ? "1px solid #e2e8f0" : "none", padding: dia ? 6 : 0, boxShadow: ehHoje(dia) ? "0 0 0 2px #c9a227" : "none", cursor: dia ? "pointer" : "default" }}>
               {dia && (
@@ -2458,9 +2553,9 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
   const grupos = gruposTodos.filter(g => pasta === "concluidas" ? g.concluido : !g.concluido);
   const obras = grupos.flatMap(g => g.contratos);   // os contratos desta pasta, para os KPIs
 
-  const [search, setSearch] = useState("");
-  const [filterStatus, setFilterStatus] = useState("Todos");
-  // Ordenação escolhida sobrevive ao recarregar a página (a busca e o filtro, não: começam limpos)
+  // Busca e filtro sobrevivem ao voltar de uma obra (sessão da aba); a ordenação, até ao recarregar.
+  const [search, setSearch] = useEstadoSessao(`pasta.${pasta}.busca`, "");
+  const [filterStatus, setFilterStatus] = useEstadoSessao(`pasta.${pasta}.status`, "Todos");
   const [sortBy, setSortBy] = useState(() => lerPref("dash.sortBy", "ordem")); // ordem | numero | nome | pct | itens | pecas
   const [sortDir, setSortDir] = useState(() => lerPref("dash.sortDir", "asc")); // asc | desc
   useEffect(() => { gravarPref("dash.sortBy", sortBy); }, [sortBy]);
@@ -2842,9 +2937,10 @@ function OrdemServicoPrint({ agenda, obras, equipes, inicio, fim, onBack }) {
 
 
 // ─── MENU LATERAL ─────────────────────────────────────────────────────────────
-function SideMenu({ open, onClose, onNav, onImport, onExportar, current }) {
+function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos = 0 }) {
   const items = [
     { key: "dashboard", label: "Obras", icon: "🏠" },
+    { key: "avisos", label: "Central de avisos", icon: "⚠️", badge: nAvisos },
     { key: "calendar", label: "Calendário", icon: "📅" },
     { key: "diario", label: "Diário de Obras", icon: "📓" },
     { key: "equipes", label: "Equipes", icon: "👷" },
@@ -2863,8 +2959,11 @@ function SideMenu({ open, onClose, onNav, onImport, onExportar, current }) {
         <div style={{ borderTop: "1px solid #333", margin: "4px 0 8px" }} />
         {items.map(it => (
           <button key={it.key} onClick={() => onNav(it.key)}
-            style={{ textAlign: "left", background: current === it.key ? "#2a2a2a" : "transparent", color: current === it.key ? "#fff" : "#d1d5db", borderLeft: current === it.key ? "3px solid #c9a227" : "3px solid transparent", border: "none", borderLeftWidth: 3, borderLeftStyle: "solid", borderLeftColor: current === it.key ? "#c9a227" : "transparent", padding: "13px 22px", fontSize: 14, fontWeight: 600, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
+            style={{ textAlign: "left", background: current === it.key ? "#2a2a2a" : "transparent", color: current === it.key ? "#fff" : "#d1d5db", border: "none", borderLeftWidth: 3, borderLeftStyle: "solid", borderLeftColor: current === it.key ? "#c9a227" : "transparent", padding: "13px 22px", fontSize: 14, fontWeight: 600, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
             <span style={{ fontSize: 16 }}>{it.icon}</span> {it.label}
+            {it.badge > 0 && (
+              <span title="Obras com pendência crítica" style={{ marginLeft: "auto", background: "#dc2626", color: "#fff", borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 800 }}>{it.badge}</span>
+            )}
           </button>
         ))}
         <div style={{ borderTop: "1px solid #333", margin: "8px 0" }} />
@@ -2994,7 +3093,7 @@ function InputDataHora({ valor, onChange, disabled, cor = "#1e293b", title, hora
 }
 
 function novoCronograma(titulo, obra) {
-  const hoje = new Date().toISOString().split("T")[0];
+  const hoje = hojeISO();
   return {
     id: "cr_" + Date.now(),
     titulo: titulo || "Novo Cronograma",
@@ -3015,7 +3114,7 @@ function nomeCurtoItem(item) {
 }
 
 function novoCronogramaComModelo(titulo, obra, temVidros) {
-  const hoje = new Date().toISOString().split("T")[0];
+  const hoje = hojeISO();
   const nomeObra = (obra?.obra || "").trim() || titulo || "Projeto";
   const itens = obra?.itens || [];
   const tasks = [];
@@ -3830,9 +3929,19 @@ export default function App() {
   // QR da etiqueta abre o app em ?item=EST-00012. Lido uma vez só, antes do login, e
   // guardado aqui para sobreviver à tela de login (ela é um early-return deste componente).
   const [itemQR, setItemQR] = useState(() => new URLSearchParams(window.location.search).get("item"));
-  // Navegação: view atual + pilha de histórico (botão voltar universal)
-  const [view, setView] = useState({ type: "dashboard" });
-  const [history, setHistory] = useState([]);
+  // Navegação: a view vive no histórico do navegador (ver rotas.js). F5 reabre a mesma tela,
+  // e o voltar do navegador e o "← Voltar" do app andam pela mesma pilha.
+  const [view, setView] = useState(() => {
+    const st = window.history.state;
+    const v = st?.app && st.view ? st.view : hashParaView(window.location.hash);
+    if (!st?.app) window.history.replaceState({ app: true, idx: 0, view: v }, "", window.location.pathname + window.location.search + viewParaHash(v));
+    return v;
+  });
+  const [idxHistorico, setIdxHistorico] = useState(() => window.history.state?.idx || 0);
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const scrollAlvo = useRef(window.history.state?.scrollY ?? null); // posição a restaurar depois do render
+  const pularGuarda = useRef(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState("");
@@ -3843,7 +3952,8 @@ export default function App() {
   const filaObra = useRef({});     // id → promise da última gravação daquela obra
   const revObra = useRef({});      // id → nº da última alteração local
   const revSalva = useRef({});     // id → nº da última alteração confirmada pelo banco
-  const geracaoObra = useRef({});  // id → sobe ao recarregar; gravação velha na fila desiste
+  const geracaoObra = useRef({});
+  const obraPendente = useRef({}); // id → gravação esperando o debounce (para disparar ao sair)  // id → sobe ao recarregar; gravação velha na fila desiste
   const conflitosRef = useRef(new Set());
   const [conflitos, setConflitos] = useState([]);           // obras em conflito, para a faixa vermelha
   const [atividadeVersao, setAtividadeVersao] = useState(0); // recarrega comentários e anexos da obra aberta
@@ -3852,18 +3962,51 @@ export default function App() {
   const [dirtyCronoIds, setDirtyCronoIds] = useState(() => new Set()); // cronogramas com gravação pendente (debounce)
   const [pendingExit, setPendingExit] = useState(null); // ação de navegação adiada até o usuário decidir sobre alterações não salvas
 
+  // Gravação debounced de agenda, lembrete e diário. `pendentes` guarda a gravação que ainda
+  // está esperando o timer, para dar para disparar na hora quando a aba some ou fecha — antes,
+  // fechar a aba logo depois de digitar perdia o texto.
+  const pendentes = useRef({});
+  const agendarGravacao = useCallback((id, gravar) => {
+    const t = saveTimers.current;
+    if (t[id]) clearTimeout(t[id]);
+    pendentes.current[id] = gravar;
+    t[id] = setTimeout(() => { delete t[id]; delete pendentes.current[id]; gravar(); }, 700);
+  }, []);
+  const cancelarGravacao = useCallback((id) => {
+    const t = saveTimers.current;
+    if (t[id]) { clearTimeout(t[id]); delete t[id]; }
+    delete pendentes.current[id];
+  }, []);
+  const gravarPendentesAgora = useCallback(() => {
+    for (const [id, gravar] of Object.entries(pendentes.current)) { cancelarGravacao(id); gravar(); }
+  }, [cancelarGravacao]);
+  useEffect(() => {
+    function aoEsconder() { if (document.visibilityState === "hidden") gravarPendentesAgora(); }
+    document.addEventListener("visibilitychange", aoEsconder);
+    return () => document.removeEventListener("visibilitychange", aoEsconder);
+  }, [gravarPendentesAgora]);
+
   // Avisa antes de fechar a aba/navegador se houver cronograma com gravação pendente
   useEffect(() => {
-    // Também obra com alteração que ainda não chegou ao banco (debounce, gravação falhada ou conflito).
-    function handler(e) { if (dirtyCronoIds.size > 0 || temObraPendente()) { e.preventDefault(); e.returnValue = ""; } }
+    // Também obra com alteração que ainda não chegou ao banco (debounce, gravação falhada ou conflito),
+    // e agenda/lembrete/diário esperando o debounce (esses são disparados na hora).
+    function handler(e) {
+      const temPendente = Object.keys(pendentes.current).length > 0;
+      if (temPendente) gravarPendentesAgora();
+      if (dirtyCronoIds.size > 0 || temObraPendente() || temPendente) { e.preventDefault(); e.returnValue = ""; }
+    }
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [dirtyCronoIds]);
+  }, [dirtyCronoIds, gravarPendentesAgora]);
 
   // Sessão de login
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => { setSession(data.session); setAuthReady(true); });
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => setSession(s));
+    // Ao voltar para a aba, o supabase-js reemite SIGNED_IN/TOKEN_REFRESHED com um objeto de
+    // sessão novo. Trocar o estado por ele recarregava tudo e desmontava a tela aberta (o dia do
+    // calendário, o registro do diário, o item expandido). Mesmo usuário = mantém o objeto.
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) =>
+      setSession(prev => (prev && s && prev.user?.id === s.user?.id) ? prev : s));
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -3877,9 +4020,11 @@ export default function App() {
     document.head.appendChild(s);
   }, []);
 
-  // Carrega dados do banco após login
+  // Carrega dados do banco após login. Depende só do id do usuário: renovação de token não
+  // recarrega nada.
+  const userId = session?.user?.id || null;
   useEffect(() => {
-    if (!session) { setObras([]); setEquipes([]); setCronogramas([]); setAgenda([]); setLembretes([]); setDiarios([]); return; }
+    if (!userId) { setObras([]); setEquipes([]); setCronogramas([]); setAgenda([]); setLembretes([]); setDiarios([]); return; }
     let cancel = false;
     setLoading(true);
     (async () => {
@@ -3907,7 +4052,7 @@ export default function App() {
       }
     })();
     return () => { cancel = true; };
-  }, [session]);
+  }, [userId]);
 
   // Carga separada do Promise.all acima: sem a migration_estoque.sql rodada, o resto do
   // app abre normal e só a tela de Estoque mostra o aviso.
@@ -3921,15 +4066,16 @@ export default function App() {
     }
   }, []);
   useEffect(() => {
-    if (!session) { setEstoqueItens([]); return; }
+    if (!userId) { setEstoqueItens([]); return; }
     recarregarEstoque();
-  }, [session, recarregarEstoque]);
+  }, [userId, recarregarEstoque]);
 
   useEffect(() => {
     if (!session || !itemQR) return;
-    setView({ type: "estoque", codigo: itemQR });
-    setHistory([]);
-    window.history.replaceState(null, "", window.location.pathname); // F5 não reabre o item
+    // replace (e sem o ?item= na URL): F5 fica na ficha pelo hash, sem reabrir o QR.
+    const v = { type: "estoque", tela: { tipo: "item", codigo: itemQR } };
+    escreverHistorico("replace", v);
+    setView(v);
     setItemQR(null);
   }, [session, itemQR]);
 
@@ -3959,8 +4105,9 @@ export default function App() {
     const geracao = geracaoObra.current[id] || 0;
     const t = saveTimers.current;
     if (t[id]) clearTimeout(t[id]);
-    t[id] = setTimeout(() => {
+    const executar = () => {
       delete t[id];
+      delete obraPendente.current[id];
       enfileirar(id, async () => {
         if (conflitosRef.current.has(id) || (geracaoObra.current[id] || 0) !== geracao) return;
         try {
@@ -3975,41 +4122,35 @@ export default function App() {
           }
         }
       });
-    }, 700);
+    };
+    obraPendente.current[id] = executar;
+    t[id] = setTimeout(executar, 700);
   }, [enfileirar]);
 
   // Agenda: o estado muda na hora e a gravação é debounced por serviço (a descrição é digitada,
   // não vale um upsert por tecla). Mesmo padrão de persistObra.
   const handleSaveAgendamento = useCallback((ag) => {
     setAgenda(prev => prev.some(a => a.id === ag.id) ? prev.map(a => a.id === ag.id ? ag : a) : [...prev, ag]);
-    const t = saveTimers.current;
-    if (t[ag.id]) clearTimeout(t[ag.id]);
-    t[ag.id] = setTimeout(() => {
-      upsertAgendamento(ag).catch(err => showError("Erro ao salvar a agenda (rodou a migration_agenda.sql?): " + err.message));
-    }, 700);
-  }, []);
+    agendarGravacao(ag.id, () =>
+      upsertAgendamento(ag).catch(err => showError("Erro ao salvar a agenda (rodou a migration_agenda.sql?): " + err.message)));
+  }, [agendarGravacao]);
 
   const handleDeleteAgendamento = useCallback((id) => {
-    const t = saveTimers.current;
-    if (t[id]) { clearTimeout(t[id]); delete t[id]; }
+    cancelarGravacao(id);
     setAgenda(prev => prev.filter(a => a.id !== id));
     dbDeleteAgendamento(id).catch(err => showError("Erro ao remover da agenda: " + err.message));
-  }, []);
+  }, [cancelarGravacao]);
 
   // Lembretes e diário: mesmo desenho da agenda — estado muda na hora, gravação
   // debounced por id (texto e observações são digitados, não vale upsert por tecla).
   const handleSaveLembrete = useCallback((l) => {
     setLembretes(prev => prev.some(x => x.id === l.id) ? prev.map(x => x.id === l.id ? l : x) : [...prev, l]);
-    const t = saveTimers.current;
-    if (t[l.id]) clearTimeout(t[l.id]);
-    t[l.id] = setTimeout(() => {
-      upsertLembrete(l).catch(err => showError("Erro ao salvar o lembrete (rodou a migration_lembretes.sql?): " + err.message));
-    }, 700);
-  }, []);
+    agendarGravacao(l.id, () =>
+      upsertLembrete(l).catch(err => showError("Erro ao salvar o lembrete (rodou a migration_lembretes.sql?): " + err.message)));
+  }, [agendarGravacao]);
 
   const handleDeleteLembrete = useCallback((id) => {
-    const t = saveTimers.current;
-    if (t[id]) { clearTimeout(t[id]); delete t[id]; }
+    cancelarGravacao(id);
     const anterior = lembretes.find(l => l.id === id);
     setLembretes(prev => prev.filter(l => l.id !== id));
     // Se o banco recusar, o lembrete volta para a lista em vez de sumir e reaparecer no F5.
@@ -4017,47 +4158,114 @@ export default function App() {
       showError("Erro ao excluir o lembrete: " + err.message);
       if (anterior) setLembretes(prev => prev.some(l => l.id === id) ? prev : [...prev, anterior]);
     });
-  }, [lembretes]);
+  }, [lembretes, cancelarGravacao]);
 
   const handleSaveDiario = useCallback((d) => {
     setDiarios(prev => prev.some(x => x.id === d.id) ? prev.map(x => x.id === d.id ? d : x) : [...prev, d]);
-    const t = saveTimers.current;
-    if (t[d.id]) clearTimeout(t[d.id]);
-    t[d.id] = setTimeout(() => {
-      upsertDiario(d).catch(err => showError("Erro ao salvar o diário (rodou a migration_diario.sql?): " + err.message));
-    }, 700);
-  }, []);
+    agendarGravacao(d.id, () =>
+      upsertDiario(d).catch(err => showError("Erro ao salvar o diário (rodou a migration_diario.sql?): " + err.message)));
+  }, [agendarGravacao]);
 
   const handleDeleteDiario = useCallback((id) => {
-    const t = saveTimers.current;
-    if (t[id]) { clearTimeout(t[id]); delete t[id]; }
+    cancelarGravacao(id);
     setDiarios(prev => prev.filter(d => d.id !== id));
     dbDeleteDiario(id).catch(err => showError("Erro ao excluir o registro do diário: " + err.message));
-  }, []);
+  }, [cancelarGravacao]);
 
   // Há um cronograma com gravação pendente e é justamente o que está aberto agora?
   const isCronoDirty = view.type === "cronograma" && dirtyCronoIds.has(view.id);
+  const isCronoDirtyRef = useRef(false);
+  isCronoDirtyRef.current = isCronoDirty;
   // Roda a navegação direto, ou adia para depois de perguntar "salvar antes de sair?" se houver pendência.
   const guardNav = useCallback((run) => { if (isCronoDirty) setPendingExit(() => run); else run(); }, [isCronoDirty]);
 
-  // Navega para uma nova view (empilha a atual no histórico)
-  const navTo = useCallback((v) => guardNav(() => { setHistory(h => [...h, view]); setView(v); setMenuOpen(false); }), [view, guardNav]);
+  // Grava a view no histórico do navegador. Antes de empilhar, guarda o scroll da tela atual
+  // na entrada dela — é o que o voltar restaura.
+  function escreverHistorico(modo, v) {
+    const atual = window.history.state || {};
+    const idx = modo === "push" ? (atual.idx || 0) + 1 : (atual.idx || 0);
+    if (modo === "push") window.history.replaceState({ ...atual, scrollY: window.scrollY }, "");
+    const url = window.location.pathname + viewParaHash(v);
+    if (modo === "push") window.history.pushState({ app: true, idx, view: v }, "", url);
+    else window.history.replaceState({ app: true, idx, view: v, scrollY: atual.scrollY }, "", url);
+    setIdxHistorico(idx);
+  }
+  const irPara = useCallback((v) => {
+    escreverHistorico("push", v);
+    setView(v);
+    setMenuOpen(false);
+    window.scrollTo(0, 0);
+  }, []);
+
+  // Navega para uma nova view (nova entrada no histórico do navegador)
+  const navTo = useCallback((v) => guardNav(() => irPara(v)), [guardNav, irPara]);
   // Empilha sem o aviso de "não salvo". Só para abrir a impressão do cronograma: a lista
   // `cronogramas` já tem a versão em edição e o timer de gravação mora aqui no App, então ele
   // grava mesmo com o editor desmontado — o aviso só atrapalharia.
-  const navToSemGuarda = useCallback((v) => { setHistory(h => [...h, view]); setView(v); setMenuOpen(false); }, [view]);
-  // Substitui a view atual sem empilhar
-  const navReplace = useCallback((v) => guardNav(() => { setView(v); setMenuOpen(false); }), [guardNav]);
-  // Volta para a view anterior
+  const navToSemGuarda = irPara;
+  // Troca a view atual sem criar entrada: parâmetros da própria tela (mês do calendário, item
+  // expandido, subtela do estoque que não deve voltar). Não sai da tela, então não pergunta nada.
+  const navReplace = useCallback((v) => { escreverHistorico("replace", v); setView(v); setMenuOpen(false); }, []);
+  // Volta uma entrada — o mesmo que o botão do navegador. Sem entrada anterior do app (abriu
+  // pelo link ou F5 numa aba nova), sobe para a tela-mãe em vez de sair do sistema.
   const back = useCallback(() => guardNav(() => {
-    setHistory(h => {
-      if (h.length === 0) { setView({ type: "dashboard" }); return h; }
-      setView(h[h.length - 1]);
-      return h.slice(0, -1);
-    });
+    if ((window.history.state?.idx || 0) > 0) { pularGuarda.current = true; window.history.back(); }
+    else { const pai = paiDe(viewRef.current); escreverHistorico("replace", pai); setView(pai); }
   }), [guardNav]);
-  const goHome = useCallback(() => guardNav(() => { setView({ type: "dashboard" }); setHistory([]); setMenuOpen(false); }), [guardNav]);
+  const goHome = useCallback(() => guardNav(() => irPara({ type: "dashboard" })), [guardNav, irPara]);
+
+  // Voltar/avançar do navegador.
+  useEffect(() => {
+    function onPop(e) {
+      const st = e.state;
+      const nova = st?.app && st.view ? st.view : hashParaView(window.location.hash);
+      if (!st?.app) window.history.replaceState({ app: true, idx: 0, view: nova }, "");
+      if (isCronoDirtyRef.current && !pularGuarda.current) {
+        // Cronograma com alteração pendente: desfaz a saída e pergunta. Se o usuário confirmar,
+        // volta de novo sem perguntar.
+        const atual = viewRef.current;
+        window.history.pushState({ app: true, idx: (st?.idx || 0) + 1, view: atual }, "", window.location.pathname + viewParaHash(atual));
+        setPendingExit(() => () => { pularGuarda.current = true; window.history.back(); });
+        return;
+      }
+      pularGuarda.current = false;
+      scrollAlvo.current = st?.scrollY ?? 0;
+      setIdxHistorico(st?.idx || 0);
+      setView(nova);
+      setMenuOpen(false);
+    }
+    // Guarda o scroll antes de recarregar/fechar, para o F5 voltar ao mesmo ponto.
+    function guardarScroll() { window.history.replaceState({ ...(window.history.state || {}), scrollY: window.scrollY }, ""); }
+    window.history.scrollRestoration = "manual"; // o conteúdo chega depois; quem restaura é o efeito abaixo
+    window.addEventListener("popstate", onPop);
+    window.addEventListener("pagehide", guardarScroll);
+    return () => { window.removeEventListener("popstate", onPop); window.removeEventListener("pagehide", guardarScroll); };
+  }, []);
+
+  // Restaura o scroll da tela depois que ela renderiza (e depois da carga, no F5). Tenta por
+  // alguns quadros porque anexos e capas chegam depois e mudam a altura da página.
+  useEffect(() => {
+    if (scrollAlvo.current == null || loading) return;
+    const y = scrollAlvo.current;
+    scrollAlvo.current = null;
+    // Reaplica por ~1,5 s (anexos e capa chegam depois e empurram a página), e para assim que o
+    // usuário mexer — não dá para brigar com quem está rolando.
+    let parado = false;
+    const parar = () => { parado = true; };
+    const eventos = ["wheel", "touchstart", "keydown", "mousedown"];
+    eventos.forEach(ev => window.addEventListener(ev, parar, { passive: true, once: true }));
+    const inicio = performance.now();
+    const tentar = () => {
+      if (parado) return;
+      if (Math.abs(window.scrollY - y) > 2) window.scrollTo(0, y);
+      if (performance.now() - inicio < 1500) setTimeout(tentar, 80);
+      else eventos.forEach(ev => window.removeEventListener(ev, parar));
+    };
+    requestAnimationFrame(tentar);
+    return () => { parado = true; eventos.forEach(ev => window.removeEventListener(ev, parar)); };
+  }, [view, loading]);
   const openObra = useCallback((id) => navTo({ type: "gantt", obraId: id }), [navTo]);
+  const telaEstoque = useCallback((tela, modo) => (modo === "replace" ? navReplace : navTo)({ type: "estoque", tela }), [navTo, navReplace]);
 
   const updateObra = useCallback((updated) => {
     setObras(prev => prev.map(o => o.id === updated.id ? updated : o));
@@ -4084,6 +4292,7 @@ export default function App() {
       const { obra, versao } = await fetchObra(id);
       const t = saveTimers.current;
       if (t[id]) { clearTimeout(t[id]); delete t[id]; }
+      delete obraPendente.current[id];
       geracaoObra.current[id] = (geracaoObra.current[id] || 0) + 1;
       versaoObra.current[id] = versao;
       revObra.current[id] = 0;
@@ -4102,7 +4311,8 @@ export default function App() {
   const handleNovoContrato = useCallback(async ({ obra, arquivos }) => {
     const cats = new Set(arquivos.map(a => a.categoria));
     const marca = { ck_projeto: cats.has("projeto") || cats.has("foto"), ck_orcamento: cats.has("orcamento"), ck_contrato: cats.has("contrato") };
-    const base = normObra(obra);
+    // Obra nova nasce com a trava de etapas (regrasEtapas.js); as já cadastradas seguem livres.
+    const base = normObra({ ...obra, regrasEtapas: VERSAO_REGRAS, criadaEm: hoje() });
     const nova = { ...base, checklist: base.checklist.map(c => marca[c.id] ? { ...c, feito: true, feitoEm: hoje() } : c) };
     await criarObra(nova);
     registrarAtividade(nova.id, "Obra cadastrada");
@@ -4272,12 +4482,20 @@ export default function App() {
     }
   }, []);
   const handleDeleteCronograma = useCallback((id) => {
+    // Sem isto, uma edição feita logo antes de excluir gravava depois do DELETE e o cronograma
+    // reaparecia no F5.
+    const t = cronoTimer.current;
+    if (t[id]) { clearTimeout(t[id]); delete t[id]; }
+    setDirtyCronoIds(prev => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n; });
     setCronogramas(prev => prev.filter(x => x.id !== id));
     dbDeleteCronograma(id).catch(err => showError("Erro ao excluir cronograma: " + err.message));
   }, []);
 
   // Agenda obra × obra uma vez só: alimenta a tela macro e o início herdado do editor de cada obra.
   const macro = useMemo(() => agendarMacro(cronogramas), [cronogramas]);
+  // Contador do menu: obras abertas com algum aviso crítico (sem os anexos, que a central lê à parte).
+  const nAvisosCriticos = useMemo(() => obras.filter(o => o.status !== "Concluído"
+    && avisosDaObra(o, { agenda, cronogramas }).some(a => a.nivel === "erro")).length, [obras, agenda, cronogramas]);
 
   const handleImport = async (e) => {
     const file = e.target.files?.[0];
@@ -4302,7 +4520,7 @@ export default function App() {
         updateObra(mesclarImportacao(existente, lida));
         registrarAtividade(id, `Itens e valor atualizados pelo PDF "${file.name}"`);
       } else {
-        const nova = normObra(lida);
+        const nova = normObra({ ...lida, regrasEtapas: VERSAO_REGRAS, criadaEm: hoje() });
         await criarObra(nova);
         id = nova.id;
         registrarAtividade(id, `Obra importada do PDF "${file.name}"`);
@@ -4344,16 +4562,35 @@ export default function App() {
     }
   };
 
-  const handleLogout = async () => { ocultarValores(); await supabase.auth.signOut(); goHome(); };
+  // Sair espera as gravações pendentes: o timer que disparasse já sem sessão era barrado pelo
+  // RLS, voltava sem linha e virava um falso "conflito" que travava a obra no próximo login.
+  const handleLogout = async () => {
+    ocultarValores();
+    gravarPendentesAgora();
+    for (const [id, executar] of Object.entries(obraPendente.current)) { clearTimeout(saveTimers.current[id]); executar(); }
+    await Promise.all(Object.values(filaObra.current));
+    versaoObra.current = {}; filaObra.current = {}; revObra.current = {}; revSalva.current = {};
+    conflitosRef.current = new Set(); setConflitos([]);
+    await supabase.auth.signOut();
+    goHome();
+  };
 
   // Portões de acesso
   if (!authReady) return <CenteredMsg>Carregando…</CenteredMsg>;
   if (!session)   return <LoginScreen />;
 
-  // Views de impressão ocupam a tela toda (sem o shell do app)
+  // Views de impressão ocupam a tela toda (sem o shell do app). No F5 direto numa folha, espera
+  // a carga — senão aparecia "não encontrada" enquanto os dados chegavam.
+  if (loading && ["print", "medicaoPrint", "osPrint", "diarioPrint", "cronogramaPrint", "estoqueEtiquetas"].includes(view.type)) {
+    return <CenteredMsg>Carregando…</CenteredMsg>;
+  }
   if (view.type === "print") {
     const o = obras.find(x => x.id === view.obraId);
     return o ? <PrintView obra={o} onBack={back} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>;
+  }
+  if (view.type === "medicaoPrint") {
+    const o = obras.find(x => x.id === view.obraId);
+    return o ? <MedicaoPrint obra={o} modoInicial={view.modo} onBack={back} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>;
   }
   if (view.type === "osPrint") {
     return <OrdemServicoPrint agenda={agenda} obras={obras} equipes={equipes}
@@ -4381,12 +4618,12 @@ export default function App() {
 
   const userEmail = session.user?.email || "";
   const selectedObra = view.type === "gantt" ? obras.find(o => o.id === view.obraId) : null;
-  const canGoBack = history.length > 0 || view.type !== "dashboard";
-  const tituloView = { dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
+  const canGoBack = idxHistorico > 0 || view.type !== "dashboard";
+  const tituloView = { avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
 
   return (
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
-      <SideMenu open={menuOpen} onClose={() => setMenuOpen(false)} current={view.type}
+      <SideMenu open={menuOpen} onClose={() => setMenuOpen(false)} current={view.type} nAvisos={nAvisosCriticos}
         onNav={(key) => navTo({ type: key })}
         onImport={() => { setMenuOpen(false); fileRef.current.click(); }}
         onExportar={exportarDados} />
@@ -4448,6 +4685,9 @@ export default function App() {
         ? <div style={{ textAlign: "center", padding: 80, color: "#64748b", fontSize: 15 }}>Carregando obras…</div>
         : view.type === "gantt"
           ? (selectedObra ? <GanttView key={selectedObra.id} obra={selectedObra} onChange={updateObra} equipes={equipes} fornecedores={fornecedoresConhecidos(obras)}
+              itemAberto={view.itemId ?? null} secaoFoco={view.secao || null}
+              onImprimirMedicao={modo => navTo({ type: "medicaoPrint", obraId: selectedObra.id, modo })}
+              onItemAberto={id => navReplace(id == null ? { type: "gantt", obraId: selectedObra.id } : { type: "gantt", obraId: selectedObra.id, itemId: id })}
               onAtividade={texto => registrarAtividade(selectedObra.id, texto)} atividadeVersao={atividadeVersao}
               onAbrirDocEstoque={docId => navTo({ type: "estoqueDoc", docId })}
               onEntradaEstoque={origem => navTo({ type: "estoque", entradaCompra: {
@@ -4455,13 +4695,16 @@ export default function App() {
               } })} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>)
           : view.type === "calendar"
             ? <CalendarView obras={obras} equipes={equipes} agenda={agenda} lembretes={lembretes}
+                mesSel={view.mes} diaSel={view.dia} onVoltarDia={back}
+                onNavegar={(p, modo) => (modo === "push" ? navTo : navReplace)({ type: "calendar", ...p })}
                 onSalvarAgendamento={handleSaveAgendamento} onExcluirAgendamento={handleDeleteAgendamento}
                 onSalvarLembrete={handleSaveLembrete} onExcluirLembrete={handleDeleteLembrete}
                 onSelectObra={openObra}
                 onEmitirOS={(inicio, fim) => navTo({ type: "osPrint", inicio, fim })} />
             : view.type === "diario"
             ? <DiarioView obras={obras} equipes={equipes} agenda={agenda} diarios={diarios}
-                obraInicial={view.obraId || null}
+                obraId={view.obraId || null} diarioId={view.diarioId || null}
+                onNavegar={p => navTo({ type: "diario", ...p })} onVoltar={back}
                 onSalvar={handleSaveDiario} onExcluir={handleDeleteDiario} onAbrirObra={openObra}
                 onImprimir={(obraId, inicio, fim) => navTo({ type: "diarioPrint", obraId, inicio, fim })} />
             : view.type === "equipes"
@@ -4484,14 +4727,17 @@ export default function App() {
                       : <CenteredMsg>Cronograma não encontrado</CenteredMsg>)
                   : view.type === "estoque"
                     ? <EstoqueView itens={estoqueItens} erroCarga={estoqueErro} obras={obras} equipes={equipes}
-                        fornecedores={fornecedoresConhecidos(obras)} codigoInicial={view.codigo || null}
+                        fornecedores={fornecedoresConhecidos(obras)}
+                        tela={view.tela || null} onTela={telaEstoque} onVoltar={back}
                         entradaCompra={view.entradaCompra || null} onEntradaCompraLancada={marcarEntradaEstoque}
-                        onLimparParametros={() => navReplace({ type: "estoque" })}
                         onRecarregar={recarregarEstoque}
                         onImprimirDoc={docId => navTo({ type: "estoqueDoc", docId })}
                         onImprimirEtiquetas={itemIds => navTo({ type: "estoqueEtiquetas", itemIds })} />
                   : view.type === "financeiro"
                     ? <FinanceiroView obras={obras} />
+                  : view.type === "avisos"
+                    ? <CentralAvisos obras={obras} agenda={agenda} cronogramas={cronogramas}
+                        onAbrirObra={(obraId, secao) => navTo(secao ? { type: "gantt", obraId, secao } : { type: "gantt", obraId })} />
                     : view.type === "obrasPasta"
                       ? <ObrasPasta obras={obras} pasta={view.pasta} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} onFlagsChange={handleFlagsChange} onGrupoChange={handleGrupoChange} equipes={equipes}
                           onNovoContrato={() => setNovoContratoAberto(true)} />

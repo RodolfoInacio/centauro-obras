@@ -29,7 +29,13 @@ para as etiquetas do estoque, carregadas com `import()` na tela de etiquetas (ch
 
 ```
 src/
-  App.jsx          ~2.700 linhas — quase todos os componentes e telas.
+  App.jsx          ~4.800 linhas — quase todos os componentes e telas.
+  rotas.js         view ↔ URL (hash) + histórico do navegador; lerSessao/useEstadoSessao para filtros.
+  MedicaoItem.jsx  Medição (plano de corte) do item: modelo (normMedicao, medicaoCompleta) e o cartão.
+  MedicaoPrint.jsx Folha "Ordem de Medição" (preenchida ou em branco), no desenho da do wvetro.
+  regrasEtapas.js  Trava das etapas do item em obra nova (medição → compra → produção → …).
+  avisos.js        Regras da Central de avisos (função pura avisosDaObra).
+  CentralAvisos.jsx  Tela macro: obra × área (itens, documentos, cadastro, prazos, orçar, comprar…).
   api.js           CRUD do Supabase (obras, equipes, agenda, cronogramas, lembretes, diários) + upload das fotos
                    + estoque (leituras paginadas e as chamadas RPC de lançamento/estorno).
   supabase.js      Cria o client a partir das env vars.
@@ -190,21 +196,31 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   arquivo próprio o que é genérico e reutilizado (`Modal.jsx`, `FotoMarkup.jsx`) ou uma tela inteira
   grande o bastante para afogar o `App.jsx` (`DiarioObra.jsx`, `PainelLembretes.jsx`, `ComprasObra.jsx`
   — ver Decisões).
-- **Navegação**: sem router. Estado `view = {type, ...params}` no `App` + pilha `history`.
-  `navTo` empilha, `navReplace` troca, `back` desempilha, `goHome` limpa. Todos passam por
-  `guardNav`, que intercepta a saída se houver cronograma com gravação pendente.
+- **Navegação**: sem router, mas no **histórico do navegador** (`rotas.js`). A `view = {type, ...params}`
+  vai inteira no `history.state` e num hash legível (`#/obra/2729/item/5`, `#/calendario/2026-10/2026-10-05`).
+  `navTo` = `pushState`, `navReplace` = `replaceState` (parâmetro da própria tela: mês, item expandido),
+  `back` = `history.back()` (sem entrada anterior do app, sobe para `paiDe(view)`), `goHome` empilha o
+  dashboard. O voltar do Chrome e o "← Voltar" do app são o mesmo caminho; F5 reabre a mesma tela e o
+  scroll (guardado no `history.state` ao sair da tela, reaplicado por ~1,5 s depois do render).
+  `guardNav` continua segurando a saída do cronograma não salvo, inclusive no `popstate`.
+  Subtela que antes era estado local agora é parâmetro da view: mês/dia do calendário, obra/registro do
+  diário, `tela` do estoque, `itemId` da obra, `secao` (abre a seção, vindo da Central de avisos).
+  Busca/filtro de lista sobrevivem ao voltar via `useEstadoSessao` (sessionStorage).
   Tipos de view: `dashboard`, `obrasPasta` (`pasta: "andamento"|"concluidas"`), `gantt` (`obraId`),
-  `print` (`obraId`), `calendar`, `equipes`, `osPrint` (`inicio`, `fim`),
+  `print` (`obraId`), `medicaoPrint` (`obraId`, `modo`), `avisos`, `calendar` (`mes`, `dia`), `equipes`, `osPrint` (`inicio`, `fim`),
   `cronogramas` (o **macro**: todas as obras, uma por linha), `cronograma` (`id`, o micro de uma
   obra), `cronogramaPrint` (`id`), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`),
   `estoque` (`codigo` opcional, vindo do QR), `estoqueDoc` (`docId`), `estoqueEtiquetas` (`itemIds`).
-  `calendar`, `diario` e `estoque` navegam por dentro (estado local), sem empilhar view — `DiaAgenda`,
-  as três telas do diário e as quatro do estoque são early-returns dos próprios componentes.
+  `DiaAgenda`, as três telas do diário e as quatro do estoque continuam sendo early-returns dos
+  próprios componentes, mas guiados pelos parâmetros da view (`diario` tem `obraId`/`diarioId`,
+  `estoque` tem `tela`).
   O QR da etiqueta abre `/?item=EST-00012`: o `App` lê o parâmetro uma vez (sobrevive à tela de
-  login), abre `{type: "estoque", codigo}` e limpa a URL.
+  login), troca para `{type: "estoque", tela: {tipo: "item", codigo}}` e tira o `?item=` da URL.
 - **Persistência**: o estado local muda na hora; a gravação é **debounced em 700 ms por entidade**
   (`persistObra`, `handleSaveCronograma`, `handleSaveAgendamento`, `handleSaveLembrete`,
-  `handleSaveDiario`). A obra ainda passa por fila e trava de versão (ver Decisões). Equipes gravam imediatamente,
+  `handleSaveDiario`). A obra ainda passa por fila e trava de versão (ver Decisões). Agenda, lembrete e
+  diário passam por `agendarGravacao`, que guarda a gravação pendente para dispará-la na hora quando a
+  aba fica oculta ou fecha (`gravarPendentesAgora`); o logout dispara as pendentes e espera a fila. Equipes gravam imediatamente,
   uma por vez (`upsertEquipe`/`deleteEquipe`). O cronograma é o único com indicador de "não salvo"
   (`dirtyCronoIds`), botão Salvar e aviso ao sair. **O estoque não segue nada disso**: todo
   lançamento espera o banco responder e depois relê a lista (`recarregarEstoque`) — ver Decisões.
@@ -444,7 +460,7 @@ a equipe e caírem na faixa "Sem equipe" — sumia o registro de quem fez o quê
 botão grava `arquivada: true`: a equipe sai das escolhas (líder da obra, "+ Adicionar" do dia) mas
 continua no banco, então o dia antigo e a O.S. daquele dia seguem mostrando nome, cor e composição.
 Ela reaparece na tela do dia só onde já tem serviço, com selo "arquivada" e sem receber serviço
-novo. `deleteEquipe` continua na `api.js` para exclusão manual, mas **nenhuma tela chama**.
+novo. `deleteEquipe` só é chamado pelo "Excluir de vez" de equipe arquivada sem serviço e sem obra.
 
 **Estoque é livro-razão, não documento `jsonb`.** O pedido foi "itens que jamais podem se perder", e
 o padrão do resto do app é justamente o que perde dado: objeto inteiro + upsert debounced deixa uma
@@ -520,8 +536,37 @@ nem busca o estoque). Aberta/fechada é preferência por navegador (`obra.secao.
 do plano do Supabase. Pede os valores liberados, porque leva o financeiro. Os arquivos em si
 (anexos, fotos, desenhos) ficam só no Storage — o backup do banco do Supabase também não os inclui.
 
+**Troca de aba não recarrega mais.** Ao voltar para a aba o supabase-js reemite `SIGNED_IN`/
+`TOKEN_REFRESHED` com um objeto de sessão novo; o efeito de carga dependia de `[session]`, ligava
+`loading` e desmontava a tela aberta. Hoje `onAuthStateChange` mantém o objeto quando o usuário é o
+mesmo e a carga depende de `userId`. Não voltar a depender do objeto `session` em efeito de carga.
+
+**Medição (plano de corte) é do item e separada do orçamento.** `item.medicao = {unidades: [{L, H,
+contramarco: "sim"|"nao"|"", ambiente, obs}], medidoPor, medidoEm}` — uma linha por unidade
+(`normMedicao` completa até a `qtd`, nunca corta linha preenchida). O L×H do PDF continua sendo o
+vendido; diferença acima de 10 mm aparece destacada. `mesclarImportacao` preserva `medicao`.
+A folha `MedicaoPrint` sai em branco (para anotar na obra) ou preenchida. Pedido de compra a partir
+das medidas ainda **não existe**.
+
+**Trava de etapas só em obra nova.** `obra.regrasEtapas = 2` (e `criadaEm`) é gravado no cadastro
+manual e no import de PDF de proposta nova; obra sem o campo segue livre como antes. Com a trava:
+Conf. Medidas só marca com o item medido; Produção, com Conf. Medidas feita **e**
+`comprasLiberamProducao` (toda categoria aplicável com o item do estoque ou comprado com previsão de
+entrega); Instalação depois da Produção; Acabamentos depois da Instalação; não desmarca etapa com a
+seguinte marcada; `statusFabricacao` não vai para "Em andamento"/"Concluído" sem Compras liberadas.
+Medir **não** é pré-requisito para comprar: o que existe é o registro `compras.conferido {por, em}`
+("itens conferidos para compra"), que não trava nada e vira aviso na Central quando falta.
+
+**Central de avisos é derivada.** `avisosDaObra` (avisos.js) deduz tudo dos dados — nada é gravado.
+Documentos vêm de `fetchResumoAnexos` (categoria dos anexos fora da lixeira) ou do checklist marcado.
+O contador do menu e o chip "⚠ N pendências" do cabeçalho da obra usam a mesma função sem os anexos
+(por isso o chip ignora a área Documentos).
+
 ## Armadilhas conhecidas
 
+- **Item com `id` repetido na mesma obra quebra a edição.** `updateItem`/`toggleEtapa` acham o item
+  pelo `id`; em 01/10/2026 as obras #1142 (item 18) e #1487 (item 2) tinham dois itens com o mesmo id,
+  então mexer em um altera os dois (etapas, medição). Corrigir o dado à mão ou reimportar o PDF.
 - **`ordem` é `Date.now()`, então a coluna precisa ser `bigint`.** `lembretes` é a única tabela que
   copia o `ordem` do app para uma coluna solta; ela nasceu `int` e recusava todo lembrete novo com
   `value "1788184147925" is out of range for type integer`. A agenda escapou porque lá o `ordem`
@@ -570,9 +615,10 @@ do plano do Supabase. Pede os valores liberados, porque leva o financeiro. Os ar
   está nas deps mas não é usado no `vite.config.js`.
 - **Deploy do Pages às vezes trava na fila** do GitHub (job `deploy` fica em `queued`
   indefinidamente com build já verde). Cancelar o run e disparar de novo resolve.
-- **O PostgREST devolve no máximo 1000 linhas e corta calado.** As leituras do estoque passam por
-  `todasAsLinhas` (`api.js`), que pagina com `.range()`. As outras tabelas ainda leem sem paginar —
-  com mais de 1000 obras ou serviços na agenda, a lista viria truncada sem erro.
+- **O PostgREST devolve no máximo 1000 linhas e corta calado.** Toda leitura de lista passa por
+  `todasAsLinhas` (`api.js`), que pagina com `.range()` — sempre com uma ordem única (`.order("id")`
+  de desempate), senão páginas pulam/duplicam linha. As tabelas de migration separada usam
+  `lerOpcional`: só "tabela não existe" vira `[]`; erro de rede sobe e aparece na faixa vermelha.
 - **Etiqueta impressa do localhost aponta para produção** de propósito (`URL_ITEM` em
   `Estoque.jsx`). Para testar o QR no dev, abra `http://localhost:<porta>/?item=EST-00001` à mão.
 - **`npm run dev` sobe na 5174 quando a 5173 está ocupada** — o `vite.config.js` não lê `PORT`,

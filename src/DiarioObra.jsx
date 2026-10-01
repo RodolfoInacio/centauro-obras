@@ -1,3 +1,4 @@
+import { useEstadoSessao } from "./rotas";
 import { useState, useRef, useEffect, useMemo } from "react";
 import Modal from "./Modal";
 import FotoMarkup, { redimensionarImagem, Assinatura } from "./FotoMarkup";
@@ -214,13 +215,16 @@ function Bloco({ titulo, sub, acao, children }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TELA PRINCIPAL — navegação interna em estado local, como CalendarView/DiaAgenda
+// TELA PRINCIPAL — três níveis (obras, caderno, registro) guiados pela view do App
 // ─────────────────────────────────────────────────────────────────────────────
-export default function DiarioView({ obras, equipes, agenda, diarios, obraInicial,
-  onSalvar, onExcluir, onImprimir, onAbrirObra }) {
-  const [obraId, setObraId] = useState(obraInicial || null);
-  const [abertoId, setAbertoId] = useState(null);
-  const [busca, setBusca] = useState("");
+// A obra e o registro abertos vêm da view do App (rotas.js), não de estado local: voltar da
+// impressão ou de uma obra aberta pelo caderno cai no mesmo lugar.
+export default function DiarioView({ obras, equipes, agenda, diarios, obraId = null, diarioId = null,
+  onNavegar, onVoltar, onSalvar, onExcluir, onImprimir, onAbrirObra }) {
+  const abertoId = diarioId;
+  const setObraId = (id) => onNavegar(id ? { obraId: id } : {});
+  const setAbertoId = (id) => onNavegar(id ? { obraId, diarioId: id } : { obraId });
+  const [busca, setBusca] = useEstadoSessao("diario.busca", "");
 
   const obra = obraId ? obras.find(o => o.id === obraId) : null;
   const aberto = abertoId ? diarios.find(d => d.id === abertoId) : null;
@@ -229,7 +233,7 @@ export default function DiarioView({ obras, equipes, agenda, diarios, obraInicia
     return (
       <EditorDiario diario={aberto} obra={obra} equipes={equipes} agenda={agenda}
         onSalvar={onSalvar} onExcluir={onExcluir}
-        onVoltar={() => setAbertoId(null)}
+        onVoltar={onVoltar}
         onImprimir={() => onImprimir(obra.id, aberto.dia, aberto.dia)} />
     );
   }
@@ -238,7 +242,7 @@ export default function DiarioView({ obras, equipes, agenda, diarios, obraInicia
     return (
       <CadernoObra obra={obra} equipes={equipes} agenda={agenda} diarios={diarios}
         onSalvar={onSalvar} onExcluir={onExcluir} onAbrir={setAbertoId}
-        onVoltar={() => setObraId(null)} onImprimir={onImprimir} onAbrirObra={onAbrirObra} />
+        onVoltar={onVoltar} onImprimir={onImprimir} onAbrirObra={onAbrirObra} />
     );
   }
 
