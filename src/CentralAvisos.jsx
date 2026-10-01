@@ -17,7 +17,7 @@ const ROTULO_NIVEL = { erro: "Crítico", atencao: "Atenção", info: "Informativ
 
 const inp = { border: "1px solid #e2e8f0", borderRadius: 8, padding: "7px 10px", fontSize: 13, background: "#fff" };
 
-export default function CentralAvisos({ obras, agenda, cronogramas, onAbrirObra }) {
+export default function CentralAvisos({ obras, agenda, cronogramas, onAbrirObra, onRelatorio }) {
   const [anexos, setAnexos] = useState(undefined); // undefined = carregando, null = indisponível
   const [busca, setBusca] = useEstadoSessao("avisos.busca", "");
   const [area, setArea] = useEstadoSessao("avisos.area", "");
@@ -83,6 +83,10 @@ export default function CentralAvisos({ obras, agenda, cronogramas, onAbrirObra 
           <label style={{ fontSize: 12.5, color: "#334155", display: "inline-flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
             <input type="checkbox" checked={comConcluidas} onChange={e => setComConcluidas(e.target.checked)} /> Incluir concluídas
           </label>
+          {onRelatorio && (
+            <button onClick={onRelatorio} title="Folha A4 com gráficos e a matriz, para imprimir ou salvar em PDF"
+              style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "8px 14px", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>🖨 Relatório</button>
+          )}
         </div>
       </div>
       <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 16 }}>

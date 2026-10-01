@@ -194,25 +194,41 @@ export function comprasTotais(obra) {
 // (cotado sem escolha), "comprar" (aprovado sem compra), "previsao" (comprado sem previsão de
 // entrega), "atrasada" (passou a previsão e não chegou). Categoria "não se aplica" fica fora.
 export function pendenciasCompras(obra, hoje = hojeLocal()) {
+  const rotuloNivel = { orcar: "falta orçar", aprovar: "orçado, falta aprovar", comprar: "aprovado, falta comprar", previsao: "comprado sem previsão de entrega", atrasada: "entrega atrasada" };
+  return situacaoItensCompra(obra, hoje)
+    .filter(s => rotuloNivel[s.situacao])
+    .map(s => ({
+      cat: s.cat,
+      nivel: s.situacao,
+      texto: s.vazio ? `${CATEGORIA_LABEL[s.cat]}: nada lançado (ou marque "não se aplica")` : `${s.nome}: ${rotuloNivel[s.situacao]}`,
+    }));
+}
+
+// Situação de cada item de compra de uma obra, para pendências e relatórios. Categoria aplicável
+// sem nenhum item vira uma linha `vazio` com situação "orcar".
+// situacao: orcar | aprovar | comprar | previsao | atrasada | aguardando (comprado, a caminho) |
+//           entregue | estoque
+export function situacaoItensCompra(obra, hoje = hojeLocal()) {
   const c = normCompras(obra.compras);
   const out = [];
   for (const cat of CATEGORIAS_COMPRA) {
     const v = c[cat];
-    const rotulo = CATEGORIA_LABEL[cat];
     if (v.naoSeAplica) continue;
-    if (!v.itens.length) { out.push({ cat, nivel: "orcar", texto: `${rotulo}: nada lançado (ou marque "não se aplica")` }); continue; }
+    if (!v.itens.length) { out.push({ cat, nome: CATEGORIA_LABEL[cat], vazio: true, situacao: "orcar", entregas: [] }); continue; }
     v.itens.forEach((it, i) => {
-      const nome = `${rotulo} · ${it.tipo || `item ${i + 1}`}`;
-      if (it.estoque.usado === "sim" && !it.fornecedores.some(ativo)) return; // sai do estoque
+      const nome = `${CATEGORIA_LABEL[cat]} · ${it.tipo || `item ${i + 1}`}`;
       const ativos = it.fornecedores.filter(ativo);
+      const entregas = ativos.filter(comprado).map(f => ({ data: f.entrega.data, recebido: f.entrega.recebido, fornecedor: f.nome }));
+      let situacao;
       if (!ativos.length) {
-        const cotado = it.fornecedores.some(f => f.orcamento.valor > 0 || f.orcamento.data);
-        out.push({ cat, nivel: cotado ? "aprovar" : "orcar", texto: cotado ? `${nome}: orçado, falta aprovar` : `${nome}: falta orçar` });
-        return;
-      }
-      if (!ativos.every(comprado)) { out.push({ cat, nivel: "comprar", texto: `${nome}: aprovado, falta comprar` }); return; }
-      if (ativos.some(f => !f.entrega.recebido && !f.entrega.data)) { out.push({ cat, nivel: "previsao", texto: `${nome}: comprado sem previsão de entrega` }); return; }
-      if (ativos.some(f => atrasada(f, hoje))) out.push({ cat, nivel: "atrasada", texto: `${nome}: entrega atrasada` });
+        if (it.estoque.usado === "sim") situacao = "estoque";
+        else situacao = it.fornecedores.some(f => f.orcamento.valor > 0 || f.orcamento.data) ? "aprovar" : "orcar";
+      } else if (!ativos.every(comprado)) situacao = "comprar";
+      else if (ativos.some(f => !f.entrega.recebido && !f.entrega.data)) situacao = "previsao";
+      else if (ativos.some(f => atrasada(f, hoje))) situacao = "atrasada";
+      else if (ativos.every(f => f.entrega.recebido)) situacao = "entregue";
+      else situacao = "aguardando";
+      out.push({ cat, nome, tipo: it.tipo, situacao, entregas });
     });
   }
   return out;
@@ -223,6 +239,12 @@ export function pendenciasCompras(obra, hoje = hojeLocal()) {
 export function comprasLiberamProducao(obra) {
   const faltas = pendenciasCompras(obra).filter(p => p.nivel !== "atrasada");
   return { ok: faltas.length === 0, faltas };
+}
+
+// A comprar e gasto de cada categoria da obra (categoria "não se aplica" vem zerada). Relatórios.
+export function comprasPorCategoria(obra) {
+  const c = normCompras(obra.compras);
+  return Object.fromEntries(CATEGORIAS_COMPRA.map(cat => [cat, c[cat].naoSeAplica ? { aComprar: 0, gasto: 0 } : totaisCategoria(c[cat])]));
 }
 
 // Status são DERIVADOS, nunca gravados (mesma regra da etiqueta do lembrete): gravam-se as

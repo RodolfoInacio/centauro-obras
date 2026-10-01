@@ -29,13 +29,16 @@ para as etiquetas do estoque, carregadas com `import()` na tela de etiquetas (ch
 
 ```
 src/
-  App.jsx          ~4.800 linhas — quase todos os componentes e telas.
+  App.jsx          ~4.750 linhas — quase todos os componentes e telas.
   rotas.js         view ↔ URL (hash) + histórico do navegador; lerSessao/useEstadoSessao para filtros.
   MedicaoItem.jsx  Medição (plano de corte) do item: modelo (normMedicao, medicaoCompleta) e o cartão.
   MedicaoPrint.jsx Folha "Ordem de Medição" (preenchida ou em branco), no desenho da do wvetro.
   regrasEtapas.js  Trava das etapas do item em obra nova (medição → compra → produção → …).
   avisos.js        Regras da Central de avisos (função pura avisosDaObra).
   CentralAvisos.jsx  Tela macro: obra × área (itens, documentos, cadastro, prazos, orçar, comprar…).
+  calculos.js      Derivados puros da obra: ETAPAS/PESOS, itemPercentual, finObra/finTotais, agruparObras.
+  graficos.jsx     Gráficos em SVG (barras, empilhadas, colunas, rosca, barra-parte, KPI) com paleta validada.
+  Relatorios.jsx   Lista de relatórios + as folhas A4 (avisos, obras em andamento, compras, agenda, financeiro).
   api.js           CRUD do Supabase (obras, equipes, agenda, cronogramas, lembretes, diários) + upload das fotos
                    + estoque (leituras paginadas e as chamadas RPC de lançamento/estorno).
   supabase.js      Cria o client a partir das env vars.
@@ -207,7 +210,7 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   diário, `tela` do estoque, `itemId` da obra, `secao` (abre a seção, vindo da Central de avisos).
   Busca/filtro de lista sobrevivem ao voltar via `useEstadoSessao` (sessionStorage).
   Tipos de view: `dashboard`, `obrasPasta` (`pasta: "andamento"|"concluidas"`), `gantt` (`obraId`),
-  `print` (`obraId`), `medicaoPrint` (`obraId`, `modo`), `avisos`, `calendar` (`mes`, `dia`), `equipes`, `osPrint` (`inicio`, `fim`),
+  `print` (`obraId`), `medicaoPrint` (`obraId`, `modo`), `avisos`, `relatorios`, `relatorio` (`tipo`, `inicio`/`fim` na agenda), `calendar` (`mes`, `dia`), `equipes`, `osPrint` (`inicio`, `fim`),
   `cronogramas` (o **macro**: todas as obras, uma por linha), `cronograma` (`id`, o micro de uma
   obra), `cronogramaPrint` (`id`), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`),
   `estoque` (`codigo` opcional, vindo do QR), `estoqueDoc` (`docId`), `estoqueEtiquetas` (`itemIds`).
@@ -556,6 +559,16 @@ entrega); Instalação depois da Produção; Acabamentos depois da Instalação;
 seguinte marcada; `statusFabricacao` não vai para "Em andamento"/"Concluído" sem Compras liberadas.
 Medir **não** é pré-requisito para comprar: o que existe é o registro `compras.conferido {por, em}`
 ("itens conferidos para compra"), que não trava nada e vira aviso na Central quando falta.
+
+**Relatórios: folha A4 + "Salvar como PDF", gráficos em SVG próprio.** Formato escolhido por ser o
+mesmo das outras folhas (O.S., diário, cronograma): sai em papel, vira PDF para WhatsApp/e-mail e não
+pede dependência. Cada relatório (`Relatorios.jsx`) é calculado na hora — nada gravado, nada de
+histórico — e todo gráfico vem com a tabela na mesma folha, porque papel não tem "passar o mouse".
+Paleta em `graficos.jsx`: categórica em **ordem fixa** validada para daltonismo (a ordem é a garantia),
+rampa azul para escala ordenada (etapas) e nunca as cores de status empilhadas (falham no teste).
+O financeiro só monta com os valores liberados (`useSigilo`). Os cálculos que o App e os relatórios
+dividem saíram para `calculos.js`, senão `Relatorios.jsx` teria que importar o `App.jsx` (ciclo).
+Atalhos: botão "🖨 Relatório" na Central de avisos e no Financeiro, "📈 Relatório do mês" no calendário.
 
 **Central de avisos é derivada.** `avisosDaObra` (avisos.js) deduz tudo dos dados — nada é gravado.
 Documentos vêm de `fetchResumoAnexos` (categoria dos anexos fora da lixeira) ou do checklist marcado.

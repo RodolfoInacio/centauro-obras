@@ -29,6 +29,8 @@ export function viewParaHash(v) {
     case "cronogramaPrint": return `#/cronograma/${enc(v.id)}/imprimir`;
     case "financeiro": return "#/financeiro";
     case "avisos": return "#/avisos";
+    case "relatorios": return "#/relatorios";
+    case "relatorio": return `#/relatorio/${enc(v.tipo)}${v.inicio && v.fim ? `/${v.inicio}/${v.fim}` : ""}`;
     case "diario": return `#/diario${v.obraId ? `/${enc(v.obraId)}${v.diarioId ? `/${enc(v.diarioId)}` : ""}` : ""}`;
     case "diarioPrint": return `#/diario/${enc(v.obraId)}/imprimir/${v.inicio}/${v.fim}`;
     case "estoque": {
@@ -62,6 +64,8 @@ export function hashParaView(hash) {
     case "cronograma": return b ? (c === "imprimir" ? { type: "cronogramaPrint", id: b } : { type: "cronograma", id: b }) : { type: "cronogramas" };
     case "financeiro": return { type: "financeiro" };
     case "avisos": return { type: "avisos" };
+    case "relatorios": return { type: "relatorios" };
+    case "relatorio": return b ? { type: "relatorio", tipo: b, ...(c && d ? { inicio: c, fim: d } : {}) } : { type: "relatorios" };
     case "diario":
       if (b && c === "imprimir" && d && e) return { type: "diarioPrint", obraId: b, inicio: d, fim: e };
       return { type: "diario", ...(b ? { obraId: b } : {}), ...(c ? { diarioId: c } : {}) };
@@ -94,6 +98,7 @@ export function paiDe(v) {
     case "diarioPrint": return { type: "diario", obraId: v.obraId };
     case "estoque": return v.tela && v.tela.tipo !== "lista" ? { type: "estoque" } : VIEW_INICIAL;
     case "estoqueDoc": case "estoqueEtiquetas": return { type: "estoque" };
+    case "relatorio": return { type: "relatorios" };
     default: return VIEW_INICIAL;
   }
 }

@@ -6,7 +6,6 @@ import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetc
 import { agendar, agendarMacro, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent, normPredecessoras, parsePredecessoras, textoPredecessoras, inicioEstaFixo, toLocalISO } from "./cronograma";
 import CronogramaPrint from "./CronogramaPrint";
 import Modal from "./Modal";
-import { chaveGrupo } from "./agrupamento";
 import PainelLembretes, { normLembrete } from "./PainelLembretes";
 import DiarioView, { DiarioPrint, normDiario } from "./DiarioObra";
 import ComprasObra, { comprasTotais, normCompras, fornecedoresConhecidos } from "./ComprasObra";
@@ -17,10 +16,12 @@ import AnexosObra, { enviarArquivos, urlsComCache } from "./AnexosObra";
 import LeituraIA, { normDocumentosLidos } from "./LeituraIA";
 import ComentariosObra, { lerAutor } from "./ComentariosObra";
 import NovoContrato from "./NovoContrato";
+import { ETAPAS, PESOS, itemPercentual, precisaAlertaCompras, finObra, finTotais, agruparObras } from "./calculos";
 import { viewParaHash, hashParaView, paiDe, useEstadoSessao } from "./rotas";
 import MedicaoItem, { ChipMedicao, normMedicao, contagemMedicao } from "./MedicaoItem";
 import MedicaoPrint from "./MedicaoPrint";
 import CentralAvisos from "./CentralAvisos";
+import RelatorioPrint, { RelatoriosHub } from "./Relatorios";
 import { avisosDaObra } from "./avisos";
 import { VERSAO_REGRAS, obraComTrava, liberacaoEtapa, liberacaoDesmarcar, liberacaoStatusFabricacao } from "./regrasEtapas";
 
@@ -31,8 +32,6 @@ const BRAND_BORDER = "#333333";
 const BRAND_LIGHT = "#9ca3af";
 
 // Etapas do item, com pesos (% concluído) e cores
-const ETAPAS = ["Conf. Medidas", "Produção", "Instalação", "Acabamentos"];
-const PESOS = { "Conf. Medidas": 10, "Produção": 30, "Instalação": 50, "Acabamentos": 10 };
 const ETAPA_COLORS = {
   "Conf. Medidas": "#3b82f6",
   "Produção":      "#8b5cf6",
@@ -46,15 +45,6 @@ const STATUS_COLORS = {
   "Atrasado":     "#ef4444",
 };
 const STATUS_OPTIONS = ["Aguardando", "Em andamento", "Concluído", "Atrasado"];
-
-// Compras por categoria: modelo, totais e tela moram em ComprasObra.jsx.
-// "A comprar" = orçamentos lançados que ainda não viraram compra (ver comprasTotais).
-// Flag vermelha: o que ainda falta comprar é maior do que o que ainda vai entrar de caixa dessa obra.
-function precisaAlertaCompras(obra) {
-  const { aComprar } = comprasTotais(obra);
-  const aReceber = Math.max(0, (obra.valorTotal || 0) - (obra.valorRecebido || 0));
-  return aComprar > aReceber;
-}
 
 // ─── BANDEIRAS MANUAIS ───────────────────────────────────────────────────────
 // Além da bandeira automática de compras (acima), o escritório pendura bandeiras à mão na obra:
@@ -71,75 +61,6 @@ function novaFlag(cor) {
 // ─── FINANCEIRO CONSOLIDADO ──────────────────────────────────────────────────
 // O que ainda entra (a receber) e o que ainda sai (a pagar = orçado e não comprado, ver
 // comprasTotais). `aEntregar` é o valor de obra ainda não executado — o saldo físico.
-function finObra(o) {
-  const itens = o.itens || [];
-  const total = Number(o.valorTotal) || 0;
-  const recebido = Number(o.valorRecebido) || 0;
-  const pct = itens.length ? itens.reduce((a, i) => a + itemPercentual(i), 0) / itens.length : 0;
-  return {
-    total,
-    recebido,
-    aReceber: Math.max(0, total - recebido),
-    aPagar: comprasTotais(o).aComprar,
-    aEntregar: total * (1 - pct / 100),
-  };
-}
-// Soma o financeiro de uma lista de obras (recalcula sempre — muda valor, muda o painel).
-function finTotais(obras) {
-  return obras.reduce((acc, o) => {
-    const f = finObra(o);
-    acc.total += f.total; acc.recebido += f.recebido; acc.aReceber += f.aReceber;
-    acc.aPagar += f.aPagar; acc.aEntregar += f.aEntregar;
-    if (precisaAlertaCompras(o)) acc.emAlerta += 1;
-    return acc;
-  }, { total: 0, recebido: 0, aReceber: 0, aPagar: 0, aEntregar: 0, emAlerta: 0 });
-}
-
-// ─── AGRUPAMENTO DE OBRAS (um cliente, vários contratos) ─────────────────────
-// Duas propostas do mesmo cliente são a mesma obra com dois contratos. O agrupamento é só de
-// APRESENTAÇÃO: cada contrato continua sendo uma obra própria no banco, porque o `id` da obra é o
-// número da proposta e agenda, cronograma, lembretes e diário todos guardam esse id. Fundir os
-// registros quebraria esses vínculos e faria os ids de item (sequenciais por obra) colidirem.
-
-// A chave em si mora em agrupamento.js, para o DiarioObra.jsx usar a mesma sem ciclo de
-// importação (o App importa o diário). Aqui fica só a consolidação, que depende de
-// finObra/itemPercentual.
-
-// Mesmo fallback da carga inicial e da ordenação da lista: sem `ordem`, vai para o fim por número.
-function ordemDeObra(o) { return Number.isFinite(o.ordem) ? o.ordem : 1e9 + (Number(o.numero) || 0); }
-
-// Agrupa e já entrega os consolidados que a tela precisa.
-function agruparObras(obras) {
-  const mapa = new Map();
-  for (const o of obras) {
-    const chave = chaveGrupo(o);
-    if (!mapa.has(chave)) mapa.set(chave, []);
-    mapa.get(chave).push(o);
-  }
-  return [...mapa.entries()].map(([chave, lista]) => {
-    const contratos = [...lista].sort((a, b) => (Number(a.numero) || 0) - (Number(b.numero) || 0));
-    // O financeiro soma contrato a contrato via finObra — nunca recalcula sobre valores já somados.
-    // O clamp `Math.max(0, total - recebido)` de finObra é o que impede o adiantamento de um
-    // contrato mascarar o que o outro ainda tem a receber.
-    const fin = finTotais(contratos);
-    const todosItens = contratos.flatMap(o => o.itens || []);
-    return {
-      chave,
-      nome: contratos[0].cliente,
-      contratos,
-      ordem: Math.min(...contratos.map(ordemDeObra)),
-      // A obra só acabou quando não sobra contrato aberto.
-      concluido: contratos.every(o => o.status === "Concluído"),
-      itens: todosItens.length,
-      pecas: todosItens.reduce((a, i) => a + (i.qtd || 0), 0),
-      // Média sobre os itens de todos os contratos juntos, não média das médias por contrato.
-      pct: todosItens.length ? Math.round(todosItens.reduce((a, i) => a + itemPercentual(i), 0) / todosItens.length) : 0,
-      fin,
-      emAlerta: fin.emAlerta,
-    };
-  });
-}
-
 // Dias corridos entre a assinatura do contrato e hoje (a coluna TEMPO da planilha do escritório).
 function diasDesdeContrato(o) {
   if (!o.dataContrato) return null;
@@ -149,12 +70,6 @@ function corDias(d) { return d >= 90 ? "#dc2626" : d >= 30 ? "#f59e0b" : "#64748
 
 function mkEtapas() {
   return Object.fromEntries(ETAPAS.map(e => [e, { feito: false, inicio: "", entrega: "" }]));
-}
-
-// % concluído do item = soma dos pesos das etapas concluídas
-function itemPercentual(item) {
-  const et = item.etapas || {};
-  return ETAPAS.reduce((a, e) => a + (et[e] && et[e].feito ? PESOS[e] : 0), 0);
 }
 
 // ─── PREFERÊNCIAS DE TELA (localStorage) ─────────────────────────────────────
@@ -2015,7 +1930,7 @@ function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar,
   );
 }
 
-function CalendarView({ obras, equipes, agenda, lembretes, mesSel, diaSel, onNavegar, onVoltarDia, onSalvarAgendamento, onExcluirAgendamento, onSalvarLembrete, onExcluirLembrete, onSelectObra, onEmitirOS }) {
+function CalendarView({ obras, equipes, agenda, lembretes, mesSel, diaSel, onNavegar, onVoltarDia, onSalvarAgendamento, onExcluirAgendamento, onSalvarLembrete, onExcluirLembrete, onSelectObra, onEmitirOS, onRelatorio }) {
   const hoje = new Date();
   // O helper global hoje() está sombreado pelo Date acima, então monta a string a partir dele.
   const hojeISO = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}-${String(hoje.getDate()).padStart(2, "0")}`;
@@ -2091,6 +2006,11 @@ function CalendarView({ obras, equipes, agenda, lembretes, mesSel, diaSel, onNav
           <button onClick={() => { definirPeriodo(hojeISO, hojeISO); setEmitindo(true); }}
             title="Imprime a O.S. de um dia, de uma semana ou do período que você escolher"
             style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "0 14px", height: 34, fontWeight: 700, fontSize: 12, cursor: "pointer" }}>🖨️ Emitir O.S.</button>
+          {onRelatorio && (
+            <button onClick={() => onRelatorio(`${chaveMes(ano, mes)}-01`, `${chaveMes(ano, mes)}-${String(diasNoMes).padStart(2, "0")}`)}
+              title="Relatório com gráficos dos serviços deste mês: por dia, por equipe e por obra"
+              style={{ background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 8, padding: "0 14px", height: 34, fontWeight: 700, fontSize: 12, cursor: "pointer" }}>📈 Relatório do mês</button>
+          )}
         </div>
       </div>
 
@@ -2941,6 +2861,7 @@ function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos
   const items = [
     { key: "dashboard", label: "Obras", icon: "🏠" },
     { key: "avisos", label: "Central de avisos", icon: "⚠️", badge: nAvisos },
+    { key: "relatorios", label: "Relatórios", icon: "📈" },
     { key: "calendar", label: "Calendário", icon: "📅" },
     { key: "diario", label: "Diário de Obras", icon: "📓" },
     { key: "equipes", label: "Equipes", icon: "👷" },
@@ -2983,7 +2904,7 @@ function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos
 
 // ─── FINANCEIRO (protegido por senha) ─────────────────────────────────────────
 // A senha é a mesma do olho (Sigilo.jsx): liberar aqui mostra os valores no app inteiro, e vice-versa.
-function FinanceiroView({ obras }) {
+function FinanceiroView({ obras, onRelatorio }) {
   const { visivel, desbloquear } = useSigilo();
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
@@ -3021,7 +2942,10 @@ function FinanceiroView({ obras }) {
     <div style={{ padding: "24px 28px", maxWidth: 900, margin: "0 auto" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
         <h2 style={{ fontSize: 20, fontWeight: 800, color: BRAND, margin: 0 }}>Financeiro</h2>
-        <div style={{ marginLeft: "auto" }}><OlhoFinanceiro rotulo /></div>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
+          {onRelatorio && <button onClick={onRelatorio} style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>🖨 Relatório com gráficos</button>}
+          <OlhoFinanceiro rotulo />
+        </div>
       </div>
       <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", borderLeft: "4px solid #c9a227", marginBottom: 20 }}>
         <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Total em Obras</div>
@@ -4581,12 +4505,17 @@ export default function App() {
 
   // Views de impressão ocupam a tela toda (sem o shell do app). No F5 direto numa folha, espera
   // a carga — senão aparecia "não encontrada" enquanto os dados chegavam.
-  if (loading && ["print", "medicaoPrint", "osPrint", "diarioPrint", "cronogramaPrint", "estoqueEtiquetas"].includes(view.type)) {
+  if (loading && ["relatorio", "print", "medicaoPrint", "osPrint", "diarioPrint", "cronogramaPrint", "estoqueEtiquetas"].includes(view.type)) {
     return <CenteredMsg>Carregando…</CenteredMsg>;
   }
   if (view.type === "print") {
     const o = obras.find(x => x.id === view.obraId);
     return o ? <PrintView obra={o} onBack={back} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>;
+  }
+  if (view.type === "relatorio") {
+    return <RelatorioPrint tipo={view.tipo} obras={obras} agenda={agenda} cronogramas={cronogramas} equipes={equipes}
+      inicio={view.inicio} fim={view.fim} onBack={back}
+      onPeriodo={(inicio, fim) => navReplace({ type: "relatorio", tipo: view.tipo, inicio, fim })} />;
   }
   if (view.type === "medicaoPrint") {
     const o = obras.find(x => x.id === view.obraId);
@@ -4619,7 +4548,7 @@ export default function App() {
   const userEmail = session.user?.email || "";
   const selectedObra = view.type === "gantt" ? obras.find(o => o.id === view.obraId) : null;
   const canGoBack = idxHistorico > 0 || view.type !== "dashboard";
-  const tituloView = { avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
+  const tituloView = { relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
 
   return (
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
@@ -4700,7 +4629,8 @@ export default function App() {
                 onSalvarAgendamento={handleSaveAgendamento} onExcluirAgendamento={handleDeleteAgendamento}
                 onSalvarLembrete={handleSaveLembrete} onExcluirLembrete={handleDeleteLembrete}
                 onSelectObra={openObra}
-                onEmitirOS={(inicio, fim) => navTo({ type: "osPrint", inicio, fim })} />
+                onEmitirOS={(inicio, fim) => navTo({ type: "osPrint", inicio, fim })}
+                onRelatorio={(inicio, fim) => navTo({ type: "relatorio", tipo: "agenda", inicio, fim })} />
             : view.type === "diario"
             ? <DiarioView obras={obras} equipes={equipes} agenda={agenda} diarios={diarios}
                 obraId={view.obraId || null} diarioId={view.diarioId || null}
@@ -4734,9 +4664,12 @@ export default function App() {
                         onImprimirDoc={docId => navTo({ type: "estoqueDoc", docId })}
                         onImprimirEtiquetas={itemIds => navTo({ type: "estoqueEtiquetas", itemIds })} />
                   : view.type === "financeiro"
-                    ? <FinanceiroView obras={obras} />
+                    ? <FinanceiroView obras={obras} onRelatorio={() => navTo({ type: "relatorio", tipo: "financeiro" })} />
+                  : view.type === "relatorios"
+                    ? <RelatoriosHub onAbrir={tipo => navTo({ type: "relatorio", tipo })} />
                   : view.type === "avisos"
                     ? <CentralAvisos obras={obras} agenda={agenda} cronogramas={cronogramas}
+                        onRelatorio={() => navTo({ type: "relatorio", tipo: "avisos" })}
                         onAbrirObra={(obraId, secao) => navTo(secao ? { type: "gantt", obraId, secao } : { type: "gantt", obraId })} />
                     : view.type === "obrasPasta"
                       ? <ObrasPasta obras={obras} pasta={view.pasta} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} onFlagsChange={handleFlagsChange} onGrupoChange={handleGrupoChange} equipes={equipes}
