@@ -16,6 +16,7 @@ import AnexosObra, { enviarArquivos, urlsComCache } from "./AnexosObra";
 import LeituraIA, { normDocumentosLidos } from "./LeituraIA";
 import ComentariosObra, { lerAutor } from "./ComentariosObra";
 import NovoContrato from "./NovoContrato";
+import { ConfiguracoesView, useConfig } from "./Configuracoes";
 import { ETAPAS, PESOS, itemPercentual, precisaAlertaCompras, finObra, finTotais, agruparObras } from "./calculos";
 import { viewParaHash, hashParaView, paiDe, useEstadoSessao } from "./rotas";
 import MedicaoItem, { ChipMedicao, normMedicao, contagemMedicao } from "./MedicaoItem";
@@ -543,10 +544,18 @@ function parseObraLines(allLines, filename) {
 // ─── SEÇÃO RECOLHÍVEL (tela da obra) ─────────────────────────────────────────
 // Título + resumo de uma linha; o conteúdo só monta quando aberta (Compras fechada nem busca o
 // estoque). Aberta/fechada é preferência de tela, lembrada por navegador — não é dado da obra.
-function Secao({ id, titulo, icone, resumo, padraoAberta = false, foco = false, children }) {
-  const chave = "obra.secao." + id;
-  const [aberta, setAberta] = useState(() => foco || lerPref(chave, padraoAberta ? "1" : "0") === "1");
-  useEffect(() => { gravarPref(chave, aberta ? "1" : "0"); }, [chave, aberta]);
+// O ponto de partida vem de ⚙️ Configurações; o padrão entra na chave, então mudar a configuração
+// vale de novo em todos os navegadores, por cima do que cada um tinha lembrado.
+function Secao({ id, titulo, icone, resumo, foco = false, children }) {
+  const { cfg } = useConfig();
+  const padrao = cfg.secoesAbertas.includes(id);
+  const chave = `obra.secao.${id}.${padrao ? "a" : "f"}`;
+  const inicial = () => ({ chave, aberta: foco || lerPref(chave, padrao ? "1" : "0") === "1" });
+  const [est, setEst] = useState(inicial);
+  if (est.chave !== chave) setEst(inicial());   // configuração chegou/mudou: recomeça do padrão
+  const aberta = est.aberta;
+  const setAberta = v => setEst(e => ({ ...e, aberta: typeof v === "function" ? v(e.aberta) : v }));
+  useEffect(() => { gravarPref(est.chave, est.aberta ? "1" : "0"); }, [est]);
   // Veio da central de avisos apontando esta seção: abre e rola até ela.
   const ref = useRef(null);
   useEffect(() => {
@@ -650,6 +659,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
   const [nAnexos, setNAnexos] = useState(null); // resumo da seção Anexos (conhecido quando ela abre)
   const [lendoAnexo, setLendoAnexo] = useState(null); // anexo aberto na leitura com IA
   const [capaUrl, setCapaUrl] = useState("");
+  const { cfg } = useConfig();
   // Sem capa escolhida (★ nos anexos), a primeira foto da obra assume. Relê quando chega anexo novo.
   const [fotoCapa, setFotoCapa] = useState("");
   useEffect(() => {
@@ -780,7 +790,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
     <div style={{ fontFamily: "'Segoe UI', sans-serif", color: "#1e293b" }}>
       {/* Cabeçalho da obra: quem é, onde é, como está */}
       <div style={{ background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "12px 20px", display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap" }}>
-        {capaUrl && <img src={capaUrl} alt="" style={{ width: 88, height: 66, objectFit: "cover", borderRadius: 8, border: "1px solid #e2e8f0", flexShrink: 0 }} />}
+        {capaUrl && <img src={capaUrl} alt="" style={{ width: cfg.capaObra, height: Math.round(cfg.capaObra * 3 / 4), objectFit: "cover", borderRadius: 8, border: "1px solid #e2e8f0", flexShrink: 0 }} />}
         <div style={{ flex: "1 1 280px", minWidth: 0 }}>
           <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>
             Proposta #{localObra.numero}{cad.lojaFaturamento ? ` · ${cad.lojaFaturamento}` : ""}
@@ -821,14 +831,14 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap", padding: "16px 20px" }}>
         {/* Esquerda: seções recolhíveis. Itens, Compras e Financeiro só abrem no clique. */}
         <div style={{ flex: "999 1 600px", minWidth: 0 }}>
-          <Secao id="cadastro" foco={secaoFoco === "cadastro"} titulo="Cadastro do cliente" icone="🪪" padraoAberta
+          <Secao id="cadastro" foco={secaoFoco === "cadastro"} titulo="Cadastro do cliente" icone="🪪"
             resumo={[cad.contatoNome, cad.telefones].filter(Boolean).join(" · ") || "a preencher"}>
             <div style={{ padding: 16 }}>
               <CadastroObra obra={localObra} onChange={update} comLinks />
             </div>
           </Secao>
 
-          <Secao id="anexos" foco={secaoFoco === "anexos"} titulo="Anexos" icone="📎" padraoAberta
+          <Secao id="anexos" foco={secaoFoco === "anexos"} titulo="Anexos" icone="📎"
             resumo={nAnexos === null ? "" : nAnexos === 0 ? "nenhum arquivo" : `${nAnexos} arquivo${nAnexos === 1 ? "" : "s"}`}>
             <div style={{ padding: 16 }}>
               <AnexosObra obraId={obra.id} capa={localObra.capa} recarregar={atividadeVersao}
@@ -2185,6 +2195,7 @@ function EquipesDaObra({ ids, equipes }) {
 
 // Obra com um contrato só — o card de sempre, sem mudança visual.
 function CardObra({ os, equipes, onSelect, onStatusChange, onFlagsChange, onAbrirGrupo, alca, dragProps, isDragging, isOver, capaUrl }) {
+  const { cfg } = useConfig();
   const pct = os.itens.length > 0
     ? Math.round(os.itens.reduce((a, i) => a + itemPercentual(i), 0) / os.itens.length)
     : 0;
@@ -2202,7 +2213,7 @@ function CardObra({ os, equipes, onSelect, onStatusChange, onFlagsChange, onAbri
         <div style={{ background: "#1a1a1a", color: "#fff", borderRadius: 8, padding: "6px 14px", fontWeight: 800, fontSize: 18, minWidth: 60, textAlign: "center" }}>
           #{os.numero}
         </div>
-        {capaUrl && <img src={capaUrl} alt="" style={{ width: 64, height: 48, objectFit: "cover", borderRadius: 8, border: "1px solid #e2e8f0", flexShrink: 0 }} />}
+        {capaUrl && <img src={capaUrl} alt="" style={{ width: cfg.capaLista, height: Math.round(cfg.capaLista * 3 / 4), objectFit: "cover", borderRadius: 8, border: "1px solid #e2e8f0", flexShrink: 0 }} />}
         {precisaAlertaCompras(os) && (
           <span title="Falta comprar mais do que ainda vai receber dessa obra" style={{ alignSelf: "center", fontSize: 20, lineHeight: 1 }}>🚩</span>
         )}
@@ -2274,6 +2285,7 @@ function CardObra({ os, equipes, onSelect, onStatusChange, onFlagsChange, onAbri
 // Obra com dois ou mais contratos: cabeçalho consolidado + uma linha por contrato.
 // Status e bandeiras ficam na linha do contrato, não no cabeçalho — são dele.
 function CardGrupo({ g, equipes, onSelect, onStatusChange, onFlagsChange, onAbrirGrupo, alca, dragProps, isDragging, isOver, capaUrl }) {
+  const { cfg } = useConfig();
   return (
     <div {...dragProps}
       style={{ ...cardBase(isOver, isDragging), borderLeft: "4px solid #1d4ed8", overflow: "hidden" }}
@@ -2282,7 +2294,7 @@ function CardGrupo({ g, equipes, onSelect, onStatusChange, onFlagsChange, onAbri
       {/* Cabeçalho da obra */}
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap", padding: "16px 22px 14px" }}>
         {alca}
-        {capaUrl && <img src={capaUrl} alt="" style={{ width: 64, height: 48, objectFit: "cover", borderRadius: 8, border: "1px solid #e2e8f0", flexShrink: 0 }} />}
+        {capaUrl && <img src={capaUrl} alt="" style={{ width: cfg.capaLista, height: Math.round(cfg.capaLista * 3 / 4), objectFit: "cover", borderRadius: 8, border: "1px solid #e2e8f0", flexShrink: 0 }} />}
         <div style={{ flex: 1, minWidth: 200 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <div style={{ fontWeight: 800, fontSize: 16, color: "#1e293b" }}>{g.nome}</div>
@@ -2483,9 +2495,15 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
   // Busca e filtro sobrevivem ao voltar de uma obra (sessão da aba); a ordenação, até ao recarregar.
   const [search, setSearch] = useEstadoSessao(`pasta.${pasta}.busca`, "");
   const [filterStatus, setFilterStatus] = useEstadoSessao(`pasta.${pasta}.status`, "Todos");
-  const [sortBy, setSortBy] = useState(() => lerPref("dash.sortBy", "ordem")); // ordem | numero | nome | pct | itens | pecas
+  // Ordem padrão vem de ⚙️ Configurações; como nas seções, o padrão entra na chave da preferência.
+  const { cfg } = useConfig();
+  const chaveOrdem = "dash.sortBy." + cfg.ordemLista;
+  const [ordemEst, setOrdemEst] = useState(() => ({ chave: chaveOrdem, v: lerPref(chaveOrdem, cfg.ordemLista) }));
+  if (ordemEst.chave !== chaveOrdem) setOrdemEst({ chave: chaveOrdem, v: lerPref(chaveOrdem, cfg.ordemLista) });
+  const sortBy = ordemEst.v; // ordem | numero | nome | pct | itens | pecas
+  const setSortBy = v => setOrdemEst(e => ({ ...e, v }));
   const [sortDir, setSortDir] = useState(() => lerPref("dash.sortDir", "asc")); // asc | desc
-  useEffect(() => { gravarPref("dash.sortBy", sortBy); }, [sortBy]);
+  useEffect(() => { gravarPref(ordemEst.chave, ordemEst.v); }, [ordemEst]);
   useEffect(() => { gravarPref("dash.sortDir", sortDir); }, [sortDir]);
   // Ref (não estado): o navegador decide se o arrasto pode começar no próprio mousedown,
   // antes de qualquer re-render do React — um estado aqui chegaria tarde demais.
@@ -2869,7 +2887,8 @@ function OrdemServicoPrint({ agenda, obras, equipes, inicio, fim, onBack }) {
 
 // ─── MENU LATERAL ─────────────────────────────────────────────────────────────
 function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos = 0 }) {
-  const items = [
+  const { cfg } = useConfig();
+  const todos = [
     { key: "dashboard", label: "Obras", icon: "🏠" },
     { key: "avisos", label: "Central de avisos", icon: "⚠️", badge: nAvisos },
     { key: "relatorios", label: "Relatórios", icon: "📈" },
@@ -2880,6 +2899,8 @@ function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos
     { key: "cronogramas", label: "Cronograma Comercial", icon: "📊" },
     { key: "financeiro", label: "Financeiro", icon: "🔒" },
   ];
+  // Itens escondidos em ⚙️ Configurações saem do menu (a tela continua existindo).
+  const items = todos.filter(it => !cfg.menuOculto.includes(it.key));
   return (
     <>
       <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", opacity: open ? 1 : 0, pointerEvents: open ? "auto" : "none", transition: "opacity .2s", zIndex: 40 }} />
@@ -2906,6 +2927,10 @@ function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos
         <button onClick={onExportar} title="Baixa um arquivo com todos os dados do banco (os arquivos anexados ficam no Storage)"
           style={{ textAlign: "left", background: "transparent", color: "#9ca3af", border: "none", padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
           <span style={{ fontSize: 16 }}>💾</span> Exportar dados (backup)
+        </button>
+        <button onClick={() => onNav("configuracoes")} title="Configurações do app (pede senha)"
+          style={{ textAlign: "left", background: current === "configuracoes" ? "#2a2a2a" : "transparent", color: current === "configuracoes" ? "#fff" : "#9ca3af", border: "none", padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
+          <span style={{ fontSize: 16 }}>⚙️</span> Configurações
         </button>
         <div style={{ marginTop: "auto", padding: "12px 22px", fontSize: 11, color: "#6b7280" }}>Centauro — Gestão de Obras</div>
       </div>
@@ -4559,7 +4584,7 @@ export default function App() {
   const userEmail = session.user?.email || "";
   const selectedObra = view.type === "gantt" ? obras.find(o => o.id === view.obraId) : null;
   const canGoBack = idxHistorico > 0 || view.type !== "dashboard";
-  const tituloView = { relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
+  const tituloView = { configuracoes: "Configurações", relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
 
   return (
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
@@ -4676,6 +4701,8 @@ export default function App() {
                         onImprimirEtiquetas={itemIds => navTo({ type: "estoqueEtiquetas", itemIds })} />
                   : view.type === "financeiro"
                     ? <FinanceiroView obras={obras} onRelatorio={() => navTo({ type: "relatorio", tipo: "financeiro" })} />
+                  : view.type === "configuracoes"
+                    ? <ConfiguracoesView />
                   : view.type === "relatorios"
                     ? <RelatoriosHub onAbrir={tipo => navTo({ type: "relatorio", tipo })} />
                   : view.type === "avisos"

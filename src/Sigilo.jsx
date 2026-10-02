@@ -1,5 +1,6 @@
-import { createContext, useContext, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import Modal from "./Modal";
+import { useConfig } from "./Configuracoes";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sigilo dos valores financeiros. Todo R$ do app nasce oculto (R$ ••••••) e só aparece depois da
@@ -19,6 +20,19 @@ export function SigiloProvider({ children }) {
   const [pedindo, setPedindo] = useState(false);
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
+  const { cfg } = useConfig();
+
+  // Esconde de novo depois de N minutos sem mexer no app (⚙️ Configurações; 0 = nunca).
+  useEffect(() => {
+    const min = cfg.sigiloMinutos;
+    if (!visivel || !min) return;
+    let timer;
+    const armar = () => { clearTimeout(timer); timer = setTimeout(() => setVisivel(false), min * 60000); };
+    const eventos = ["mousemove", "mousedown", "keydown", "touchstart", "scroll"];
+    eventos.forEach(ev => window.addEventListener(ev, armar, { passive: true }));
+    armar();
+    return () => { clearTimeout(timer); eventos.forEach(ev => window.removeEventListener(ev, armar)); };
+  }, [visivel, cfg.sigiloMinutos]);
 
   function desbloquear(senha) {
     if (senha !== SENHA_FINANCEIRO) return false;

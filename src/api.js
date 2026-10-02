@@ -66,6 +66,24 @@ async function lerOpcional(nome, montar) {
   }
 }
 
+// ─── CONFIGURAÇÕES ───────────────────────────────────────────────────────────
+// Uma linha só ('geral'). `null` = tabela ainda não criada (migration_configuracoes.sql):
+// o app segue com os padrões e a tela avisa.
+export async function fetchConfiguracoes() {
+  const { data, error } = await supabase.from("configuracoes").select("data").eq("id", "geral").maybeSingle();
+  if (error) {
+    if (tabelaAusente(error)) { console.warn("fetchConfiguracoes:", error.message); return null; }
+    throw error;
+  }
+  return data ? data.data : {};
+}
+
+export async function salvarConfiguracoes(cfg) {
+  const { error } = await supabase.from("configuracoes")
+    .upsert({ id: "geral", updated_at: new Date().toISOString(), data: cfg });
+  if (error) throw error;
+}
+
 // ─── EQUIPES ─────────────────────────────────────────────────────────────────
 export async function fetchEquipes() {
   const data = await todasAsLinhas(() => supabase.from("equipes").select("*").order("id"));

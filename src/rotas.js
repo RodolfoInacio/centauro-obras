@@ -30,6 +30,7 @@ export function viewParaHash(v) {
     case "financeiro": return "#/financeiro";
     case "avisos": return "#/avisos";
     case "relatorios": return "#/relatorios";
+    case "configuracoes": return "#/configuracoes";
     case "relatorio": return `#/relatorio/${enc(v.tipo)}${v.inicio && v.fim ? `/${v.inicio}/${v.fim}` : ""}`;
     case "diario": return `#/diario${v.obraId ? `/${enc(v.obraId)}${v.diarioId ? `/${enc(v.diarioId)}` : ""}` : ""}`;
     case "diarioPrint": return `#/diario/${enc(v.obraId)}/imprimir/${v.inicio}/${v.fim}`;
@@ -65,6 +66,7 @@ export function hashParaView(hash) {
     case "financeiro": return { type: "financeiro" };
     case "avisos": return { type: "avisos" };
     case "relatorios": return { type: "relatorios" };
+    case "configuracoes": return { type: "configuracoes" };
     case "relatorio": return b ? { type: "relatorio", tipo: b, ...(c && d ? { inicio: c, fim: d } : {}) } : { type: "relatorios" };
     case "diario":
       if (b && c === "imprimir" && d && e) return { type: "diarioPrint", obraId: b, inicio: d, fim: e };

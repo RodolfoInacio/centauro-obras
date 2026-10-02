@@ -54,6 +54,7 @@ src/
                    duas folhas impressas (documento e etiquetas).
   Sigilo.jsx       Oculta os valores em R$ do app inteiro até a senha: provider (em main.jsx),
                    <Dinheiro>, <Oculto> e o botão do olho.
+  Configuracoes.jsx ⚙️ Configurações (senha): padrões, ConfigProvider/useConfig (em main.jsx) e a tela.
   CadastroObra.jsx Campos do cadastro do cliente (o que era a descrição do cartão do Trello).
   AnexosObra.jsx   Anexos da obra: bucket privado, categoria, capa, lixeira, envio múltiplo.
   LeituraIA.jsx    "✨ Ler com IA" de um anexo: chama a function e mostra a conferência antes de aplicar.
@@ -73,6 +74,7 @@ supabase/
   migration_estoque.sql      Estoque: tabelas, view de saldo, triggers de imutabilidade e RPCs (rodar separado).
   migration_ficha_obra.sql   Histórico de versões da obra, trigger anti-DELETE em obras, `obra_anexos`,
                              `obra_comentarios` e bucket privado `obras` (rodar separado).
+  migration_configuracoes.sql  Tabela `configuracoes` (uma linha 'geral') — rodar separado.
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF do orçamento.
   functions/analisar-documento/  Edge Function que lê um anexo (contrato, comprovante, NF, orçamento de fornecedor).
   SETUP.md                   Passo a passo de criação do projeto Supabase.
@@ -132,6 +134,7 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 | `obra_anexos` | `id` (uuid) | `obra_id`, `nome`, `path`, `mime`, `tamanho`, `categoria`, `autor`, `created_at`, `removido_em`, `removido_por` | — (**não usa `data`**: uma linha por arquivo) |
 | `obra_comentarios` | `id` (uuid) | `obra_id`, `tipo` (`comentario`/`sistema`), `texto`, `autor`, `created_at`, `oculto_em` | — (**não usa `data`**: uma linha por comentário) |
 | `obras_historico` | `id` (bigserial) | `obra_id`, `operacao`, `gravado_em`, `data` | a versão anterior da obra, gravada por trigger |
+| `configuracoes` | `id` (só `'geral'`) | `updated_at`, `data` | as configurações do app (`normConfiguracoes`): tamanho das capas, seções abertas, ordem da lista, itens ocultos do menu, minutos para esconder os valores |
 | `profiles` | `id` (= auth.users) | `nome`, `papel` | — |
 | `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (**vazia**, fundação para o futuro) |
 
@@ -539,6 +542,14 @@ anexos, checklist, obra cadastrada, import do PDF) é um comentário `tipo: 'sis
 **Capa automática.** Sem capa escolhida à mão (★ nos anexos, `obra.capa`), a capa é a primeira
 foto da obra — anexo da categoria `foto`, imagem, fora da lixeira (`fetchFotosCapa`). É derivada,
 nada é gravado. Só a categoria foto: comprovante ou projeto em imagem não vira capa.
+
+**Configurações valem para todos, e o padrão entra na chave da preferência.** `ConfigProvider`
+(main.jsx, por fora do Sigilo, que lê `sigiloMinutos`) carrega a linha `'geral'` depois do login;
+sem a tabela, valem os padrões de `normConfiguracoes` e a tela não salva. Seções da obra e ordem da
+lista continuam lembradas por navegador, mas a chave leva o padrão configurado
+(`obra.secao.<id>.a|f`, `dash.sortBy.<ordem>`): mudar a configuração recomeça todos do novo padrão,
+em vez de a escolha antiga de cada navegador vencer calada. A senha da tela é só um SHA-256 em
+`Configuracoes.jsx` (repositório público) — tranca visual como a do Sigilo, não segurança.
 
 **Tela da obra em seções recolhíveis.** Cabeçalho fixo (capa, proposta, status, datas) e, abaixo,
 `Secao` recolhíveis — Cadastro e Anexos abertas, Checklist, Itens, Compras, Financeiro e Equipe
