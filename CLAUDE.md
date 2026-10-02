@@ -296,6 +296,12 @@ Nunca se subtrai gasto de orçado — na tela antiga (previsto × realizado) sub
 sempre que a obra já tinha gasto mais que o previsto restante. Categoria `naoSeAplica` fica fora de
 tudo. A flag 🚩 acende quando `aComprar > (valorTotal − valorRecebido)`.
 
+**Previsto por categoria.** `compras.<cat>.valorPrevisto` é o que o orçamento da obra previu gastar
+naquela categoria (digitado; nome diferente do `previsto` da tela antiga, que `normCompras` converte
+em orçamento). O saldo (`saldoPrevisto`) compara com **gasto + a comprar**, não só com o gasto —
+senão a obra no começo "economizaria" o previsto inteiro. Positivo = economia, negativo = acima.
+Sem previsto lançado, não mostra saldo.
+
 **Status de Compras/Fabricação/Instalação são campos manuais**, não derivados das etapas dos
 itens: a planilha que o escritório mantém já traz esses status prontos e é mais fiel que os
 checkboxes por item.
@@ -529,6 +535,10 @@ uma linha por registro, com trigger que recusa DELETE e só deixa mudar `oculto_
 no Storage. O autor é digitado e lembrado no navegador (`lerAutor`), nunca o e-mail do login — a
 mesma decisão do `responsavel` do diário. A atividade automática (`registrarAtividade`: status,
 anexos, checklist, obra cadastrada, import do PDF) é um comentário `tipo: 'sistema'`, fire-and-forget.
+
+**Capa automática.** Sem capa escolhida à mão (★ nos anexos, `obra.capa`), a capa é a primeira
+foto da obra — anexo da categoria `foto`, imagem, fora da lixeira (`fetchFotosCapa`). É derivada,
+nada é gravado. Só a categoria foto: comprovante ou projeto em imagem não vira capa.
 
 **Tela da obra em seções recolhíveis.** Cabeçalho fixo (capa, proposta, status, datas) e, abaixo,
 `Secao` recolhíveis — Cadastro e Anexos abertas, Checklist, Itens, Compras, Financeiro e Equipe

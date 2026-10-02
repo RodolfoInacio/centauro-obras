@@ -418,6 +418,26 @@ export async function fetchResumoAnexos() {
   }
 }
 
+// Capa automática: para cada obra, o caminho da primeira foto (categoria "foto", imagem, fora da
+// lixeira). Só a categoria foto — comprovante ou projeto escaneado não vira capa. A capa escolhida
+// à mão (obra.capa) vence; esta é só a de quando ninguém escolheu. `obraId` limita a uma obra.
+export async function fetchFotosCapa(obraId) {
+  try {
+    const linhas = await todasAsLinhas(() => {
+      let q = supabase.from("obra_anexos").select("id, obra_id, path, mime, created_at")
+        .eq("categoria", "foto").like("mime", "image/%").is("removido_em", null);
+      if (obraId) q = q.eq("obra_id", obraId);
+      return q.order("created_at").order("id");
+    });
+    const mapa = {};
+    for (const r of linhas) if (!mapa[r.obra_id]) mapa[r.obra_id] = r.path;
+    return mapa;
+  } catch (err) {
+    console.warn("fetchFotosCapa:", err.message);
+    return {};
+  }
+}
+
 // Nome de arquivo seguro para a chave do Storage (sem acento, espaço nem símbolo).
 function saneado(nome) {
   return (nome || "arquivo").normalize("NFD").replace(/[̀-ͯ]/g, "")

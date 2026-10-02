@@ -2,7 +2,7 @@ import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from "rea
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
-import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens } from "./api";
+import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens, fetchFotosCapa } from "./api";
 import { agendar, agendarMacro, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent, normPredecessoras, parsePredecessoras, textoPredecessoras, inicioEstaFixo, toLocalISO } from "./cronograma";
 import CronogramaPrint from "./CronogramaPrint";
 import Modal from "./Modal";
@@ -650,7 +650,14 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
   const [nAnexos, setNAnexos] = useState(null); // resumo da seção Anexos (conhecido quando ela abre)
   const [lendoAnexo, setLendoAnexo] = useState(null); // anexo aberto na leitura com IA
   const [capaUrl, setCapaUrl] = useState("");
-  const capaPath = obra.capa?.path || "";
+  // Sem capa escolhida (★ nos anexos), a primeira foto da obra assume. Relê quando chega anexo novo.
+  const [fotoCapa, setFotoCapa] = useState("");
+  useEffect(() => {
+    let cancel = false;
+    fetchFotosCapa(obra.id).then(m => { if (!cancel) setFotoCapa(m[obra.id] || ""); });
+    return () => { cancel = true; };
+  }, [obra.id, atividadeVersao]);
+  const capaPath = obra.capa?.path || fotoCapa;
   useEffect(() => { setNAnexos(null); }, [obra.id]);
   useEffect(() => {
     if (!capaPath) { setCapaUrl(""); return; }
@@ -2489,7 +2496,11 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
 
   // Capas dos cards: bucket privado, então as URLs assinadas vêm de uma vez (e em cache).
   const [capas, setCapas] = useState({});
-  const chaveCapas = todas.map(o => o.capa?.path).filter(Boolean).join("|");
+  // Obra sem capa escolhida usa a primeira foto dos anexos (fetchFotosCapa).
+  const [fotosCapa, setFotosCapa] = useState({});
+  useEffect(() => { fetchFotosCapa().then(setFotosCapa); }, []);
+  const capaDe = o => o.capa?.path || fotosCapa[o.id] || "";
+  const chaveCapas = todas.map(capaDe).filter(Boolean).join("|");
   useEffect(() => {
     if (!chaveCapas) return;
     let cancel = false;
@@ -2635,7 +2646,7 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
             onAbrirGrupo: () => setAgrupando(g),
             alca, dragProps, isDragging, isOver,
           };
-          const capaUrl = g.contratos.map(o => capas[o.capa?.path]).find(Boolean);
+          const capaUrl = g.contratos.map(o => capas[capaDe(o)]).find(Boolean);
           return g.contratos.length === 1
             ? <CardObra key={g.chave} os={g.contratos[0]} {...comum} capaUrl={capaUrl} />
             : <CardGrupo key={g.chave} g={g} {...comum} capaUrl={capaUrl} />;

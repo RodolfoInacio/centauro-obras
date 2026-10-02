@@ -88,7 +88,9 @@ function normCategoria(v) {
     const fs = legadoParaFornecedores(v);
     itens = fs.length ? [normItemCompra({ id: "leg", fornecedores: fs }, 0)] : [];
   }
-  return { naoSeAplica: !!v.naoSeAplica, itens };
+  // `valorPrevisto` = quanto o orçamento da obra previu gastar nesta categoria. Nome diferente do
+  // `previsto` da tela antiga, que lá era um orçamento e vira linha em legadoParaFornecedores.
+  return { naoSeAplica: !!v.naoSeAplica, valorPrevisto: dinheiro(v.valorPrevisto), itens };
 }
 
 // Undefined-safe, no espírito de normObra: registro antigo abre e cai no formato novo.
@@ -173,20 +175,28 @@ function totaisCategoria(v) {
     aComprar += t.aComprar;
     gasto += t.gasto;
   }
-  return { aComprar, gasto };
+  return { previsto: v.valorPrevisto || 0, aComprar, gasto };
 }
 
 export function comprasTotais(obra) {
   const compras = normCompras(obra.compras);
-  let aComprar = 0, gasto = 0;
+  let previsto = 0, aComprar = 0, gasto = 0;
   for (const cat of CATEGORIAS_COMPRA) {
     const v = compras[cat];
     if (v.naoSeAplica) continue;   // categoria riscada não entra em nenhum total
     const t = totaisCategoria(v);
+    previsto += t.previsto;
     aComprar += t.aComprar;
     gasto += t.gasto;
   }
-  return { aComprar, gasto };
+  return { previsto, aComprar, gasto };
+}
+
+// Economia (positivo) ou estouro (negativo) contra o previsto. Compara com o que a categoria vai
+// custar no fim — gasto + a comprar —, não só com o gasto: senão toda obra no começo pareceria
+// economizar o previsto inteiro. Sem previsto lançado não há com o que comparar (null).
+export function saldoPrevisto(t) {
+  return t.previsto > 0 ? t.previsto - (t.gasto + t.aComprar) : null;
 }
 
 // ─── PENDÊNCIAS (trava da Produção e central de avisos) ───────────────────────
@@ -244,7 +254,7 @@ export function comprasLiberamProducao(obra) {
 // A comprar e gasto de cada categoria da obra (categoria "não se aplica" vem zerada). Relatórios.
 export function comprasPorCategoria(obra) {
   const c = normCompras(obra.compras);
-  return Object.fromEntries(CATEGORIAS_COMPRA.map(cat => [cat, c[cat].naoSeAplica ? { aComprar: 0, gasto: 0 } : totaisCategoria(c[cat])]));
+  return Object.fromEntries(CATEGORIAS_COMPRA.map(cat => [cat, c[cat].naoSeAplica ? { previsto: 0, aComprar: 0, gasto: 0 } : totaisCategoria(c[cat])]));
 }
 
 // Status são DERIVADOS, nunca gravados (mesma regra da etiqueta do lembrete): gravam-se as
@@ -291,7 +301,7 @@ export function fornecedoresConhecidos(obras) {
 }
 
 // ─── TELA ────────────────────────────────────────────────────────────────────
-const COLS = "18px 92px minmax(220px, 1fr) 112px 112px 116px 36px";
+const COLS = "18px 92px minmax(200px, 1fr) 128px 112px 112px 116px 36px";
 const inp = { border: "1px solid #e2e8f0", borderRadius: 5, padding: "4px 6px", fontSize: 12, color: "#1e293b", background: "#fff", boxSizing: "border-box" };
 const rotulo = { fontSize: 10, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase", display: "block", marginBottom: 3 };
 const DATALIST_ID = "compras-fornecedores";
@@ -300,6 +310,18 @@ function Chip({ cor, children, title }) {
   return (
     <span title={title} style={{ display: "inline-flex", alignItems: "center", gap: 4, background: cor + "1a", color: cor, border: `1px solid ${cor}55`, borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>
       {children}
+    </span>
+  );
+}
+
+// "Economia R$ X" em verde ou "Acima R$ X" em vermelho; nada sem previsto.
+function SaldoPrevisto({ t, tamanho = 10.5 }) {
+  const s = saldoPrevisto(t);
+  if (s === null) return null;
+  const cor = s >= 0 ? "#16a34a" : "#dc2626";
+  return (
+    <span title="Previsto − (gasto + a comprar)" style={{ fontSize: tamanho, fontWeight: 700, color: cor, whiteSpace: "nowrap" }}>
+      {s >= 0 ? "Economia " : "Acima "}<Dinheiro v={Math.abs(s)} />
     </span>
   );
 }
@@ -538,9 +560,11 @@ function CorpoCategoria({ v, onChange, onEntradaEstoque, onAbrirDocEstoque }) {
           style={{ border: "1px dashed #c9a227", color: "#a16207", background: "#fffbeb", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
           + Adicionar item
         </button>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 18, fontSize: 12 }}>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 18, fontSize: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ color: "#64748b" }}>Previsto: <b style={{ color: "#1e293b" }}><Dinheiro v={t.previsto} /></b></span>
           <span style={{ color: "#64748b" }}>A comprar: <b style={{ color: t.aComprar > 0 ? "#dc2626" : "#1e293b" }}><Dinheiro v={t.aComprar} /></b></span>
           <span style={{ color: "#64748b" }}>Valor total gasto: <b style={{ color: "#1e293b", fontSize: 13 }}><Dinheiro v={t.gasto} /></b></span>
+          <SaldoPrevisto t={t} tamanho={12} />
         </div>
       </div>
     </div>
@@ -588,11 +612,12 @@ export default function ComprasObra({ compras, onChange, sugestoes = [], onEntra
       <datalist id={DATALIST_ID}>
         {sugestoes.map(n => <option key={n} value={n} />)}
       </datalist>
-      <div style={{ minWidth: 760, border: "1px solid #e2e8f0", borderRadius: 8, overflow: "hidden" }}>
+      <div style={{ minWidth: 880, border: "1px solid #e2e8f0", borderRadius: 8, overflow: "hidden" }}>
         <div style={{ display: "grid", gridTemplateColumns: COLS, gap: 10, padding: "6px 10px", background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
           <span />
           <span style={th}>Categoria</span>
           <span style={th}>Itens</span>
+          <span style={{ ...th, textAlign: "right" }} title="Quanto o orçamento da obra previu gastar nesta categoria">Previsto</span>
           <span style={{ ...th, textAlign: "right" }}>A comprar</span>
           <span style={{ ...th, textAlign: "right" }}>Total gasto</span>
           <span style={th}>Próx. entrega</span>
@@ -636,6 +661,12 @@ export default function ComprasObra({ compras, onChange, sugestoes = [], onEntra
                     <span style={{ fontSize: 12, color: "#cbd5e1", fontStyle: "italic" }}>clique para lançar</span>
                   )}
                 </div>
+                <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }} onClick={e => e.stopPropagation()}>
+                  {na ? <span style={{ fontSize: 12, color: "#cbd5e1" }}>—</span> : <>
+                    <CampoValor value={v.valorPrevisto} onChange={x => setCat(cat, { ...v, valorPrevisto: x })} />
+                    <SaldoPrevisto t={t} />
+                  </>}
+                </span>
                 <span style={{ textAlign: "right", fontSize: 12, fontWeight: 700, color: !na && t.aComprar > 0 ? "#dc2626" : "#1e293b" }}><Dinheiro v={na ? 0 : t.aComprar} /></span>
                 <span style={{ textAlign: "right", fontSize: 12, fontWeight: 700, color: "#1e293b" }}><Dinheiro v={na ? 0 : t.gasto} /></span>
                 <span style={{ fontSize: 12, fontWeight: prox && prox < hoje ? 800 : 400, color: prox && prox < hoje ? "#dc2626" : "#475569" }}>{fmtData(prox)}</span>
@@ -660,6 +691,10 @@ export default function ComprasObra({ compras, onChange, sugestoes = [], onEntra
           <span />
           <span style={{ fontWeight: 800, fontSize: 13 }}>Total</span>
           <span />
+          <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+            <span style={{ fontWeight: 800, fontSize: 13 }}><Dinheiro v={total.previsto} /></span>
+            <SaldoPrevisto t={total} tamanho={11.5} />
+          </span>
           <span style={{ textAlign: "right", fontWeight: 800, fontSize: 13, color: total.aComprar > 0 ? "#dc2626" : "#1e293b" }}><Dinheiro v={total.aComprar} /></span>
           <span style={{ textAlign: "right", fontWeight: 800, fontSize: 13 }}><Dinheiro v={total.gasto} /></span>
           <span />
