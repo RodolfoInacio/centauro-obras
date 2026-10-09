@@ -16,7 +16,7 @@ import CadastroObra, { normCadastro } from "./CadastroObra";
 import AnexosObra, { enviarArquivos, urlsComCache } from "./AnexosObra";
 import LeituraIA, { normDocumentosLidos } from "./LeituraIA";
 import ComentariosObra, { lerAutor } from "./ComentariosObra";
-import { ComunicacaoProvider, SinoNotificacoes, BotaoMensagens, ChatView, useComunicacao } from "./Comunicacao";
+import { ComunicacaoProvider, SinoNotificacoes, BotaoMensagens, ChatView, MeuPerfil, useComunicacao } from "./Comunicacao";
 import NovoContrato from "./NovoContrato";
 import { ConfiguracoesView, useConfig } from "./Configuracoes";
 import { ETAPAS, PESOS, itemPercentual, precisaAlertaCompras, finObra, finTotais, agruparObras } from "./calculos";
@@ -4660,7 +4660,7 @@ export default function App() {
           <SinoNotificacoes obras={obras} onAbrirObra={obraId => navTo({ type: "gantt", obraId })} />
           <BotaoMensagens onAbrir={() => navTo({ type: "mensagens" })} />
           <OlhoFinanceiro escuro size={16} />
-          <span style={{ color: "#9ca3af", fontSize: 12, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={userEmail}>👤 {userEmail}</span>
+          <MeuPerfil email={userEmail} />
           <button onClick={handleLogout} title="Sair"
             style={{ background: "transparent", color: "#9ca3af", border: "1px solid #333", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Sair</button>
         </div>

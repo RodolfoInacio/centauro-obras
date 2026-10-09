@@ -447,6 +447,82 @@ export function ChatView({ conversa: conversaParam, onConversa, obras, onAbrirOb
   );
 }
 
+// ─── BARRA DO TOPO: 👤 MEU PERFIL ────────────────────────────────────────────
+// O nome do perfil é o que os colegas veem e o que vai depois do @. Trocar o nome não mexe no
+// e-mail do login — é só a tabela profiles.
+export function MeuPerfil({ email }) {
+  const c = useComunicacao();
+  const [aberto, setAberto] = useState(false);
+  const [nome, setNome] = useState("");
+  const [erro, setErro] = useState("");
+  const [salvando, setSalvando] = useState(false);
+  const [ok, setOk] = useState(false);
+  const caixa = useRef(null);
+  useEffect(() => {
+    if (!aberto) return;
+    const fora = (e) => { if (caixa.current && !caixa.current.contains(e.target)) setAberto(false); };
+    document.addEventListener("mousedown", fora);
+    return () => document.removeEventListener("mousedown", fora);
+  }, [aberto]);
+
+  const eu = c?.eu;
+  const exibido = eu && !nomeEhEmail(eu) ? nomePessoa(eu) : email;
+  function abrir() {
+    setNome(eu && !nomeEhEmail(eu) ? eu.nome : "");
+    setErro(""); setOk(false); setAberto(a => !a);
+  }
+  async function salvar() {
+    const n = nome.trim().replace(/\s+/g, " ");
+    if (n.length < 2) { setErro("Digite seu nome."); return; }
+    if (n.includes("@")) { setErro("Use um nome, não o e-mail."); return; }
+    if (n.length > 40) { setErro("Use até 40 letras."); return; }
+    if (c.pessoas.some(p => p.id !== c.userId && nomePessoa(p).toLowerCase() === n.toLowerCase())) {
+      setErro("Já tem alguém com esse nome — acrescente o sobrenome."); return;
+    }
+    setSalvando(true);
+    try { await salvarMeuNome(c.userId, n); await c.recarregarPessoas(); setErro(""); setOk(true); }
+    catch (err) { setErro(err.message); }
+    finally { setSalvando(false); }
+  }
+
+  return (
+    <div ref={caixa} style={{ position: "relative" }}>
+      <button onClick={abrir} title="Meu perfil — trocar o nome que aparece para os colegas"
+        style={{ background: "transparent", border: "none", color: "#9ca3af", fontSize: 12, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", cursor: "pointer", padding: 0 }}>
+        👤 {exibido}
+      </button>
+      {aberto && (
+        <div style={{ position: "absolute", right: 0, top: "calc(100% + 10px)", width: 300, maxWidth: "calc(100vw - 24px)", background: "#fff", borderRadius: 12, boxShadow: "0 12px 40px rgba(0,0,0,0.25)", zIndex: 60, padding: 16, color: "#1e293b" }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 12 }}>
+            <Avatar nome={nome || exibido} tamanho={38} />
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontWeight: 800, fontSize: 14 }}>Meu perfil</div>
+              <div style={{ fontSize: 11.5, color: "#94a3b8", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={email}>Login: {email}</div>
+            </div>
+          </div>
+          {!eu ? (
+            <div style={{ fontSize: 12, color: "#92400e" }}>Seu perfil ainda não existe no banco — peça para criar em profiles.</div>
+          ) : (<>
+            <label style={{ fontSize: 12, fontWeight: 700, color: "#475569" }}>Nome que aparece para os colegas</label>
+            <input value={nome} autoFocus onChange={e => { setNome(e.target.value); setErro(""); setOk(false); }} onKeyDown={e => e.key === "Enter" && salvar()}
+              placeholder="Ex.: Renato" maxLength={40}
+              style={{ width: "100%", boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: 8, padding: "7px 10px", fontSize: 13, marginTop: 4 }} />
+            <div style={{ fontSize: 11.5, color: "#64748b", marginTop: 6 }}>
+              Nos comentários, marcam você como <b style={{ color: "#1d4ed8" }}>@{nome.trim() || "Nome"}</b>. O e-mail de login não muda.
+            </div>
+            {erro && <div style={{ fontSize: 12, color: "#dc2626", marginTop: 6 }}>{erro}</div>}
+            {ok && <div style={{ fontSize: 12, color: "#16a34a", marginTop: 6 }}>✓ Nome salvo.</div>}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 12 }}>
+              <button onClick={() => setAberto(false)} style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Fechar</button>
+              <button onClick={salvar} disabled={salvando} style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 7, padding: "6px 14px", fontSize: 12, fontWeight: 700, cursor: salvando ? "wait" : "pointer" }}>{salvando ? "Salvando…" : "Salvar"}</button>
+            </div>
+          </>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Faixa "Seu nome no sistema": aparece aberta enquanto o perfil ainda guarda o e-mail.
 function MeuNome() {
   const c = useComunicacao();
