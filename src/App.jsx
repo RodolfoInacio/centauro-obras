@@ -16,6 +16,7 @@ import CadastroObra, { normCadastro } from "./CadastroObra";
 import AnexosObra, { enviarArquivos, urlsComCache } from "./AnexosObra";
 import LeituraIA, { normDocumentosLidos } from "./LeituraIA";
 import ComentariosObra, { lerAutor } from "./ComentariosObra";
+import { ComunicacaoProvider, SinoNotificacoes, BotaoMensagens, ChatView, useComunicacao } from "./Comunicacao";
 import NovoContrato from "./NovoContrato";
 import { ConfiguracoesView, useConfig } from "./Configuracoes";
 import { ETAPAS, PESOS, itemPercentual, precisaAlertaCompras, finObra, finTotais, agruparObras } from "./calculos";
@@ -2889,10 +2890,12 @@ function OrdemServicoPrint({ agenda, obras, equipes, inicio, fim, onBack }) {
 // ─── MENU LATERAL ─────────────────────────────────────────────────────────────
 function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos = 0 }) {
   const { cfg } = useConfig();
+  const com = useComunicacao();
   const todos = [
     { key: "dashboard", label: "Obras", icon: "🏠" },
     { key: "avisos", label: "Central de avisos", icon: "⚠️", badge: nAvisos },
     { key: "relatorios", label: "Relatórios", icon: "📈" },
+    ...(com?.ativo ? [{ key: "mensagens", label: "Mensagens", icon: "✉️", badge: com.naoLidasMsg, dica: "Mensagens não lidas" }] : []),
     { key: "calendar", label: "Calendário", icon: "📅" },
     { key: "diario", label: "Diário de Obras", icon: "📓" },
     { key: "equipes", label: "Equipes", icon: "👷" },
@@ -2917,7 +2920,7 @@ function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos
             style={{ textAlign: "left", background: current === it.key ? "#2a2a2a" : "transparent", color: current === it.key ? "#fff" : "#d1d5db", border: "none", borderLeftWidth: 3, borderLeftStyle: "solid", borderLeftColor: current === it.key ? "#c9a227" : "transparent", padding: "13px 22px", fontSize: 14, fontWeight: 600, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
             <span style={{ fontSize: 16 }}>{it.icon}</span> {it.label}
             {it.badge > 0 && (
-              <span title="Obras com pendência crítica" style={{ marginLeft: "auto", background: "#dc2626", color: "#fff", borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 800 }}>{it.badge}</span>
+              <span title={it.dica || "Obras com pendência crítica"} style={{ marginLeft: "auto", background: "#dc2626", color: "#fff", borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 800 }}>{it.badge}</span>
             )}
           </button>
         ))}
@@ -4579,7 +4582,7 @@ export default function App() {
   }
   if (view.type === "relatorio") {
     return <RelatorioPrint tipo={view.tipo} obras={obras} agenda={agenda} cronogramas={cronogramas} equipes={equipes}
-      inicio={view.inicio} fim={view.fim} onBack={back}
+      inicio={view.inicio} fim={view.fim} personalizar={!!view.personalizar} onBack={back}
       onPeriodo={(inicio, fim) => navReplace({ type: "relatorio", tipo: view.tipo, inicio, fim })} />;
   }
   if (view.type === "medicaoPrint") {
@@ -4617,9 +4620,10 @@ export default function App() {
   const userEmail = session.user?.email || "";
   const selectedObra = view.type === "gantt" ? obras.find(o => o.id === view.obraId) : null;
   const canGoBack = idxHistorico > 0 || view.type !== "dashboard";
-  const tituloView = { configuracoes: "Configurações", relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", orcamentos: "Orçamentos", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
+  const tituloView = { mensagens: "Mensagens", configuracoes: "Configurações", relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", orcamentos: "Orçamentos", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
 
   return (
+    <ComunicacaoProvider userId={userId}>
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
       <SideMenu open={menuOpen} onClose={() => setMenuOpen(false)} current={view.type} nAvisos={nAvisosCriticos}
         onNav={(key) => navTo({ type: key })}
@@ -4653,6 +4657,8 @@ export default function App() {
             <button onClick={() => navTo({ type: "print", obraId: selectedObra.id })}
               style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Nota de Serviço</button>
           )}
+          <SinoNotificacoes obras={obras} onAbrirObra={obraId => navTo({ type: "gantt", obraId })} />
+          <BotaoMensagens onAbrir={() => navTo({ type: "mensagens" })} />
           <OlhoFinanceiro escuro size={16} />
           <span style={{ color: "#9ca3af", fontSize: 12, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={userEmail}>👤 {userEmail}</span>
           <button onClick={handleLogout} title="Sair"
@@ -4741,8 +4747,12 @@ export default function App() {
                     ? <FinanceiroView obras={obras} onRelatorio={() => navTo({ type: "relatorio", tipo: "financeiro" })} />
                   : view.type === "configuracoes"
                     ? <ConfiguracoesView />
+                  : view.type === "mensagens"
+                    ? <ChatView conversa={view.conversa || null} obras={obras}
+                        onConversa={conversa => navReplace({ type: "mensagens", conversa })}
+                        onAbrirObra={openObra} />
                   : view.type === "relatorios"
-                    ? <RelatoriosHub onAbrir={tipo => navTo({ type: "relatorio", tipo })} />
+                    ? <RelatoriosHub onAbrir={(tipo, personalizar) => navTo({ type: "relatorio", tipo, ...(personalizar ? { personalizar: true } : {}) })} />
                   : view.type === "avisos"
                     ? <CentralAvisos obras={obras} agenda={agenda} cronogramas={cronogramas}
                         onRelatorio={() => navTo({ type: "relatorio", tipo: "avisos" })}
@@ -4772,6 +4782,7 @@ export default function App() {
         </div>
       </Modal>
     </div>
+    </ComunicacaoProvider>
   );
 }
 

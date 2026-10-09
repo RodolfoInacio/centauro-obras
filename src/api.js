@@ -542,7 +542,7 @@ export async function lerDocumentoComIA(anexoId, contexto) {
 // ─── COMENTÁRIOS E ATIVIDADE DA OBRA ─────────────────────────────────────────
 // Imutáveis no banco: não se editam nem se apagam, só se ocultam.
 function comentario(r) {
-  return { id: r.id, obraId: r.obra_id, tipo: r.tipo, texto: r.texto, autor: r.autor || "", createdAt: r.created_at, ocultoEm: r.oculto_em || null };
+  return { id: r.id, obraId: r.obra_id, tipo: r.tipo, texto: r.texto, autor: r.autor || "", createdAt: r.created_at, ocultoEm: r.oculto_em || null, mencoes: r.mencoes || [] };
 }
 
 export async function fetchComentariosObra(obraId) {
@@ -555,10 +555,16 @@ export async function fetchComentariosObra(obraId) {
   }
 }
 
-export async function inserirComentario({ obraId, texto, autor, tipo = "comentario" }) {
-  const { data, error } = await supabase.from("obra_comentarios")
-    .insert({ obra_id: obraId, texto, autor: autor || null, tipo }).select("*").single();
-  if (error) throw error;
+// `mencoes` só vai no INSERT quando há alguém marcado: sem a migration_mensagens.sql a coluna
+// não existe, e o comentário comum precisa continuar gravando.
+export async function inserirComentario({ obraId, texto, autor, tipo = "comentario", mencoes = [] }) {
+  const linha = { obra_id: obraId, texto, autor: autor || null, tipo };
+  if (mencoes.length) linha.mencoes = mencoes;
+  const { data, error } = await supabase.from("obra_comentarios").insert(linha).select("*").single();
+  if (error) {
+    if (mencoes.length && /mencoes/.test(error.message || "")) throw new Error("para marcar pessoas, rode a migration_mensagens.sql no Supabase");
+    throw error;
+  }
   return comentario(data);
 }
 
@@ -568,6 +574,88 @@ export async function ocultarComentario(id, oculto) {
   if (error) throw error;
   if (!data || data.length === 0) throw new Error("O comentário não foi alterado — sem permissão ou ele não existe.");
   return comentario(data[0]);
+}
+
+// ─── PESSOAS, NOTIFICAÇÕES E MENSAGENS (migration_mensagens.sql) ─────────────
+// Cada pessoa é um login (auth.users) com o nome em profiles.nome.
+export async function fetchPessoas() {
+  try {
+    const linhas = await todasAsLinhas(() => supabase.from("profiles").select("id, nome").order("id"));
+    return linhas.map(r => ({ id: r.id, nome: (r.nome || "").trim() }));
+  } catch (err) {
+    console.warn("fetchPessoas:", err.message);
+    return [];
+  }
+}
+
+export async function salvarMeuNome(userId, nome) {
+  const { data, error } = await supabase.from("profiles").update({ nome }).eq("id", userId).select("id");
+  if (error) throw error;
+  if (!data || data.length === 0) throw new Error("O nome não foi gravado — perfil não encontrado.");
+}
+
+function notificacao(r) {
+  return { id: r.id, tipo: r.tipo, deId: r.de_id, deNome: r.de_nome || "", obraId: r.obra_id, comentarioId: r.comentario_id, texto: r.texto || "", createdAt: r.created_at, lidaEm: r.lida_em || null };
+}
+
+// As 50 mais recentes. `null` = tabela ainda não criada.
+export async function fetchNotificacoes(userId) {
+  const { data, error } = await supabase.from("notificacoes").select("*").eq("user_id", userId)
+    .order("created_at", { ascending: false }).order("id").limit(50);
+  if (error) {
+    if (tabelaAusente(error)) return null;
+    throw error;
+  }
+  return (data || []).map(notificacao);
+}
+
+export async function marcarNotificacoesLidas(ids) {
+  if (!ids.length) return;
+  const { error } = await supabase.from("notificacoes").update({ lida_em: new Date().toISOString() }).in("id", ids).is("lida_em", null);
+  if (error) throw error;
+}
+
+export const CONVERSA_GERAL = "geral";
+export function chaveConversa(a, b) {
+  const [x, y] = [String(a), String(b)].sort();
+  return `dm:${x}:${y}`;
+}
+
+export function linhaMensagem(r) {
+  return { id: r.id, conversa: r.conversa, deId: r.de_id, deNome: r.de_nome || "", paraId: r.para_id || null, texto: r.texto, obraId: r.obra_id || null, createdAt: r.created_at };
+}
+
+// `null` = tabela ainda não criada.
+export async function fetchResumoMensagens() {
+  const { data, error } = await supabase.rpc("resumo_mensagens");
+  if (error) {
+    if (tabelaAusente(error) || error.code === "PGRST202" || error.code === "42883") return null;
+    throw error;
+  }
+  return (data || []).map(r => ({ conversa: r.conversa, ultimaEm: r.ultima_em, naoLidas: Number(r.nao_lidas) || 0 }));
+}
+
+// As últimas 300 mensagens da conversa, em ordem cronológica.
+export async function fetchMensagens(conversa) {
+  const { data, error } = await supabase.from("mensagens").select("*").eq("conversa", conversa)
+    .order("created_at", { ascending: false }).order("id").limit(300);
+  if (error) throw error;
+  return (data || []).map(linhaMensagem).reverse();
+}
+
+export async function enviarMensagem({ deId, deNome, paraId, texto, obraId }) {
+  const conversa = paraId ? chaveConversa(deId, paraId) : CONVERSA_GERAL;
+  const { data, error } = await supabase.from("mensagens")
+    .insert({ conversa, de_id: deId, de_nome: deNome || null, para_id: paraId || null, texto, obra_id: obraId || null })
+    .select("*").single();
+  if (error) throw error;
+  return linhaMensagem(data);
+}
+
+export async function marcarConversaLida(userId, conversa) {
+  const { error } = await supabase.from("mensagens_lidas")
+    .upsert({ user_id: userId, conversa, lida_ate: new Date().toISOString() }, { onConflict: "user_id,conversa" });
+  if (error) throw error;
 }
 
 // ─── BACKUP COMPLETO (botão "Exportar dados") ────────────────────────────────
@@ -580,7 +668,7 @@ export async function fetchBackupCompleto() {
   };
   const obras = await tabela("obras");
   const nomes = ["equipes", "agenda", "cronogramas", "lembretes", "diarios", "obra_anexos", "obra_comentarios",
-    "obras_historico", "orcamentos", "estoque_itens", "estoque_documentos", "estoque_movimentos"];
+    "obras_historico", "orcamentos", "mensagens", "notificacoes", "estoque_itens", "estoque_documentos", "estoque_movimentos"];
   const resto = await Promise.all(nomes.map(opcional));
   return { geradoEm: new Date().toISOString(), obras, ...Object.fromEntries(nomes.map((n, i) => [n, resto[i]])) };
 }

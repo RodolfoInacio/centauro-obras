@@ -1,13 +1,17 @@
 import { useEffect, useState } from "react";
 import { fetchComentariosObra, inserirComentario, ocultarComentario } from "./api";
+import { useComunicacao, TextoComMencao, TextoMarcado, mencoesDoTexto, nomePessoa, nomeEhEmail, corDe } from "./Comunicacao";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Comentários e atividade da obra — a coluna da direita, como no Trello.
 // Cada comentário é uma linha própria no banco (obra_comentarios), fora do jsonb da obra:
 // duas pessoas comentando ao mesmo tempo não se apagam. Não se edita nem se apaga, só se oculta.
 //
-// O autor é digitado e lembrado no navegador, nunca o e-mail do login: o login é da empresa,
-// não da pessoa (mesma decisão do `responsavel` do diário).
+// O autor é digitado e lembrado no navegador, nunca o e-mail do login (mesma decisão do
+// `responsavel` do diário). Quem já acertou o nome em Mensagens começa com ele preenchido.
+//
+// "@Nome" marca uma pessoa do sistema (Comunicacao.jsx): o banco grava os ids em `mencoes` e um
+// trigger cria a notificação do 🔔 de cada marcado.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CHAVE_AUTOR = "autor.nome";
@@ -23,21 +27,20 @@ function fmtQuando(iso) {
   return new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
-const CORES_AVATAR = ["#0ea5e9", "#10b981", "#8b5cf6", "#f97316", "#ec4899", "#14b8a6", "#6366f1", "#eab308"];
-function corDe(nome) {
-  let h = 0;
-  for (const c of nome || "") h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return CORES_AVATAR[h % CORES_AVATAR.length];
-}
-
 export default function ComentariosObra({ obraId, recarregar = 0 }) {
   const [lista, setLista] = useState(undefined);   // undefined = carregando, null = sem migration
   const [texto, setTexto] = useState("");
+  const com = useComunicacao();
   const [autor, setAutor] = useState(lerAutor);
   const [editandoAutor, setEditandoAutor] = useState(false);
   const [erro, setErro] = useState("");
   const [enviando, setEnviando] = useState(false);
   const [verOcultos, setVerOcultos] = useState(false);
+
+  // Sem nome lembrado neste navegador: usa o do perfil, se já não for o e-mail.
+  useEffect(() => {
+    if (!autor && com?.eu && !nomeEhEmail(com.eu)) setAutor(nomePessoa(com.eu));
+  }, [com?.eu, autor]);
 
   useEffect(() => {
     let cancel = false;
@@ -54,7 +57,8 @@ export default function ComentariosObra({ obraId, recarregar = 0 }) {
     setEnviando(true);
     try {
       // Só entra na lista depois que o banco confirma; se falhar, o texto continua na caixa.
-      const novo = await inserirComentario({ obraId, texto: t, autor: a });
+      const mencoes = com?.ativo ? mencoesDoTexto(t, com.pessoas, com.userId) : [];
+      const novo = await inserirComentario({ obraId, texto: t, autor: a, mencoes });
       setLista(prev => [novo, ...(prev || [])]);
       setTexto("");
       setEditandoAutor(false);
@@ -90,10 +94,9 @@ export default function ComentariosObra({ obraId, recarregar = 0 }) {
       ) : (
         <>
           <div>
-            <textarea rows={3} value={texto} placeholder="Escrever um comentário…"
-              onChange={e => { setTexto(e.target.value); if (erro) setErro(""); }}
-              onKeyDown={e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); enviar(); } }}
-              style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 10px", fontSize: 13, resize: "vertical", boxSizing: "border-box", fontFamily: "inherit" }} />
+            <TextoComMencao value={texto} onEnviar={enviar}
+              placeholder={com?.ativo ? "Escrever um comentário… (@ para marcar alguém)" : "Escrever um comentário…"}
+              onChange={v => { setTexto(v); if (erro) setErro(""); }} />
             {(editandoAutor || !autor) && (
               <input value={autor} onChange={e => { setAutor(e.target.value); if (erro) setErro(""); }} placeholder="Seu nome"
                 style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 8, padding: "6px 10px", fontSize: 12, marginTop: 6, boxSizing: "border-box" }} />
@@ -138,7 +141,7 @@ export default function ComentariosObra({ obraId, recarregar = 0 }) {
                     </button>
                   </div>
                   <div style={{ fontSize: 12.5, color: "#334155", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: "7px 10px", marginTop: 3, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                    {c.texto}
+                    <TextoMarcado texto={c.texto} nomes={(c.mencoes || []).map(id => nomePessoa((com?.pessoas || []).find(p => p.id === id))).filter(n => n !== "Sem nome")} />
                   </div>
                 </div>
               </div>

@@ -58,7 +58,9 @@ src/
   CadastroObra.jsx Campos do cadastro do cliente (o que era a descrição do cartão do Trello).
   AnexosObra.jsx   Anexos da obra: bucket privado, categoria, capa, lixeira, envio múltiplo.
   LeituraIA.jsx    "✨ Ler com IA" de um anexo: chama a function e mostra a conferência antes de aplicar.
-  ComentariosObra.jsx  Coluna de comentários e atividade da obra + autor lembrado no navegador.
+  ComentariosObra.jsx  Coluna de comentários e atividade da obra + autor lembrado no navegador + @menção.
+  Comunicacao.jsx  Pessoas (profiles), 🔔 notificações de @menção, ✉️ chat (Geral + conversa direta),
+                   provider com Realtime, campo de texto com @ e a tela de Mensagens.
   OrcamentoLivre.jsx  🧾 Orçamentos livres (fora do Wvetro): modelo, lista, editor, cálculo por vãos e a folha A4 com a marca.
   NovoContrato.jsx Popup "+ Novo cliente / contrato" (cliente novo ou contrato de obra existente).
   index.css        CSS global mínimo.
@@ -77,6 +79,8 @@ supabase/
                              `obra_comentarios` e bucket privado `obras` (rodar separado).
   migration_configuracoes.sql  Tabela `configuracoes` (uma linha 'geral') — rodar separado.
   migration_orcamentos.sql   Tabela `orcamentos` (orçamentos livres, único em `numero`) — rodar separado.
+  migration_mensagens.sql    `obra_comentarios.mencoes`, `notificacoes`, `mensagens`, `mensagens_lidas`,
+                             RPC `resumo_mensagens` e Realtime — rodar separado, depois da ficha_obra.
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF do orçamento.
   functions/analisar-documento/  Edge Function que lê um anexo (contrato, comprovante, NF, orçamento de fornecedor).
   SETUP.md                   Passo a passo de criação do projeto Supabase.
@@ -138,7 +142,10 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 | `obras_historico` | `id` (bigserial) | `obra_id`, `operacao`, `gravado_em`, `data` | a versão anterior da obra, gravada por trigger |
 | `configuracoes` | `id` (só `'geral'`) | `updated_at`, `data` | as configurações do app (`normConfiguracoes`): tamanho das capas, seções abertas, ordem da lista, itens ocultos do menu, minutos para esconder os valores |
 | `orcamentos` | `id` | `numero` (único), `cliente`, `status`, `obra_id`, `updated_at`, `data` | o orçamento livre: cliente, itens (com `calc` de vãos), desconto, condições (`normOrcamento`) |
-| `profiles` | `id` (= auth.users) | `nome`, `papel` | — |
+| `profiles` | `id` (= auth.users) | `nome`, `papel` | — (`nome` é o nome exibido no chat e nas menções; cada um troca o seu em Mensagens) |
+| `notificacoes` | `id` (uuid) | `user_id` (destinatário), `tipo`, `de_id`, `de_nome`, `obra_id`, `comentario_id`, `texto`, `created_at`, `lida_em` | — (**não usa `data`**; só nasce pelo trigger do comentário) |
+| `mensagens` | `id` (uuid) | `conversa` (`geral` ou `dm:<uuid>:<uuid>`), `de_id`, `de_nome`, `para_id`, `texto`, `obra_id`, `created_at` | — (**não usa `data`**; imutável) |
+| `mensagens_lidas` | (`user_id`,`conversa`) | `lida_ate` | — |
 | `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (**vazia**, fundação para o futuro) |
 
 - `obra_membros` e os papéis `encarregado`/`cliente` existem no schema mas **não são usados**: as
@@ -220,7 +227,8 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   `cronogramas` (o **macro**: todas as obras, uma por linha), `cronograma` (`id`, o micro de uma
   obra), `cronogramaPrint` (`id`), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`),
   `estoque` (`codigo` opcional, vindo do QR), `estoqueDoc` (`docId`), `estoqueEtiquetas` (`itemIds`),
-  `orcamentos` (`id` opcional = editor aberto), `orcamentoPrint` (`id`).
+  `orcamentos` (`id` opcional = editor aberto), `orcamentoPrint` (`id`), `mensagens` (`conversa` opcional).
+  `relatorio` aceita `personalizar: true` (só no `history.state`), que abre o painel de filtros.
   `DiaAgenda`, as três telas do diário e as quatro do estoque continuam sendo early-returns dos
   próprios componentes, mas guiados pelos parâmetros da view (`diario` tem `obraId`/`diarioId`,
   `estoque` tem `tela`).
@@ -607,6 +615,26 @@ item sem medida (serviço) fica de fora. Cores e dados da folha seguem a identid
 (`#ED5454`/`#34353A`, `assets/logo-cor.svg`, ícone como marca d'água) e o rodapé do Wvetro
 (`EMPRESA`). Gravação igual ao diário (debounced, última gravação vence); valores passam pelo
 Sigilo e a folha sai sem preços com os valores ocultos.
+
+**Relatório personalizável: o filtro é recorte, não outro relatório.** Cada relatório continua
+abrindo completo ("Gerar completo" no hub zera o filtro); "⚙ Personalizar" recorta por obra (o
+cliente marca todos os contratos), item (só com obra escolhida — item do orçamento na carteira, item
+de compra em Compras), categoria, situação, status, área, equipe, e escolhe as partes da folha.
+O filtro mora no `sessionStorage` por tipo (`rel.filtro.<tipo>`), sobrevive ao voltar e ao F5, e
+**sai impresso no cabeçalho** ("Recorte: …") — folha recortada sem dizer o recorte passaria pela
+inteira. Obra escolhida à mão entra mesmo concluída. Partes novas e longas (itens da obra, detalhe
+das compras, lista dia a dia, compras por categoria) começam desligadas, para o completo não mudar.
+
+**Menção e chat: a pessoa é o login, não o nome digitado.** O comentário continua com o `autor`
+digitado, mas a menção precisa de destinatário — então "@Nome" marca um `profiles.id` e quem
+recebe é quem entra com aquele e-mail. **Exige um login por pessoa** (Authentication → Users); com
+o login único da empresa não há a quem notificar. O comentário grava `mencoes uuid[]` e um trigger
+`security definer` cria as `notificacoes` (o cliente não tem INSERT nelas: ninguém fabrica
+notificação para outro). Mensagem e notificação são imutáveis como o comentário; a única escrita
+do dono é `lida_em` / `mensagens_lidas`. A conversa direta tem chave `dm:<menor>:<maior>` conferida
+por `check` no banco. Sino e cartinha acendem pelo Realtime (respeita RLS) e, sem ele, a cada
+minuto e ao voltar para a aba. Sem a migration, os dois ícones e o item do menu somem e o
+comentário comum grava como antes (`mencoes` só vai no INSERT quando há alguém marcado).
 
 **Central de avisos é derivada.** `avisosDaObra` (avisos.js) deduz tudo dos dados — nada é gravado.
 Documentos vêm de `fetchResumoAnexos` (categoria dos anexos fora da lixeira) ou do checklist marcado.

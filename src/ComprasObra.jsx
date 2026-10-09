@@ -238,7 +238,7 @@ export function situacaoItensCompra(obra, hoje = hojeLocal()) {
       else if (ativos.some(f => atrasada(f, hoje))) situacao = "atrasada";
       else if (ativos.every(f => f.entrega.recebido)) situacao = "entregue";
       else situacao = "aguardando";
-      out.push({ cat, nome, tipo: it.tipo, situacao, entregas });
+      out.push({ cat, nome, tipo: it.tipo, itemId: it.id, situacao, entregas, fornecedores: it.fornecedores, estoque: it.estoque });
     });
   }
   return out;
