@@ -59,6 +59,7 @@ src/
   AnexosObra.jsx   Anexos da obra: bucket privado, categoria, capa, lixeira, envio múltiplo.
   LeituraIA.jsx    "✨ Ler com IA" de um anexo: chama a function e mostra a conferência antes de aplicar.
   ComentariosObra.jsx  Coluna de comentários e atividade da obra + autor lembrado no navegador.
+  OrcamentoLivre.jsx  🧾 Orçamentos livres (fora do Wvetro): modelo, lista, editor, cálculo por vãos e a folha A4 com a marca.
   NovoContrato.jsx Popup "+ Novo cliente / contrato" (cliente novo ou contrato de obra existente).
   index.css        CSS global mínimo.
   assets/          Logos.
@@ -75,6 +76,7 @@ supabase/
   migration_ficha_obra.sql   Histórico de versões da obra, trigger anti-DELETE em obras, `obra_anexos`,
                              `obra_comentarios` e bucket privado `obras` (rodar separado).
   migration_configuracoes.sql  Tabela `configuracoes` (uma linha 'geral') — rodar separado.
+  migration_orcamentos.sql   Tabela `orcamentos` (orçamentos livres, único em `numero`) — rodar separado.
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF do orçamento.
   functions/analisar-documento/  Edge Function que lê um anexo (contrato, comprovante, NF, orçamento de fornecedor).
   SETUP.md                   Passo a passo de criação do projeto Supabase.
@@ -135,6 +137,7 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 | `obra_comentarios` | `id` (uuid) | `obra_id`, `tipo` (`comentario`/`sistema`), `texto`, `autor`, `created_at`, `oculto_em` | — (**não usa `data`**: uma linha por comentário) |
 | `obras_historico` | `id` (bigserial) | `obra_id`, `operacao`, `gravado_em`, `data` | a versão anterior da obra, gravada por trigger |
 | `configuracoes` | `id` (só `'geral'`) | `updated_at`, `data` | as configurações do app (`normConfiguracoes`): tamanho das capas, seções abertas, ordem da lista, itens ocultos do menu, minutos para esconder os valores |
+| `orcamentos` | `id` | `numero` (único), `cliente`, `status`, `obra_id`, `updated_at`, `data` | o orçamento livre: cliente, itens (com `calc` de vãos), desconto, condições (`normOrcamento`) |
 | `profiles` | `id` (= auth.users) | `nome`, `papel` | — |
 | `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (**vazia**, fundação para o futuro) |
 
@@ -216,7 +219,8 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   `print` (`obraId`), `medicaoPrint` (`obraId`, `modo`), `avisos`, `relatorios`, `relatorio` (`tipo`, `inicio`/`fim` na agenda), `calendar` (`mes`, `dia`), `equipes`, `osPrint` (`inicio`, `fim`),
   `cronogramas` (o **macro**: todas as obras, uma por linha), `cronograma` (`id`, o micro de uma
   obra), `cronogramaPrint` (`id`), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`),
-  `estoque` (`codigo` opcional, vindo do QR), `estoqueDoc` (`docId`), `estoqueEtiquetas` (`itemIds`).
+  `estoque` (`codigo` opcional, vindo do QR), `estoqueDoc` (`docId`), `estoqueEtiquetas` (`itemIds`),
+  `orcamentos` (`id` opcional = editor aberto), `orcamentoPrint` (`id`).
   `DiaAgenda`, as três telas do diário e as quatro do estoque continuam sendo early-returns dos
   próprios componentes, mas guiados pelos parâmetros da view (`diario` tem `obraId`/`diarioId`,
   `estoque` tem `tela`).
@@ -590,6 +594,19 @@ rampa azul para escala ordenada (etapas) e nunca as cores de status empilhadas (
 O financeiro só monta com os valores liberados (`useSigilo`). Os cálculos que o App e os relatórios
 dividem saíram para `calculos.js`, senão `Relatorios.jsx` teria que importar o `App.jsx` (ciclo).
 Atalhos: botão "🖨 Relatório" na Central de avisos e no Financeiro, "📈 Relatório do mês" no calendário.
+
+**Orçamento livre é separado da obra, e a quantidade por vão é derivada.** O orçamento oficial
+continua saindo do Wvetro (é ele que vira obra, com `id` = nº da proposta). O livre é para o que o
+Wvetro não faz bem — serviço, acabamento, manutenção — e mora na própria tabela, numerado `OL-0001`
+(o próximo depois do maior; único no banco). `obraId` é só um vínculo opcional que preenche o
+cliente vazio: aprovar **não** cria obra. Item pode ter `calc {modo, perda, vaos[]}` (L × H × qtd em
+mm): a quantidade sai de `qtdItem` (perímetro, 3 lados, 2 alturas, largura, altura, área, por vão
++ % de perda) e nunca é gravada — editar um vão não deixa total velho. "Importar vãos de uma obra"
+(`vaosDaObra`) usa a medida da Medição quando a unidade foi medida e o L × H do orçamento no resto;
+item sem medida (serviço) fica de fora. Cores e dados da folha seguem a identidade visual
+(`#ED5454`/`#34353A`, `assets/logo-cor.svg`, ícone como marca d'água) e o rodapé do Wvetro
+(`EMPRESA`). Gravação igual ao diário (debounced, última gravação vence); valores passam pelo
+Sigilo e a folha sai sem preços com os valores ocultos.
 
 **Central de avisos é derivada.** `avisosDaObra` (avisos.js) deduz tudo dos dados — nada é gravado.
 Documentos vêm de `fetchResumoAnexos` (categoria dos anexos fora da lixeira) ou do checklist marcado.

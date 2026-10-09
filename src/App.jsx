@@ -2,7 +2,8 @@ import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from "rea
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
-import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens, fetchFotosCapa } from "./api";
+import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens, fetchFotosCapa, fetchOrcamentos, upsertOrcamento, deleteOrcamento as dbDeleteOrcamento } from "./api";
+import OrcamentosView, { OrcamentoPrint, normOrcamento } from "./OrcamentoLivre";
 import { agendar, agendarMacro, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent, normPredecessoras, parsePredecessoras, textoPredecessoras, inicioEstaFixo, toLocalISO } from "./cronograma";
 import CronogramaPrint from "./CronogramaPrint";
 import Modal from "./Modal";
@@ -2897,6 +2898,7 @@ function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos
     { key: "equipes", label: "Equipes", icon: "👷" },
     { key: "estoque", label: "Estoque", icon: "📦" },
     { key: "cronogramas", label: "Cronograma Comercial", icon: "📊" },
+    { key: "orcamentos", label: "Orçamentos", icon: "🧾" },
     { key: "financeiro", label: "Financeiro", icon: "🔒" },
   ];
   // Itens escondidos em ⚙️ Configurações saem do menu (a tela continua existindo).
@@ -3882,6 +3884,8 @@ export default function App() {
   const [cronogramas, setCronogramas] = useState([]);
   const [agenda, setAgenda] = useState([]);   // serviços do dia (obra x equipe)
   const [lembretes, setLembretes] = useState([]); // mural fixo ao lado do calendário
+  const [orcamentos, setOrcamentos] = useState([]); // orçamentos livres (OrcamentoLivre.jsx)
+  const [orcamentosSemTabela, setOrcamentosSemTabela] = useState(false);
   const [diarios, setDiarios] = useState([]);     // diário de obra: um registro por obra por dia
   // Estoque: itens com saldo, sempre relidos do banco depois de gravar (ver Estoque.jsx).
   const [estoqueItens, setEstoqueItens] = useState([]);
@@ -3984,13 +3988,14 @@ export default function App() {
   // recarrega nada.
   const userId = session?.user?.id || null;
   useEffect(() => {
-    if (!userId) { setObras([]); setEquipes([]); setCronogramas([]); setAgenda([]); setLembretes([]); setDiarios([]); return; }
+    if (!userId) { setObras([]); setEquipes([]); setCronogramas([]); setAgenda([]); setLembretes([]); setDiarios([]); setOrcamentos([]); return; }
     let cancel = false;
     setLoading(true);
     (async () => {
       try {
-        const [obs, eqs, crons, ags, lbs, dis] = await Promise.all([
+        const [obs, eqs, crons, ags, lbs, dis, orcs] = await Promise.all([
           fetchObras(), fetchEquipes(), fetchCronogramas(), fetchAgenda(), fetchLembretes(), fetchDiarios(),
+          fetchOrcamentos().then(l => ({ l })).catch(err => ({ l: [], err })),
         ]);
         if (cancel) return;
         versaoObra.current = Object.fromEntries(obs.map(r => [r.obra.id, r.versao]));
@@ -4004,6 +4009,8 @@ export default function App() {
         setAgenda(ags.map(normAgendamento));
         setLembretes(lbs.map(normLembrete));
         setDiarios(dis.map(normDiario));
+        setOrcamentos(orcs.l.map(normOrcamento));
+        if (orcs.err) showError("Erro ao carregar os orçamentos: " + orcs.err.message);
       } catch (err) {
         console.error(err);
         if (!cancel) showError("Erro ao carregar dados: " + err.message);
@@ -4131,6 +4138,28 @@ export default function App() {
     setDiarios(prev => prev.filter(d => d.id !== id));
     dbDeleteDiario(id).catch(err => showError("Erro ao excluir o registro do diário: " + err.message));
   }, [cancelarGravacao]);
+
+  // Orçamentos livres: mesmo desenho do diário (estado na hora, gravação debounced por id).
+  const handleSaveOrcamento = useCallback((o) => {
+    setOrcamentos(prev => prev.some(x => x.id === o.id) ? prev.map(x => x.id === o.id ? o : x) : [...prev, o]);
+    agendarGravacao(o.id, () =>
+      upsertOrcamento(o).then(() => setOrcamentosSemTabela(false)).catch(err => {
+        if (/orcamentos/.test(err.message || "") && /does not exist|schema cache/i.test(err.message || "")) setOrcamentosSemTabela(true);
+        showError("Erro ao salvar o orçamento (rodou a migration_orcamentos.sql?): " + err.message);
+      }));
+  }, [agendarGravacao]);
+
+  const handleDeleteOrcamento = useCallback((id) => {
+    cancelarGravacao(id);
+    const anterior = orcamentos.find(o => o.id === id);
+    setOrcamentos(prev => prev.filter(o => o.id !== id));
+    navReplace({ type: "orcamentos" });
+    dbDeleteOrcamento(id).catch(err => {
+      // Orçamento que nunca chegou ao banco (tabela ausente) não tem o que apagar.
+      showError("Erro ao excluir o orçamento: " + err.message);
+      if (anterior) setOrcamentos(prev => prev.some(o => o.id === id) ? prev : [...prev, anterior]);
+    });
+  }, [orcamentos, cancelarGravacao]);
 
   // Há um cronograma com gravação pendente e é justamente o que está aberto agora?
   const isCronoDirty = view.type === "cronograma" && dirtyCronoIds.has(view.id);
@@ -4541,7 +4570,7 @@ export default function App() {
 
   // Views de impressão ocupam a tela toda (sem o shell do app). No F5 direto numa folha, espera
   // a carga — senão aparecia "não encontrada" enquanto os dados chegavam.
-  if (loading && ["relatorio", "print", "medicaoPrint", "osPrint", "diarioPrint", "cronogramaPrint", "estoqueEtiquetas"].includes(view.type)) {
+  if (loading && ["relatorio", "print", "medicaoPrint", "osPrint", "diarioPrint", "cronogramaPrint", "estoqueEtiquetas", "orcamentoPrint"].includes(view.type)) {
     return <CenteredMsg>Carregando…</CenteredMsg>;
   }
   if (view.type === "print") {
@@ -4577,6 +4606,10 @@ export default function App() {
           origemInicio={m?.origemId ? cronogramas.find(x => x.id === m.origemId)?.titulo : ""} />
       : <CenteredMsg>Cronograma não encontrado</CenteredMsg>;
   }
+  if (view.type === "orcamentoPrint") {
+    const orc = orcamentos.find(x => x.id === view.id);
+    return orc ? <OrcamentoPrint orcamento={orc} onBack={back} /> : <CenteredMsg>Orçamento não encontrado</CenteredMsg>;
+  }
   if (view.type === "estoqueEtiquetas") {
     return <EtiquetasPrint itens={estoqueItens} itemIds={view.itemIds} onBack={back} />;
   }
@@ -4584,7 +4617,7 @@ export default function App() {
   const userEmail = session.user?.email || "";
   const selectedObra = view.type === "gantt" ? obras.find(o => o.id === view.obraId) : null;
   const canGoBack = idxHistorico > 0 || view.type !== "dashboard";
-  const tituloView = { configuracoes: "Configurações", relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
+  const tituloView = { configuracoes: "Configurações", relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", orcamentos: "Orçamentos", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
 
   return (
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
@@ -4699,6 +4732,11 @@ export default function App() {
                         onRecarregar={recarregarEstoque}
                         onImprimirDoc={docId => navTo({ type: "estoqueDoc", docId })}
                         onImprimirEtiquetas={itemIds => navTo({ type: "estoqueEtiquetas", itemIds })} />
+                  : view.type === "orcamentos"
+                    ? <OrcamentosView orcamentos={orcamentos} obras={obras} orcamentoId={view.id || null} erroTabela={orcamentosSemTabela}
+                        onAbrir={id => navTo({ type: "orcamentos", id })}
+                        onSalvar={handleSaveOrcamento} onExcluir={handleDeleteOrcamento}
+                        onImprimir={id => navTo({ type: "orcamentoPrint", id })} />
                   : view.type === "financeiro"
                     ? <FinanceiroView obras={obras} onRelatorio={() => navTo({ type: "relatorio", tipo: "financeiro" })} />
                   : view.type === "configuracoes"

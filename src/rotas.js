@@ -43,6 +43,8 @@ export function viewParaHash(v) {
     }
     case "estoqueDoc": return `#/estoque/doc/${enc(v.docId)}`;
     case "estoqueEtiquetas": return "#/estoque/etiquetas";
+    case "orcamentos": return v.id ? `#/orcamentos/${enc(v.id)}` : "#/orcamentos";
+    case "orcamentoPrint": return `#/orcamentos/${enc(v.id)}/imprimir`;
     default: return "#/";
   }
 }
@@ -77,6 +79,9 @@ export function hashParaView(hash) {
       if (b === "doc" && c) return { type: "estoqueDoc", docId: c };
       // Lançar e etiquetas dependem de dados que não cabem na URL: voltam para a lista.
       return { type: "estoque" };
+    case "orcamentos":
+      if (b && c === "imprimir") return { type: "orcamentoPrint", id: b };
+      return { type: "orcamentos", ...(b ? { id: b } : {}) };
     default: return VIEW_INICIAL;
   }
 }
@@ -101,6 +106,8 @@ export function paiDe(v) {
     case "estoque": return v.tela && v.tela.tipo !== "lista" ? { type: "estoque" } : VIEW_INICIAL;
     case "estoqueDoc": case "estoqueEtiquetas": return { type: "estoque" };
     case "relatorio": return { type: "relatorios" };
+    case "orcamentos": return v.id ? { type: "orcamentos" } : VIEW_INICIAL;
+    case "orcamentoPrint": return { type: "orcamentos", id: v.id };
     default: return VIEW_INICIAL;
   }
 }

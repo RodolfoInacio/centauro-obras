@@ -219,6 +219,34 @@ export async function deleteDiario(id) {
   if (error) throw error;
 }
 
+// ─── ORÇAMENTOS LIVRES ───────────────────────────────────────────────────────
+export async function fetchOrcamentos() {
+  // Resiliente: se a tabela ainda não existe (migration_orcamentos.sql), não quebra o app.
+  const data = await lerOpcional("fetchOrcamentos", () => supabase.from("orcamentos").select("data").order("id"));
+  return data.map(r => r.data);
+}
+
+export async function upsertOrcamento(o) {
+  const row = {
+    id: o.id,
+    numero: o.numero,
+    cliente: o.cliente?.nome || "",
+    status: o.status || "rascunho",
+    obra_id: o.obraId || null,
+    updated_at: new Date().toISOString(),
+    data: o,
+  };
+  const { error } = await supabase.from("orcamentos").upsert(row);
+  if (error) throw error;
+}
+
+export async function deleteOrcamento(id) {
+  const { data, error } = await supabase.from("orcamentos").delete().eq("id", id).select("id");
+  if (error) throw error;
+  // DELETE barrado por RLS volta 204 sem erro (ver deleteEquipe).
+  if (!data || data.length === 0) throw new Error("O orçamento não foi apagado — sem permissão ou ele já não existia.");
+}
+
 // ─── FOTOS DO DIÁRIO (Storage) ───────────────────────────────────────────────
 // O app nunca escrevia no Storage; o padrão vem do seed_supabase.mjs.
 // Caminho: <obraId>/<diarioId>/<fotoId>.jpg (e -orig.jpg para a foto sem marcação).
@@ -552,7 +580,7 @@ export async function fetchBackupCompleto() {
   };
   const obras = await tabela("obras");
   const nomes = ["equipes", "agenda", "cronogramas", "lembretes", "diarios", "obra_anexos", "obra_comentarios",
-    "obras_historico", "estoque_itens", "estoque_documentos", "estoque_movimentos"];
+    "obras_historico", "orcamentos", "estoque_itens", "estoque_documentos", "estoque_movimentos"];
   const resto = await Promise.all(nomes.map(opcional));
   return { geradoEm: new Date().toISOString(), obras, ...Object.fromEntries(nomes.map((n, i) => [n, resto[i]])) };
 }
