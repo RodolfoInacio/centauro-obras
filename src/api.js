@@ -46,9 +46,22 @@ export async function inserirObra(obra) {
   return data[0].updated_at;
 }
 
-export async function deleteObra(id) {
-  const { error } = await supabase.from("obras").delete().eq("id", id);
-  if (error) throw error;
+// Exclusão definitiva: só pela função do banco (migration_exclusao_obras.sql), que confere a
+// senha, exige a obra em "Excluídas" e guarda a cópia em obras_excluidas antes de apagar.
+// DELETE direto continua barrado pelo trigger obras_sem_delete.
+export async function excluirObraDefinitivo(id, senha, por) {
+  const { error } = await supabase.rpc("obra_excluir_definitivo", { p_id: id, p_senha: senha, p_por: por || "" });
+  if (error) {
+    if (/obra_excluir_definitivo|schema cache|does not exist/i.test(error.message || ""))
+      throw new Error("Falta rodar a migration_exclusao_obras.sql no Supabase.");
+    throw error;
+  }
+}
+
+// Registro das obras excluídas de vez (quem, quando e a obra inteira). [] sem a migration.
+export async function fetchObrasExcluidas() {
+  return lerOpcional("obras_excluidas", () => supabase.from("obras_excluidas")
+    .select("id, obra_id, numero, cliente, excluida_em, excluida_por, data").order("excluida_em", { ascending: false }).order("id"));
 }
 
 // Tabela de migration separada que ainda não foi rodada: aí sim vale devolver lista vazia.

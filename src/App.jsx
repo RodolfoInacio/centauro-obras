@@ -2,7 +2,8 @@ import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from "rea
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
-import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens, fetchFotosCapa, fetchOrcamentos, upsertOrcamento, deleteOrcamento as dbDeleteOrcamento } from "./api";
+import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens, fetchFotosCapa, fetchOrcamentos, upsertOrcamento, deleteOrcamento as dbDeleteOrcamento, excluirObraDefinitivo } from "./api";
+import { normArquivo, obraAtiva, comPasso, AcoesArquivo, PastaArquivo, ACAO_ROTULO } from "./ArquivoObras";
 import OrcamentosView, { OrcamentoPrint, normOrcamento } from "./OrcamentoLivre";
 import { cronogramaDaObra, cronogramasDaObra, datasDosItens, servicosPlanejados, agendaEfetiva, conflitosAgenda, andamentoObra, idAjuste } from "./planejamento";
 import { agendar, agendarMacro, situacaoTarefa, percentEsperadoEm, SITUACAO_ROTULO, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent, normPredecessoras, parsePredecessoras, textoPredecessoras, inicioEstaFixo, toLocalISO } from "./cronograma";
@@ -150,6 +151,8 @@ function normObra(o) {
     capa: o.capa && o.capa.path ? { anexoId: o.capa.anexoId || "", path: o.capa.path } : null,
     // Anexos já aplicados pela leitura com IA — avisa antes de somar o mesmo comprovante duas vezes.
     documentosLidos: normDocumentosLidos(o.documentosLidos),
+    // Arquivada / em Excluídas + histórico com data e hora de cada passo (ArquivoObras.jsx).
+    arquivo: normArquivo(o.arquivo),
     // Obra cadastrada à mão nasce sem itens (entram depois pelo PDF) — e um registro sem
     // `itens` derrubava a carga de todas as obras.
     itens: (Array.isArray(o.itens) ? o.itens : []).map(normItem),
@@ -692,7 +695,7 @@ function ChecklistObra({ itens, onChange }) {
 // O planejamento da obra é o cronograma (seção 📅), não mais datas por item: `datasItens` é o
 // período de cada item lido do cronograma e `cronogramaSlot` é o próprio editor, montado pelo App.
 function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque, onEntradaEstoque, onAtividade, atividadeVersao = 0, itemAberto = null, onItemAberto, onImprimirMedicao, secaoFoco = null,
-  cronograma = null, cronogramaSlot = null, cronogramaResumo = "", datasItens = {}, andamento = null, onCriarCronograma }) {
+  cronograma = null, cronogramaSlot = null, cronogramaResumo = "", datasItens = {}, andamento = null, onCriarCronograma, onPassoArquivo }) {
   // Item expandido mora na view (#/obra/2729/item/5): voltar de outra tela reabre o mesmo item.
   const expandedId = itemAberto;
   const setExpandedId = (id) => onItemAberto?.(id);
@@ -832,7 +835,9 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
             </span>
           )}
           <ChipPendencias obra={localObra} />
+          {onPassoArquivo && !localObra.arquivo?.estado && <AcoesArquivo obra={localObra} onPasso={onPassoArquivo} />}
         </div>
+        {onPassoArquivo && localObra.arquivo?.estado && <AcoesArquivo obra={localObra} onPasso={onPassoArquivo} />}
       </div>
 
       <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap", padding: "16px 20px" }}>
@@ -2656,7 +2661,7 @@ function ObrasPasta({ obras: todas, pasta, onSelect, onStatusChange, onReorder, 
 
 // Tela inicial de Obras: só os KPIs de tudo (sem separar por status) + as duas pastas.
 // A lista de obras em si mora dentro de cada pasta (ObrasPasta, acima).
-function Dashboard({ obras, onAbrirPasta, onNovoContrato }) {
+function Dashboard({ obras, obrasTodas = obras, onAbrirPasta, onNovoContrato }) {
   const totalPecas = obras.reduce((a, o) => a + o.itens.reduce((b, i) => b + (i.qtd || 0), 0), 0);
   const progMedio  = obras.length > 0
     ? Math.round(obras.reduce((a, o) => a + (o.itens.length > 0 ? o.itens.reduce((b, i) => b + itemPercentual(i), 0) / o.itens.length : 0), 0) / obras.length)
@@ -2710,6 +2715,19 @@ function Dashboard({ obras, onAbrirPasta, onNovoContrato }) {
             <div style={{ fontSize: 13, color: "#64748b", marginTop: 2 }}>{sub}</div>
             <div style={{ fontSize: 28, fontWeight: 800, color: accent, marginTop: 10 }}>{count}</div>
           </div>
+        ))}
+      </div>
+
+      {/* Arquivo: fora de todas as contas acima. Contam contratos, não grupos. */}
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 16 }}>
+        {[
+          { key: "arquivadas", label: "🗄 Arquivadas", n: obrasTodas.filter(o => o.arquivo?.estado === "arquivada").length },
+          { key: "excluidas", label: "🗑 Excluídas", n: obrasTodas.filter(o => o.arquivo?.estado === "excluida").length },
+        ].map(({ key, label, n }) => (
+          <button key={key} onClick={() => onAbrirPasta(key)}
+            style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 14px", fontSize: 13, fontWeight: 700, color: "#475569", cursor: "pointer" }}>
+            {label} <span style={{ color: "#94a3b8", fontWeight: 600 }}>({n})</span>
+          </button>
         ))}
       </div>
     </div>
@@ -3922,7 +3940,10 @@ export default function App() {
   const { ocultar: ocultarValores, visivel: valoresVisiveis, pedir: pedirSenha } = useSigilo();
   const [authReady, setAuthReady] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [obras, setObras] = useState([]);
+  // `obrasTodas` inclui arquivadas e excluídas; o resto do app só enxerga `obras` (as ativas),
+  // filtrado aqui uma vez — assim nenhuma tela precisa saber que existe arquivo.
+  const [obrasTodas, setObras] = useState([]);
+  const obras = useMemo(() => obrasTodas.filter(obraAtiva), [obrasTodas]);
   const [equipes, setEquipes] = useState([]);
   const [cronogramas, setCronogramas] = useState([]);
   const [agenda, setAgenda] = useState([]);   // serviços do dia (obra x equipe)
@@ -4334,6 +4355,36 @@ export default function App() {
       .catch(err => console.warn("registrarAtividade:", err.message));
   }, []);
 
+  // Arquivar / Excluídas / restaurar / excluir de vez (ArquivoObras.jsx). Os três primeiros são
+  // só `obra.arquivo` gravado pelo caminho normal (trava de versão). O definitivo espera a
+  // gravação pendente chegar ao banco — a função de lá exige a obra já em Excluídas — e passa
+  // pela fila da obra, para nenhuma gravação atrasada tentar regravar uma obra apagada.
+  const handlePassoArquivo = useCallback(async (obra, passo, por, senha) => {
+    const id = obra.id;
+    if (passo !== "excluida_definitivo") {
+      const nova = comPasso(obra, passo, por);
+      updateObra(nova);
+      const txt = passo === "restaurada"
+        ? (nova.arquivo.estado === "arquivada" ? "Restaurada de Excluídas para Arquivadas" : "Restaurada do arquivo")
+        : ACAO_ROTULO[passo];
+      inserirComentario({ obraId: id, texto: `${txt} por ${por}`, autor: por, tipo: "sistema" })
+        .then(() => setAtividadeVersao(v => v + 1))
+        .catch(err => console.warn("registrarAtividade:", err.message));
+      return;
+    }
+    if (conflitosRef.current.has(id)) throw new Error("A obra está em conflito com outra aba. Recarregue antes de excluir.");
+    const pendente = obraPendente.current[id];
+    if (pendente) { clearTimeout(saveTimers.current[id]); pendente(); }
+    await enfileirar(id, async () => {
+      if ((revObra.current[id] || 0) !== (revSalva.current[id] || 0))
+        throw new Error("A última alteração da obra ainda não chegou ao banco. Tente de novo em instantes.");
+      await excluirObraDefinitivo(id, senha, por);
+    });
+    delete versaoObra.current[id]; delete revObra.current[id]; delete revSalva.current[id]; delete filaObra.current[id];
+    setObras(prev => prev.filter(o => o.id !== id));
+    if (viewRef.current.type === "gantt" && viewRef.current.obraId === id) navReplace({ type: "obrasPasta", pasta: "excluidas" });
+  }, [updateObra, enfileirar, navReplace]);
+
   // Saída do conflito: descarta a edição local desta obra e traz a versão do banco.
   const recarregarObra = useCallback(async (id) => {
     try {
@@ -4540,7 +4591,12 @@ export default function App() {
   }, []);
 
   // Agenda obra × obra uma vez só: alimenta a tela macro e o início herdado do editor de cada obra.
-  const macro = useMemo(() => agendarMacro(cronogramas), [cronogramas]);
+  // Cronograma de obra arquivada/excluída sai do macro (e do planejado), como a própria obra.
+  const cronogramasAtivos = useMemo(() => {
+    const inativas = new Set(obrasTodas.filter(o => !obraAtiva(o)).map(o => o.id));
+    return inativas.size ? cronogramas.filter(c => !inativas.has(c.obraId)) : cronogramas;
+  }, [cronogramas, obrasTodas]);
+  const macro = useMemo(() => agendarMacro(cronogramasAtivos), [cronogramasAtivos]);
   // O Calendário mostra a agenda manual + os dias das tarefas com equipe no cronograma (derivados,
   // nunca gravados). Ajustar um dia planejado no calendário grava uma linha real com a `origem`.
   const planejados = useMemo(() => servicosPlanejados(cronogramas, macro, obras), [cronogramas, macro, obras]);
@@ -4631,7 +4687,8 @@ export default function App() {
     try {
       const { _fallback, _motivo, ...lida } = await parsePDFFileComIA(file);
       if (!lida.numero) throw new Error("Número da proposta não encontrado");
-      const existente = obras.find(o => o.id === lida.id || String(o.numero) === String(lida.numero));
+      // Todas, inclusive arquivadas: a proposta continua ocupando o número.
+      const existente = obrasTodas.find(o => o.id === lida.id || String(o.numero) === String(lida.numero));
       let id;
       if (existente) {
         // Obra que já existe: só troca itens e valor, e pergunta antes (ver mesclarImportacao).
@@ -4711,7 +4768,7 @@ export default function App() {
     return <CenteredMsg>Carregando…</CenteredMsg>;
   }
   if (view.type === "print") {
-    const o = obras.find(x => x.id === view.obraId);
+    const o = obrasTodas.find(x => x.id === view.obraId);
     return o ? <PrintView obra={o} onBack={back} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>;
   }
   if (view.type === "relatorio") {
@@ -4720,7 +4777,7 @@ export default function App() {
       onPeriodo={(inicio, fim) => navReplace({ type: "relatorio", tipo: view.tipo, inicio, fim })} />;
   }
   if (view.type === "medicaoPrint") {
-    const o = obras.find(x => x.id === view.obraId);
+    const o = obrasTodas.find(x => x.id === view.obraId);
     return o ? <MedicaoPrint obra={o} modoInicial={view.modo} onBack={back} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>;
   }
   if (view.type === "osPrint") {
@@ -4752,7 +4809,8 @@ export default function App() {
   }
 
   const userEmail = session.user?.email || "";
-  const selectedObra = view.type === "gantt" ? obras.find(o => o.id === view.obraId) : null;
+  // Todas: obra arquivada/excluída abre pela própria pasta, com a faixa de aviso.
+  const selectedObra = view.type === "gantt" ? obrasTodas.find(o => o.id === view.obraId) : null;
   const crObra = selectedObra ? cronogramaDaObra(cronogramas, selectedObra.id) : null;
   const datasItensObra = selectedObra ? datasDosItens(cronogramas, macro, selectedObra.id) : {};
   const andamentoSel = selectedObra && crObra ? andamentoObra(cronogramas, macro, selectedObra.id) : null;
@@ -4790,7 +4848,7 @@ export default function App() {
           {selectedObra
             ? `#${selectedObra.numero} — ${selectedObra.cliente}`
             : view.type === "obrasPasta"
-              ? (view.pasta === "concluidas" ? "📁 Obras Concluídas" : "📁 Obras em Andamento")
+              ? ({ concluidas: "📁 Obras Concluídas", arquivadas: "🗄 Obras Arquivadas", excluidas: "🗑 Obras Excluídas" }[view.pasta] || "📁 Obras em Andamento")
               : (tituloView[view.type] || "")}
         </div>
 
@@ -4816,14 +4874,14 @@ export default function App() {
       {conflitos.length > 0 && (
         <div style={{ background: "#fef2f2", borderBottom: "1px solid #fecaca", padding: "10px 20px", fontSize: 13, color: "#991b1b", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <span style={{ flex: 1, minWidth: 260 }}>
-            ⚠ A obra <b>{conflitos.map(id => "#" + (obras.find(o => o.id === id)?.numero || id)).join(", ")}</b> foi alterada em outra aba ou
+            ⚠ A obra <b>{conflitos.map(id => "#" + (obrasTodas.find(o => o.id === id)?.numero || id)).join(", ")}</b> foi alterada em outra aba ou
             outro computador depois que você abriu. Para não apagar o que a outra pessoa gravou, <b>suas últimas alterações nela não foram
             salvas</b>. Recarregue a obra e refaça o que faltar.
           </span>
           {conflitos.map(id => (
             <button key={id} onClick={() => recarregarObra(id)}
               style={{ background: "#dc2626", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
-              Recarregar #{obras.find(o => o.id === id)?.numero || id}
+              Recarregar #{obrasTodas.find(o => o.id === id)?.numero || id}
             </button>
           ))}
         </div>
@@ -4849,6 +4907,7 @@ export default function App() {
               onImprimirMedicao={modo => navTo({ type: "medicaoPrint", obraId: selectedObra.id, modo })}
               onItemAberto={id => navReplace(id == null ? { type: "gantt", obraId: selectedObra.id } : { type: "gantt", obraId: selectedObra.id, itemId: id })}
               onAtividade={texto => registrarAtividade(selectedObra.id, texto)} atividadeVersao={atividadeVersao}
+              onPassoArquivo={handlePassoArquivo}
               onAbrirDocEstoque={docId => navTo({ type: "estoqueDoc", docId })}
               onEntradaEstoque={origem => navTo({ type: "estoque", entradaCompra: {
                 ...origem, obraId: selectedObra.id, obraRotulo: `#${selectedObra.numero} — ${selectedObra.cliente}`,
@@ -4873,7 +4932,7 @@ export default function App() {
               ? <EquipesView equipes={equipes} onSalvar={handleSaveEquipe} onArquivar={handleArquivarEquipe}
                   onReativar={handleReativarEquipe} onExcluir={handleDeleteEquipe} obras={obras} agenda={agendaEf} />
               : view.type === "cronogramas"
-                ? <CronogramaMacroView cronogramas={cronogramas} obras={obras} macro={macro}
+                ? <CronogramaMacroView cronogramas={cronogramasAtivos} obras={obras} macro={macro}
                     onNovo={(titulo, obra) => { const cr = novoCronograma(titulo, obra); handleSaveCronograma(cr); navTo({ type: "cronograma", id: cr.id }); }}
                     onNovoComModelo={(titulo, obra, temVidros) => { const cr = novoCronogramaComModelo(titulo, obra, temVidros); handleSaveCronograma(cr); navTo({ type: "cronograma", id: cr.id }); }}
                     onAbrir={(id) => navTo({ type: "cronograma", id })}
@@ -4915,10 +4974,12 @@ export default function App() {
                     ? <CentralAvisos obras={obras} ctxAvisos={ctxAvisos}
                         onRelatorio={() => navTo({ type: "relatorio", tipo: "avisos" })}
                         onAbrirObra={(obraId, secao) => navTo(secao ? { type: "gantt", obraId, secao } : { type: "gantt", obraId })} />
+                    : view.type === "obrasPasta" && (view.pasta === "arquivadas" || view.pasta === "excluidas")
+                      ? <PastaArquivo key={view.pasta} obras={obrasTodas} pasta={view.pasta} onAbrir={openObra} onPasso={handlePassoArquivo} />
                     : view.type === "obrasPasta"
                       ? <ObrasPasta obras={obras} pasta={view.pasta} onSelect={openObra} onStatusChange={handleStatusChange} onReorder={handleReorder} onFlagsChange={handleFlagsChange} onGrupoChange={handleGrupoChange} equipes={equipes}
                           onNovoContrato={() => setNovoContratoAberto(true)} />
-                      : <Dashboard obras={obras} onAbrirPasta={(pasta) => navTo({ type: "obrasPasta", pasta })}
+                      : <Dashboard obras={obras} obrasTodas={obrasTodas} onAbrirPasta={(pasta) => navTo({ type: "obrasPasta", pasta })}
                           onNovoContrato={() => setNovoContratoAberto(true)} />
       }
 

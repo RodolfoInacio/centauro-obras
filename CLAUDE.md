@@ -64,6 +64,7 @@ src/
   Comunicacao.jsx  Pessoas (profiles), 🔔 notificações de @menção, ✉️ chat (Geral + conversa direta),
                    provider com Realtime, campo de texto com @ e a tela de Mensagens.
   OrcamentoLivre.jsx  🧾 Orçamentos livres (fora do Wvetro): modelo, lista, editor, cálculo por vãos e a folha A4 com a marca.
+  ArquivoObras.jsx Arquivar → Excluídas → exclusão definitiva: modelo (`obra.arquivo`), botões da obra e as duas pastas.
   NovoContrato.jsx Popup "+ Novo cliente / contrato" (cliente novo ou contrato de obra existente).
   index.css        CSS global mínimo.
   assets/          Logos.
@@ -83,6 +84,7 @@ supabase/
   migration_orcamentos.sql   Tabela `orcamentos` (orçamentos livres, único em `numero`) — rodar separado.
   migration_mensagens.sql    `obra_comentarios.mencoes`, `notificacoes`, `mensagens`, `mensagens_lidas`,
                              RPC `resumo_mensagens` e Realtime — rodar separado, depois da ficha_obra.
+  migration_exclusao_obras.sql  `obras_excluidas` + RPC `obra_excluir_definitivo` (senha) — rodar separado, depois da ficha_obra.
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF do orçamento.
   functions/analisar-documento/  Edge Function que lê um anexo (contrato, comprovante, NF, orçamento de fornecedor).
   SETUP.md                   Passo a passo de criação do projeto Supabase.
@@ -525,6 +527,16 @@ para a mesma compra não entrar duas vezes. A obra fica só na observação do d
 `obra_id` contaria como devolução no bloco "Saiu do estoque para esta obra". A view chega em
 `{type: "estoque", entradaCompra}` e o `EstoqueView` troca por `{type: "estoque"}` com `navReplace`
 assim que abre o formulário — senão o "Voltar" da folha impressa reabriria a entrada.
+
+**Excluir obra: Arquivadas → Excluídas → definitivo.** `obra.arquivo = {estado: ""|"arquivada"|"excluida",
+historico: [{acao, em, por}]}`, separado do `status` (restaurar devolve a obra como estava; de Excluídas
+volta para Arquivadas). O `App` guarda `obrasTodas` e passa a todas as telas só `obras` (as ativas) —
+obra arquivada some do calendário, cronograma macro, financeiro, avisos e relatórios sem nenhuma tela
+saber disso. Ela abre pela pasta (`obrasPasta` com `pasta: "arquivadas"|"excluidas"`), com faixa e botões.
+O definitivo é a única coisa que apaga linha de `obras`: RPC `obra_excluir_definitivo` confere a senha
+(SHA-256 no SQL e no cliente), exige `estado = 'excluida'`, grava a obra inteira em `obras_excluidas`
+(imutável, listada na pasta Excluídas) e libera o trigger `obras_sem_delete` só para aquele id via
+`set_config('app.excluir_obra', …, true)`. Agenda, diário, cronograma, anexos e comentários **ficam**.
 
 **Obra não perde dado: trava de versão, histórico e nada de DELETE.** O `persistObra` era um upsert
 cego — duas pessoas na mesma obra e a última gravação apagava a outra em silêncio. Hoje:

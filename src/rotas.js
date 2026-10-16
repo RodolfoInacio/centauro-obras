@@ -13,11 +13,13 @@ const dec = (s) => { try { return decodeURIComponent(s); } catch { return s; } }
 
 export const VIEW_INICIAL = { type: "dashboard" };
 
+const PASTAS = ["andamento", "concluidas", "arquivadas", "excluidas"];
+
 export function viewParaHash(v) {
   if (!v || !v.type) return "#/";
   switch (v.type) {
     case "dashboard": return "#/";
-    case "obrasPasta": return `#/obras/${v.pasta === "concluidas" ? "concluidas" : "andamento"}`;
+    case "obrasPasta": return `#/obras/${PASTAS.includes(v.pasta) ? v.pasta : "andamento"}`;
     case "gantt": return `#/obra/${enc(v.obraId)}${v.itemId != null ? `/item/${enc(v.itemId)}` : ""}`;
     case "print": return `#/obra/${enc(v.obraId)}/nota`;
     case "medicaoPrint": return `#/obra/${enc(v.obraId)}/medicao${v.modo === "branco" ? "/branco" : ""}`;
@@ -55,7 +57,7 @@ export function hashParaView(hash) {
   const [a, b, c, d, e] = p;
   switch (a) {
     case undefined: return VIEW_INICIAL;
-    case "obras": return { type: "obrasPasta", pasta: b === "concluidas" ? "concluidas" : "andamento" };
+    case "obras": return { type: "obrasPasta", pasta: PASTAS.includes(b) ? b : "andamento" };
     case "obra":
       if (!b) return VIEW_INICIAL;
       if (c === "nota") return { type: "print", obraId: b };
