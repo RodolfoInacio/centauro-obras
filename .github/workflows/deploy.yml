@@ -42,7 +42,7 @@ jobs:
       - id: deployment
         uses: actions/deploy-pages@v4
 
-  # Publica as Edge Functions (parse-obra-pdf e analisar-documento). Precisa do secret SUPABASE_ACCESS_TOKEN
+  # Publica as Edge Functions (parse-obra-pdf, analisar-documento e whatsapp-notificar). Precisa do secret SUPABASE_ACCESS_TOKEN
   # (painel Supabase → avatar → Access Tokens); sem ele o passo é pulado, sem quebrar o deploy do site.
   functions:
     runs-on: ubuntu-latest
@@ -62,3 +62,4 @@ jobs:
           fi
           supabase functions deploy parse-obra-pdf --project-ref rlyfnlsntlasrwvmgjbo
           supabase functions deploy analisar-documento --project-ref rlyfnlsntlasrwvmgjbo
+          supabase functions deploy whatsapp-notificar --project-ref rlyfnlsntlasrwvmgjbo --no-verify-jwt

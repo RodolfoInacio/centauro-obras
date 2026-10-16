@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { supabase } from "./supabase";
-import { fetchConfiguracoes, salvarConfiguracoes, salvarAcessosPessoa } from "./api";
+import { fetchConfiguracoes, salvarConfiguracoes, salvarAcessosPessoa, testarWhatsapp } from "./api";
 import { useComunicacao, ACESSOS, nomePessoa } from "./Comunicacao";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -183,7 +183,14 @@ function PessoasAcessos() {
   const [gravando, setGravando] = useState(null);
   const [erro, setErro] = useState("");
   const [zap, setZap] = useState({});
+  const [teste, setTeste] = useState({}); // id → { enviando } | { ok } | { erro }
   if (!c) return null;
+
+  async function testar(p) {
+    setTeste(t => ({ ...t, [p.id]: { enviando: true } }));
+    try { await testarWhatsapp(p.id); setTeste(t => ({ ...t, [p.id]: { ok: true } })); }
+    catch (err) { setTeste(t => ({ ...t, [p.id]: { erro: err.message } })); }
+  }
   const pessoas = [...c.pessoas].sort((a, b) => nomePessoa(a).localeCompare(nomePessoa(b)));
 
   async function gravar(p, campos) {
@@ -209,7 +216,7 @@ function PessoasAcessos() {
             <tr style={{ textAlign: "left", color: "#64748b", fontSize: 12 }}>
               <th style={{ padding: "6px 8px" }}>Pessoa</th>
               {ACESSOS.map(a => <th key={a.id} title={a.desc} style={{ padding: "6px 8px", whiteSpace: "nowrap" }}>{a.rotulo}</th>)}
-              <th style={{ padding: "6px 8px" }} title="Para o aviso por WhatsApp (ainda não ligado)">WhatsApp</th>
+              <th style={{ padding: "6px 8px" }} title="Recebe pelo WhatsApp tudo o que chega no 🔔 dela">WhatsApp</th>
             </tr>
           </thead>
           <tbody>
@@ -230,13 +237,25 @@ function PessoasAcessos() {
                     onChange={e => setZap(z => ({ ...z, [p.id]: e.target.value }))}
                     onBlur={() => { const v = (zap[p.id] ?? p.whatsapp).trim(); if (v !== p.whatsapp) gravar(p, { whatsapp: v }); }}
                     style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "5px 8px", fontSize: 12.5, width: 140 }} />
+                  {p.whatsapp && (
+                    <button type="button" onClick={() => testar(p)} disabled={teste[p.id]?.enviando}
+                      title="Manda uma mensagem de teste para este número"
+                      style={{ marginLeft: 6, background: "#fff", color: "#16a34a", border: "1px solid #86efac", borderRadius: 6, padding: "4px 9px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                      {teste[p.id]?.enviando ? "Enviando…" : "Testar"}
+                    </button>
+                  )}
+                  {teste[p.id]?.ok && <div style={{ fontSize: 11.5, color: "#16a34a", marginTop: 3 }}>✓ Enviado — confira no celular.</div>}
+                  {teste[p.id]?.erro && <div style={{ fontSize: 11.5, color: "#dc2626", marginTop: 3, maxWidth: 260 }}>{teste[p.id].erro}</div>}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      <div style={{ fontSize: 11.5, color: "#94a3b8", marginTop: 8 }}>O aviso por WhatsApp ainda não está ligado — o número fica guardado para quando estiver.</div>
+      <div style={{ fontSize: 11.5, color: "#94a3b8", marginTop: 8 }}>
+        Com número preenchido, a pessoa recebe pelo WhatsApp tudo o que chega no 🔔 dela (pedido e retorno de compra, @menção).
+        Pode digitar com DDD, sem o 55. Apagar o número para de enviar.
+      </div>
     </div>
   );
 }

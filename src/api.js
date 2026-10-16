@@ -619,6 +619,17 @@ export async function salvarAcessosPessoa(userId, { acessos, whatsapp }) {
   if (!data || data.length === 0) throw new Error("Não gravou — perfil não encontrado ou sem permissão.");
 }
 
+// Mensagem de teste no WhatsApp da pessoa (Edge Function whatsapp-notificar; só o master).
+export async function testarWhatsapp(userId) {
+  const { data, error } = await supabase.functions.invoke("whatsapp-notificar", { body: { teste: userId } });
+  if (error) {
+    let msg = error.message;
+    try { const corpo = await error.context?.json?.(); if (corpo?.error) msg = corpo.error; } catch { /* mantém a mensagem */ }
+    throw new Error(msg);
+  }
+  return data;
+}
+
 // Aviso de compra no 🔔 (pedido / liberada / recusada). Os destinatários quem escolhe é o banco,
 // pelo acesso de cada um (migration_acessos_compras.sql). O texto nunca leva valor em R$.
 export async function notificarCompra({ tipo, obraId, texto, dados, para = null }) {

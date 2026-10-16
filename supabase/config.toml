@@ -1,1 +1,6 @@
 project_id = "rlyfnlsntlasrwvmgjbo"
+
+# Chamada pelo gatilho do banco (migration_whatsapp.sql) com um segredo próprio, não com o JWT de
+# um usuário — a própria função confere o segredo (ou, no teste, o login do master).
+[functions.whatsapp-notificar]
+verify_jwt = false

@@ -87,8 +87,11 @@ supabase/
                              RPC `resumo_mensagens` e Realtime — rodar separado, depois da ficha_obra.
   migration_acessos_compras.sql  `profiles.acessos/master/email/whatsapp`, trava `profiles_guarda`, tipos de
                              notificação de compra + `dados`, RPC `notificar_compra` — rodar depois da de mensagens.
+  migration_whatsapp.sql     `pg_net` + gatilho em `notificacoes` que chama `whatsapp-notificar`, e o log
+                             `whatsapp_envios` — rodar depois da de acessos (precisa do segredo no Vault).
   migration_exclusao_obras.sql  `obras_excluidas` + RPC `obra_excluir_definitivo` (senha) — rodar separado, depois da ficha_obra.
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF do orçamento.
+  functions/whatsapp-notificar/  Edge Function que manda o aviso do 🔔 pelo WhatsApp (Evolution API v2).
   functions/analisar-documento/  Edge Function que lê um anexo (contrato, comprovante, NF, orçamento de fornecedor).
   SETUP.md                   Passo a passo de criação do projeto Supabase.
 docs/
@@ -196,6 +199,8 @@ As peças server-side são duas Edge Functions:
 | `parse-obra-pdf` | `POST { lines: string[], filename }` + `Authorization: Bearer <jwt>` | Valida o usuário, manda o texto do PDF para a API da Anthropic (`claude-sonnet-5`, tool-use forçado) e devolve a obra estruturada. Erros → 400/401/500/502; o cliente cai no parser local. |
 | `analisar-documento` | `POST { anexoId, contexto }` + `Authorization: Bearer <jwt>` | Busca o anexo **pelo id** com o login do usuário (RLS de `obra_anexos` e do bucket `obras`), manda o PDF (`document`) ou a imagem (`image`) para `claude-opus-5` com structured outputs e `fallbacks: "default"`, e devolve `{tipo, resumo, contrato, pagamento, compra, avisos}`. **Não grava nada.** Até 20 MB. `contexto` = cliente e itens de compra da obra, sem valores. |
 
+| `whatsapp-notificar` | gatilho: `POST { notificacaoId }` + header `x-segredo`; teste: `POST { teste: userId }` + JWT do master | Lê a notificação com a service_role, monta a mensagem (sem R$, com link para o app) e manda pela Evolution (`/message/sendText/<instância>`, `{number, text}`) para `profiles.whatsapp`. Grava cada tentativa em `whatsapp_envios`. `verify_jwt = false` (`config.toml`): quem chama é o banco. |
+
 Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro do ERP
 (contrato em `docs/integracao-erp-ti.md`).
 
@@ -206,6 +211,8 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
 | `VITE_SUPABASE_URL` | `.env` local + secret do GitHub | URL do projeto Supabase |
 | `VITE_SUPABASE_ANON_KEY` | `.env` local + secret do GitHub | chave pública do Supabase (vai para o bundle, é pública por design) |
 | `ANTHROPIC_API_KEY` | secret do **Supabase** (Edge Functions → Secrets) | chave da API da Anthropic usada pela Edge Function |
+| `EVOLUTION_URL`, `EVOLUTION_INSTANCE`, `EVOLUTION_APIKEY` | secret do **Supabase** (Edge Functions → Secrets) | Evolution API usada pelo `whatsapp-notificar` |
+| `WHATSAPP_WEBHOOK_SECRET` | secret do **Supabase** + o mesmo valor no Vault (`whatsapp_webhook_secret`) | o gatilho do banco prova que é ele chamando a função |
 | `SUPABASE_ACCESS_TOKEN` | secret do GitHub | permite o CI publicar Edge Functions |
 | `SUPABASE_SERVICE_ROLE` | `seed.secrets.json` local | só para o `seed_supabase.mjs`; ignora RLS, nunca sai da máquina |
 
@@ -667,7 +674,12 @@ escolhe é o banco (`notificar_compra`, pelo acesso), e "aprovada/recusada" só 
 `aprova_compras`. O texto do aviso nunca leva R$. Sem a migration, `acessos` vem `null`: todo mundo
 aprova como antes e não há pedido. Limite aceito: a flag `aprovado` continua no `jsonb` da obra, então
 o banco não impede alguém de marcá-la por fora — fica o rastro em `aprovadoPor` e `obras_historico`.
-WhatsApp é a fase 2 (webhook em `notificacoes` → Edge Function); o número já fica em `profiles.whatsapp`.
+**WhatsApp é um espelho do 🔔, não um canal à parte.** Todo INSERT em `notificacoes` de quem tem
+`profiles.whatsapp` dispara, por `pg_net` (assíncrono), a `whatsapp-notificar`, que manda pela Evolution.
+Um ponto só: tipo novo de notificação já sai no WhatsApp sem mexer em nada. Falha do WhatsApp nunca
+impede a notificação (o gatilho engole o erro) e fica em `whatsapp_envios`. O segredo do gatilho mora no
+Vault, não no repositório; sem ele no Vault o gatilho não chama nada. O número é editado e testado pelo
+master em Pessoas e acessos.
 
 **O cronograma é a fonte única do planejamento.** Havia três agendas que não se falavam: datas por
 item na tela da obra (`item.inicio`/`diasExec`, cada item isolado), o Cronograma Comercial (ligado à
