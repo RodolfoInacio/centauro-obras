@@ -8,6 +8,7 @@
 import { pendenciasCompras, comprasTotais } from "./ComprasObra";
 import { contagemMedicao } from "./MedicaoItem";
 import { obraComTrava, liberacaoEtapa } from "./regrasEtapas";
+import { avisosPlanejamento } from "./planejamento";
 
 export const AREAS = [
   { k: "itens", rotulo: "Itens", secao: "itens" },
@@ -19,6 +20,8 @@ export const AREAS = [
   { k: "medicao", rotulo: "Medição", secao: "itens" },
   { k: "producao", rotulo: "Produção", secao: "itens" },
   { k: "agenda", rotulo: "Agenda", secao: null },
+  { k: "cronograma", rotulo: "Cronograma", secao: "cronograma" },
+  { k: "diario", rotulo: "Diário", secao: null },
 ];
 export const PESO_NIVEL = { erro: 3, atencao: 2, info: 1 };
 
@@ -33,7 +36,8 @@ const DOCS = [
   { cat: "projeto", ck: "ck_projeto", rotulo: "projeto / fotos" },
 ];
 
-// ctx: { anexos: Map<obraId, Set<categoria>> | null, agenda: [], cronogramas: [], hoje }
+// ctx: { anexos: Map<obraId, Set<categoria>> | null, agenda (a efetiva, com o planejado), cronogramas,
+//        macro, conflitos, diarios, hoje } — cada parte é opcional; sem ela, a área correspondente fica de fora.
 export function avisosDaObra(obra, ctx = {}) {
   const hoje = ctx.hoje || hojeLocal();
   const out = [];
@@ -88,9 +92,9 @@ export function avisosDaObra(obra, ctx = {}) {
     if (travados.length) add("producao", "erro", `${travados.length} item(ns) medidos esperando Compras para produzir`);
   }
 
-  // Agenda e cronograma
+  // Agenda, cronograma (prazo, atraso, choque de equipe) e diário
   if (ctx.agenda && !ctx.agenda.some(a => a.obraId === obra.id)) add("agenda", "info", "Nenhum serviço lançado no calendário");
-  if (ctx.cronogramas && !ctx.cronogramas.some(c => c.obraId === obra.id)) add("agenda", "info", "Sem cronograma");
+  for (const a of avisosPlanejamento(obra, { ...ctx, agendaEf: ctx.agenda, hoje })) out.push(a);
 
   return out;
 }

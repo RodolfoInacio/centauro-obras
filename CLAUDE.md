@@ -42,7 +42,9 @@ src/
   api.js           CRUD do Supabase (obras, equipes, agenda, cronogramas, lembretes, diários) + upload das fotos
                    + estoque (leituras paginadas e as chamadas RPC de lançamento/estorno).
   supabase.js      Cria o client a partir das env vars.
-  cronograma.js    Motor de agendamento do Cronograma Comercial (dias úteis, dependências).
+  cronograma.js    Motor de agendamento do Cronograma (dias úteis, dependências) + planejado × realizado.
+  planejamento.js  Tudo que deriva do cronograma: datas dos itens, calendário planejado (agendaEfetiva),
+                   choques de equipe, diários pendentes, atraso projetado e os avisos dessas áreas.
   CronogramaPrint.jsx  Folha impressa do cronograma (A4 paisagem, versão cliente/interna, nível de detalhe).
   agrupamento.js   Chave de agrupamento de obras por cliente (usada pelo App e pelo Diário).
   Modal.jsx        Modal genérico com backdrop.
@@ -636,6 +638,35 @@ por `check` no banco. Sino e cartinha acendem pelo Realtime (respeita RLS) e, se
 minuto e ao voltar para a aba. Sem a migration, os dois ícones e o item do menu somem e o
 comentário comum grava como antes (`mencoes` só vai no INSERT quando há alguém marcado).
 
+**O cronograma é a fonte única do planejamento.** Havia três agendas que não se falavam: datas por
+item na tela da obra (`item.inicio`/`diasExec`, cada item isolado), o Cronograma Comercial (ligado à
+obra só pelo `obraId`) e o Calendário montado à mão. Hoje o cronograma da obra (o mais antigo com
+aquele `obraId`, `cronogramaDaObra`) mora embutido na seção 📅 da tela da obra (`CronogramaEditor
+embutido`) e é o mesmo do macro (menu "Cronograma"). A tarefa ganhou `itemId`, `etapa` e `equipeId`;
+o modelo gerado dos itens já os grava e encadeia cada item Corte → … → Acabamento (Corte espera os
+Metais). Ao criar o cronograma de obra antiga, a data que estava no item vira a tarefa de Instalação
+fixada. Tudo o mais é **derivado** em `planejamento.js`, nunca gravado:
+- **Itens**: o período de cada item (e por etapa) vem de `datasDosItens`; a tela não edita mais data.
+- **Calendário**: cada dia útil de tarefa com equipe vira um serviço `planejado: true` com `origem
+  {cronoId, taskId, dia}` (`servicosPlanejados`). As telas recebem `agendaEf` = manual + planejado.
+  Mexer num planejado no calendário grava uma linha **real** com a mesma `origem` e id fixo
+  (`idAjuste`), que substitui só aquele dia; remover grava `cancelado: true`. É uma direção só:
+  calendário nunca reescreve o cronograma. Copiar/repetir dia tira a `origem` (vira manual).
+- **Choques** (`conflitosAgenda`): mesma equipe em obras diferentes no mesmo dia, com "Dia todo",
+  o mesmo turno duas vezes ou mais de 9 h. Manhã numa e tarde na outra não é choque. Aparece no
+  mês (⚠), no dia (selo na equipe), no cronograma (⚠ na coluna Equipe) e na Central (nas duas obras).
+- **Diário**: dia com serviço até hoje e sem registro, ou registro em `rascunho`, é pendente
+  (`diariosPendentes`) — nada é gravado até alguém abrir. O registro nasce `rascunho` com uma
+  atividade por tarefa prevista no dia (`tarefasDoDia`, com `percentPlanejado` no fim do dia e
+  `percentAntes`). Cada uma recebe ✔/◐/✖; **Aprovar** grava o `percent` da tarefa no cronograma e,
+  quando todas as tarefas do item naquela etapa chegam a 100%, marca a etapa do item — respeitando
+  `regrasEtapas.js` (travou, só avisa). Diário antigo sem `status` conta como aprovado.
+- **Prazo** (`situacaoTarefa`, `terminoProjetado`, `andamentoObra`): o % é comparado com o que
+  deveria estar pronto agora (horas úteis decorridas), com 5 pontos de folga. Tarefa atrasada empurra
+  o término pelo que falta no ritmo planejado → "~N dias de atraso" no cabeçalho da obra, no macro e
+  aviso quando passa da `dataLimiteEntrega`.
+Limite aceito: tarefa **sem equipe** não vai ao calendário e por isso não gera diário pendente.
+
 **Central de avisos é derivada.** `avisosDaObra` (avisos.js) deduz tudo dos dados — nada é gravado.
 Documentos vêm de `fetchResumoAnexos` (categoria dos anexos fora da lixeira) ou do checklist marcado.
 O contador do menu e o chip "⚠ N pendências" do cabeçalho da obra usam a mesma função sem os anexos
@@ -677,6 +708,9 @@ O contador do menu e o chip "⚠ N pendências" do cabeçalho da obra usam a mes
   (a trava de "só arrasta pela alça" vive num `useRef`, não em estado, porque o navegador decide
   no `mousedown`, antes de qualquer re-render); e o cálculo do destino usa a lista **já ordenada**
   (`displayed`), não o array cru — usar o cru dessincroniza depois do primeiro arrasto.
+- **`item.inicio`, `item.diasExec` e `item.etapas[*].inicio/entrega` são vestigiais.** As datas
+  saem do cronograma; os campos continuam em `normItem` (registro antigo abre) e só são lidos uma
+  vez, para semear a Instalação ao criar o cronograma da obra. Não voltar a editar data no item.
 - **`obra.material`** (dataLimite/dataCompra/previsaoEntrega) ainda é criado em três lugares mas
   **não tem mais UI** — as datas viraram por categoria em `obra.compras`. Campo vestigial.
 - **`parsePDFFile` está morto**: ninguém chama. O fallback usa `parseObraLines` direto.

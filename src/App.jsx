@@ -4,7 +4,8 @@ import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
 import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens, fetchFotosCapa, fetchOrcamentos, upsertOrcamento, deleteOrcamento as dbDeleteOrcamento } from "./api";
 import OrcamentosView, { OrcamentoPrint, normOrcamento } from "./OrcamentoLivre";
-import { agendar, agendarMacro, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent, normPredecessoras, parsePredecessoras, textoPredecessoras, inicioEstaFixo, toLocalISO } from "./cronograma";
+import { cronogramaDaObra, cronogramasDaObra, datasDosItens, servicosPlanejados, agendaEfetiva, conflitosAgenda, andamentoObra, idAjuste } from "./planejamento";
+import { agendar, agendarMacro, situacaoTarefa, percentEsperadoEm, SITUACAO_ROTULO, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent, normPredecessoras, parsePredecessoras, textoPredecessoras, inicioEstaFixo, toLocalISO } from "./cronograma";
 import CronogramaPrint from "./CronogramaPrint";
 import Modal from "./Modal";
 import PainelLembretes, { normLembrete } from "./PainelLembretes";
@@ -585,7 +586,7 @@ function Secao({ id, titulo, icone, resumo, foco = false, children }) {
 function ChipPendencias({ obra }) {
   const [aberto, setAberto] = useState(false);
   if (obra.status === "Concluído") return null;
-  const lista = avisosDaObra(obra).filter(a => a.nivel !== "info" && a.area !== "docs" && a.area !== "agenda");
+  const lista = avisosDaObra(obra).filter(a => a.nivel !== "info" && a.area !== "docs" && a.area !== "agenda" && a.area !== "cronograma" && a.area !== "diario");
   if (!lista.length) return <span style={{ fontSize: 11.5, fontWeight: 700, color: "#16a34a" }}>✓ Sem pendências</span>;
   const criticos = lista.filter(a => a.nivel === "erro").length;
   const cor = criticos ? "#dc2626" : "#d97706";
@@ -604,6 +605,41 @@ function ChipPendencias({ obra }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// Seção 📅 de obra sem cronograma: gera o modelo a partir dos itens (o mesmo do Cronograma geral).
+// onCriar(comModelo, temVidros)
+function CriarCronogramaObra({ obra, onCriar }) {
+  const [perguntar, setPerguntar] = useState(false);
+  const temItens = (obra.itens || []).length > 0;
+  const comDatas = (obra.itens || []).filter(i => i.inicio).length;
+  const btn = { border: "none", borderRadius: 8, padding: "9px 16px", fontWeight: 700, fontSize: 13, cursor: "pointer" };
+  return (
+    <div style={{ padding: 16, fontSize: 13, color: "#475569" }}>
+      <div style={{ marginBottom: 12 }}>
+        O cronograma é o planejamento da obra: as datas de cada item, a equipe de cada tarefa (que vai para o Calendário)
+        e o diário de cada dia saem dele.
+        {comDatas > 0 && <> As datas que já estavam nos itens ({comDatas}) entram como a <b>instalação</b> de cada um.</>}
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button onClick={() => setPerguntar(true)} disabled={!temItens}
+          title={temItens ? "Suprimentos / Produção / Instalação, uma tarefa por item, em sequência" : "Importe o PDF primeiro: o modelo sai dos itens"}
+          style={{ ...btn, background: temItens ? "#0ea5e9" : "#e2e8f0", color: temItens ? "#fff" : "#94a3b8", cursor: temItens ? "pointer" : "not-allowed" }}>
+          Criar cronograma a partir dos itens
+        </button>
+        <button onClick={() => onCriar?.(false)} style={{ ...btn, background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0" }}>Criar em branco</button>
+      </div>
+      <Modal open={perguntar} title="Esta obra contém vidros?" onClose={() => setPerguntar(false)}>
+        <div style={{ fontSize: 13, color: "#475569", marginBottom: 18 }}>
+          Se sim, um grupo "Vidros" será criado dentro de Suprimentos, junto com Metais e Acessórios.
+        </div>
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button onClick={() => { setPerguntar(false); onCriar?.(true, false); }} style={{ ...btn, background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0" }}>Não</button>
+          <button onClick={() => { setPerguntar(false); onCriar?.(true, true); }} style={{ ...btn, background: "#0ea5e9", color: "#fff" }}>Sim</button>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -653,7 +689,10 @@ function ChecklistObra({ itens, onChange }) {
   );
 }
 
-function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque, onEntradaEstoque, onAtividade, atividadeVersao = 0, itemAberto = null, onItemAberto, onImprimirMedicao, secaoFoco = null }) {
+// O planejamento da obra é o cronograma (seção 📅), não mais datas por item: `datasItens` é o
+// período de cada item lido do cronograma e `cronogramaSlot` é o próprio editor, montado pelo App.
+function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque, onEntradaEstoque, onAtividade, atividadeVersao = 0, itemAberto = null, onItemAberto, onImprimirMedicao, secaoFoco = null,
+  cronograma = null, cronogramaSlot = null, cronogramaResumo = "", datasItens = {}, andamento = null, onCriarCronograma }) {
   // Item expandido mora na view (#/obra/2729/item/5): voltar de outra tela reabre o mesmo item.
   const expandedId = itemAberto;
   const setExpandedId = (id) => onItemAberto?.(id);
@@ -697,37 +736,6 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
     update({ ...localObra, equipes: equipesObra.filter(e => e !== id) });
   }
 
-  const hasStart = !!localObra.dataInicio;
-  // Timeline origin = obra start date (the "initial column"); fall back to today only for layout
-  const startDate = localObra.dataInicio || new Date().toISOString().split("T")[0];
-
-  // Each item is scheduled INDEPENDENTLY by its own start date + duration (no auto-cascade).
-  // Items may overlap / run simultaneously. Unscheduled items have no bar.
-  const schedule = localObra.itens.map(item => {
-    const dur = Number(item.diasExec) || 0;
-    if (item.inicio && dur > 0) {
-      return { inicio: item.inicio, fim: addDays(item.inicio, dur - 1), agendado: true };
-    }
-    return { inicio: null, fim: null, agendado: false };
-  });
-
-  // Grid width: from obra start to the latest scheduled item end (min 30 days so there's always a grid)
-  let maxEnd = 30;
-  schedule.forEach((s, idx) => {
-    if (s.agendado) {
-      const off = Math.max(daysBetween(startDate, s.inicio), 0);
-      maxEnd = Math.max(maxEnd, off + (Number(localObra.itens[idx].diasExec) || 0) + 5);
-    }
-  });
-  const totalDays = maxEnd;
-
-  const weeks = [];
-  let wd = new Date(startDate);
-  while (daysBetween(startDate, wd.toISOString().split("T")[0]) < totalDays) {
-    weeks.push(wd.toISOString().split("T")[0]);
-    wd.setDate(wd.getDate() + 7);
-  }
-
   function updateItem(id, field, value) {
     const updated = { ...localObra, itens: localObra.itens.map(i => i.id === id ? { ...i, [field]: value } : i) };
     update(updated);
@@ -742,13 +750,6 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
       : i) };
     update(updated);
   }
-  function updateEtapaData(id, etapa, field, value) {
-    const updated = { ...localObra, itens: localObra.itens.map(i => i.id === id
-      ? { ...i, etapas: { ...i.etapas, [etapa]: { ...i.etapas[etapa], [field]: value } } }
-      : i) };
-    update(updated);
-  }
-
   const totalPct = localObra.itens.length > 0
     ? Math.round(localObra.itens.reduce((a, i) => a + itemPercentual(i), 0) / localObra.itens.length)
     : 0;
@@ -759,12 +760,10 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
   const compras = comprasTotais(localObra);
   const alertaCompras = precisaAlertaCompras(localObra);
 
-  const LEFT_COL = 340;
-  const DAY_W = 18;
-  const TIMELINE_W = Math.max(700, totalDays * DAY_W);
 
   const cad = localObra.cadastro || {};
-  const semAgenda = schedule.filter(s => !s.agendado).length;
+  const semAgenda = cronograma ? localObra.itens.filter(i => !datasItens[i.id]).length : 0;
+  const fmtD = d => d ? `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")}` : "";
   // Obra nova (regras de etapas) sempre mostra o chip de medição; a antiga só depois de medir.
   const precisaMedir = localObra.regrasEtapas === 2;
   const medicaoObra = localObra.itens.reduce((acc, i) => {
@@ -826,6 +825,12 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
             <input type="date" value={localObra.dataLimiteEntrega || ""}
               onChange={e => update({ ...localObra, dataLimiteEntrega: e.target.value })} style={campoData} />
           </div>
+          {andamento && andamento.atrasoDias > 0 && localObra.status !== "Concluído" && (
+            <span title={`${andamento.atrasadas.length} tarefa(s) atrasada(s) no cronograma. No ritmo atual termina em ${andamento.projetado.toLocaleDateString("pt-BR")}.`}
+              style={{ background: "#fef2f2", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 999, padding: "5px 12px", fontSize: 12, fontWeight: 800 }}>
+              ⏱ ~{andamento.atrasoDias} dia{andamento.atrasoDias > 1 ? "s" : ""} de atraso
+            </span>
+          )}
           <ChipPendencias obra={localObra} />
         </div>
       </div>
@@ -859,8 +864,13 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
               onChange={(ck, atividade) => { update({ ...localObra, checklist: ck }); if (atividade) onAtividade?.(atividade); }} />
           </Secao>
 
-          <Secao id="itens" foco={secaoFoco === "itens"} titulo="Itens e cronograma" icone="🪟"
-            resumo={localObra.itens.length === 0 ? "sem itens" : `${localObra.itens.length} ite${localObra.itens.length === 1 ? "m" : "ns"} · ${totalPct}%${semAgenda ? ` · ${semAgenda} sem agendamento` : ""}`}>
+          <Secao id="cronograma" foco={secaoFoco === "cronograma"} titulo="Cronograma" icone="📅"
+            resumo={cronograma ? cronogramaResumo : "sem cronograma"}>
+            {cronograma ? cronogramaSlot : <CriarCronogramaObra obra={localObra} onCriar={onCriarCronograma} />}
+          </Secao>
+
+          <Secao id="itens" foco={secaoFoco === "itens"} titulo="Itens" icone="🪟"
+            resumo={localObra.itens.length === 0 ? "sem itens" : `${localObra.itens.length} ite${localObra.itens.length === 1 ? "m" : "ns"} · ${totalPct}%${semAgenda ? ` · ${semAgenda} fora do cronograma` : ""}`}>
             {obraComTrava(localObra) && localObra.itens.length > 0 && (
               <div style={{ background: "#eff6ff", borderBottom: "1px solid #bfdbfe", padding: "8px 20px", fontSize: 12, color: "#1e40af" }}>
                 🔒 Etapas em sequência: <b>Conf. Medidas</b> libera com o item medido · <b>Produção</b> com Conf. Medidas feita e o material
@@ -885,50 +895,26 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
                 proposta (#{localObra.numero}) os itens entram aqui e o cadastro, os anexos e os comentários ficam como estão.
               </div>
             )}
-            {!hasStart && localObra.itens.length > 0 && (
-              <div style={{ background: "#fffbeb", borderBottom: "1px solid #fde68a", padding: "10px 20px", fontSize: 13, color: "#92400e" }}>
-                📅 Defina a <b>data de início</b> da obra no campo <b>Início</b> (no cabeçalho) para posicionar a linha do tempo dos itens. O calendário é preenchido à parte, arrastando obra × equipe.
-              </div>
-            )}
-
-      {/* Gantt grid */}
-      <div style={{ overflowX: "auto" }}>
-        <div style={{ minWidth: LEFT_COL + TIMELINE_W }}>
-          {/* Header */}
-          <div style={{ display: "flex", background: "#1a1a1a", color: "#fff", position: "sticky", top: 0, zIndex: 10 }}>
-            <div style={{ width: LEFT_COL, minWidth: LEFT_COL, padding: "8px 14px", fontSize: 12, fontWeight: 700, borderRight: "1px solid #333333", display: "flex", gap: 8 }}>
-              <span style={{ flex: 1 }}>Item / Descrição</span>
-              <span style={{ width: 50, textAlign: "center" }}>Qtd</span>
-              <span style={{ width: 60, textAlign: "center" }}>%</span>
-            </div>
-            <div style={{ flex: 1, position: "relative", minWidth: TIMELINE_W, height: 28 }}>
-              {weeks.map((w, i) => (
-                <div key={i} style={{ position: "absolute", left: daysBetween(startDate, w) * DAY_W, fontSize: 10, color: "#9ca3af", top: 4, whiteSpace: "nowrap" }}>
-                  {fmtDate(w)}
-                </div>
-              ))}
-              {Array.from({ length: totalDays }).map((_, d) => (
-                <div key={d} style={{ position: "absolute", left: d * DAY_W, top: 0, bottom: 0, borderLeft: d % 7 === 0 ? "1px solid #333333" : "1px solid #1a1a1a33", height: 28 }} />
-              ))}
-            </div>
+      {/* Lista de itens — as datas vêm do cronograma */}
+      <div>
+        <div>
+          <div style={{ display: "flex", background: "#1a1a1a", color: "#fff", padding: "8px 14px", fontSize: 12, fontWeight: 700, gap: 8 }}>
+            <span style={{ flex: 1 }}>Item / Descrição</span>
+            <span style={{ width: 150, textAlign: "center" }}>No cronograma</span>
+            <span style={{ width: 50, textAlign: "center" }}>Qtd</span>
+            <span style={{ width: 60, textAlign: "center" }}>%</span>
           </div>
 
           {/* Item rows */}
           {localObra.itens.map((item, idx) => {
-            const sch = schedule[idx] || { inicio: null, fim: null, agendado: false };
-            const barLeft = sch.agendado ? Math.max(daysBetween(startDate, sch.inicio), 0) * DAY_W : 0;
-            const barW = Math.max((Number(item.diasExec) || 0) * DAY_W, 22);
+            const per = datasItens[item.id];
             const pct = itemPercentual(item);
-            const feitas = ETAPAS.filter(e => (item.etapas || {})[e] && item.etapas[e].feito);
-            const etapaAtual = feitas.length ? feitas[feitas.length - 1] : ETAPAS[0];
-            const barColor = ETAPA_COLORS[etapaAtual];
             const expanded = expandedId != null && String(expandedId) === String(item.id);
 
             return (
               <div key={item.id} style={{ borderBottom: "1px solid #f1f5f9" }}>
-                <div style={{ display: "flex", background: expanded ? "#f0f7ff" : idx % 2 === 0 ? "#fff" : "#fafafa", minHeight: 36 }}>
-                  <div onClick={() => setExpandedId(expanded ? null : item.id)}
-                    style={{ width: LEFT_COL, minWidth: LEFT_COL, padding: "7px 14px", display: "flex", gap: 8, alignItems: "center", cursor: "pointer", borderRight: "1px solid #e2e8f0" }}>
+                <div onClick={() => setExpandedId(expanded ? null : item.id)}
+                  style={{ display: "flex", background: expanded ? "#f0f7ff" : idx % 2 === 0 ? "#fff" : "#fafafa", minHeight: 36, padding: "7px 14px", gap: 8, alignItems: "center", cursor: "pointer" }}>
                     <div style={{ flex: 1, overflow: "hidden" }}>
                       <div style={{ fontSize: 12, fontWeight: 700, color: "#1a1a1a", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         <span style={{ color: "#94a3b8", marginRight: 6 }}>#{item.id}</span>
@@ -937,33 +923,19 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
                         {(item.medicao || precisaMedir) && <ChipMedicao item={item} />}
                       </div>
                       <div style={{ fontSize: 10, color: "#94a3b8", marginTop: 1 }}>
-                        {item.L}×{item.H}mm · {item.qtd}un · {sch.agendado
-                          ? `${fmtDate(sch.inicio)} → ${fmtDate(sch.fim)} (${item.diasExec}d)`
-                          : <span style={{ color: "#f59e0b", fontWeight: 700 }}>sem agendamento</span>}
+                        {item.L}×{item.H}mm · {item.qtd}un{item.localizacao ? ` · ${item.localizacao}` : ""}
                       </div>
+                    </div>
+                    <div style={{ width: 150, textAlign: "center", fontSize: 11 }}
+                      title={per ? Object.entries(per.porEtapa).map(([e, d]) => `${e}: ${fmtD(d.inicio)} → ${fmtD(d.termino)}`).join("\n") : ""}>
+                      {per ? <span style={{ color: "#334155", fontWeight: 600 }}>{fmtD(per.inicio)} → {fmtD(per.termino)}</span>
+                        : <span style={{ color: cronograma ? "#f59e0b" : "#cbd5e1", fontWeight: 700 }}>{cronograma ? "fora do cronograma" : "—"}</span>}
                     </div>
                     <div style={{ width: 50, textAlign: "center", fontWeight: 800, fontSize: 14 }}>{item.qtd}</div>
                     <div style={{ width: 60, textAlign: "center" }}>
                       <div style={{ fontWeight: 800, fontSize: 13, color: pct >= 100 ? "#10b981" : BRAND }}>{pct}%</div>
                       <ProgressBar value={pct} height={4} />
                     </div>
-                  </div>
-
-                  <div style={{ flex: 1, position: "relative", minWidth: TIMELINE_W }}>
-                    {Array.from({ length: totalDays }).map((_, d) => (
-                      <div key={d} style={{ position: "absolute", left: d * DAY_W, top: 0, bottom: 0, borderLeft: d % 7 === 0 ? "1px solid #e2e8f0" : "none" }} />
-                    ))}
-                    {sch.agendado && (
-                      <div title={`${item.descricao}\n${fmtDate(sch.inicio)} → ${fmtDate(sch.fim)} (${item.diasExec} dias)`}
-                        onClick={() => setExpandedId(expanded ? null : item.id)}
-                        style={{ position: "absolute", left: barLeft, top: 6, width: barW, height: 22, borderRadius: 4, background: barColor, opacity: 0.85, display: "flex", alignItems: "center", paddingLeft: 6, overflow: "hidden", cursor: "pointer", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }}>
-                        <span style={{ fontSize: 10, color: "#fff", fontWeight: 700, whiteSpace: "nowrap" }}>
-                          {item.tipo || (item.descricao || "").slice(0, 14)}
-                        </span>
-                        <div style={{ position: "absolute", left: 0, top: 0, width: `${pct}%`, height: "100%", background: "rgba(255,255,255,0.3)", borderRadius: 4 }} />
-                      </div>
-                    )}
-                  </div>
                 </div>
 
                 {expanded && (
@@ -986,7 +958,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
 
                     <div style={{ background: "#fff", borderRadius: 10, padding: 14, border: "1px solid #e2e8f0", minWidth: 300 }}>
                       <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 8, display: "flex", justifyContent: "space-between" }}>
-                        <span>Etapas (datas + conclusão)</span>
+                        <span>Etapas</span>
                         <span style={{ color: BRAND }}>{pct}%</span>
                       </div>
                       {ETAPAS.map(etapa => {
@@ -1003,20 +975,11 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
                             {!lib.ok && !e.feito && (
                               <div style={{ fontSize: 10.5, color: "#b45309", margin: "-2px 0 6px 22px", lineHeight: 1.35 }}>{lib.motivo}</div>
                             )}
-                            <div style={{ display: "flex", gap: 6 }}>
-                              <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: 9, color: "#94a3b8", marginBottom: 2 }}>Início previsto</div>
-                                <input type="date" value={e.inicio || ""}
-                                  onChange={ev => updateEtapaData(item.id, etapa, "inicio", ev.target.value)}
-                                  style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 6px", fontSize: 11, boxSizing: "border-box" }} />
+                            {per?.porEtapa?.[etapa] && (
+                              <div style={{ fontSize: 10.5, color: "#64748b", marginLeft: 22 }}>
+                                📅 {fmtD(per.porEtapa[etapa].inicio)} → {fmtD(per.porEtapa[etapa].termino)} <span style={{ color: "#94a3b8" }}>(cronograma)</span>
                               </div>
-                              <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: 9, color: "#94a3b8", marginBottom: 2 }}>Data de entrega</div>
-                                <input type="date" value={e.entrega || ""}
-                                  onChange={ev => updateEtapaData(item.id, etapa, "entrega", ev.target.value)}
-                                  style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 6, padding: "4px 6px", fontSize: 11, boxSizing: "border-box" }} />
-                              </div>
-                            </div>
+                            )}
                           </div>
                         );
                       })}
@@ -1025,29 +988,11 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
                     <MedicaoItem item={item} onChange={m => updateItem(item.id, "medicao", m)} />
 
                     <div style={{ background: "#fff", borderRadius: 10, padding: 14, border: "1px solid #e2e8f0", minWidth: 240, display: "flex", flexDirection: "column", gap: 12 }}>
-                      <div style={{ fontSize: 10, fontWeight: 700, color: "#1a1a1a", textTransform: "uppercase", borderBottom: "1px solid #e2e8f0", paddingBottom: 6 }}>📅 Agendamento deste item</div>
-                      <div>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 4 }}>Início do item</div>
-                        <div style={{ display: "flex", gap: 6 }}>
-                          <input type="date" value={item.inicio || ""}
-                            onClick={e => e.stopPropagation()}
-                            onChange={e => updateItem(item.id, "inicio", e.target.value)}
-                            style={{ flex: 1, border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 10px", fontSize: 13, boxSizing: "border-box" }} />
-                          {localObra.dataInicio && (
-                            <button onClick={e => { e.stopPropagation(); updateItem(item.id, "inicio", localObra.dataInicio); }}
-                              title="Usar a data de início da obra"
-                              style={{ background: "#eff6ff", color: "#1a1a1a", border: "1px solid #bfdbfe", borderRadius: 7, padding: "0 10px", fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" }}>
-                              = obra
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      <div>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 4 }}>Dias de execução</div>
-                        <input type="number" min={0} max={365} value={item.diasExec || 0} placeholder="a definir"
-                          onClick={e => e.stopPropagation()}
-                          onChange={e => updateItem(item.id, "diasExec", Number(e.target.value))}
-                          style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 10px", fontSize: 13, boxSizing: "border-box" }} />
+                      <div style={{ fontSize: 10, fontWeight: 700, color: "#1a1a1a", textTransform: "uppercase", borderBottom: "1px solid #e2e8f0", paddingBottom: 6 }}>Andamento deste item</div>
+                      <div style={{ fontSize: 12, color: "#475569" }}>
+                        {per ? <>📅 {fmtD(per.inicio)} → {fmtD(per.termino)} no cronograma</>
+                          : cronograma ? <span style={{ color: "#b45309" }}>Este item não tem tarefa no cronograma da obra.</span>
+                          : <span style={{ color: "#94a3b8" }}>As datas saem do cronograma da obra (seção 📅 Cronograma).</span>}
                       </div>
                       <div>
                         <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 4 }}>% Concluído (calculado pelas etapas)</div>
@@ -1078,7 +1023,7 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
           })}
 
           <div style={{ display: "flex", background: "#1a1a1a", color: "#fff", padding: "10px 14px", fontSize: 12, gap: 20 }}>
-            <span style={{ width: LEFT_COL - 28, fontWeight: 700 }}>{localObra.itens.length} itens · Progresso: {totalPct}%</span>
+            <span style={{ flex: 1, fontWeight: 700 }}>{localObra.itens.length} itens · Progresso: {totalPct}%</span>
             <span style={{ fontWeight: 700, color: "#c9a227" }}><Dinheiro v={localObra.valorTotal} /></span>
           </div>
         </div>
@@ -1470,7 +1415,8 @@ const DIAS_SEMANA_LONGO = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-f
 // Um agendamento é um serviço do dia: obra (ou atividade avulsa) + equipe + período.
 // Substitui a planilha "rotina trabalhos": lá cada dia é uma coluna e cada equipe um bloco com
 // OBRA / ENDEREÇO / REFERÊNCIA / HORÁRIO / DESCRIÇÃO — os mesmos campos daqui.
-// A execução do dia é sempre manual: o calendário não deduz nada das datas da obra.
+// Além do que é lançado à mão, entram os dias das tarefas do cronograma que têm equipe
+// (`planejado: true`, ver planejamento.js). O cronograma é a fonte: o calendário só ajusta o dia.
 const PERIODOS = ["Dia todo", "Manhã", "Tarde", "1h", "2h", "3h", "4h"];
 const PERIODO_COR = { "Dia todo": "#1a1a1a", "Manhã": "#0ea5e9", "Tarde": "#f97316" };
 
@@ -1646,7 +1592,13 @@ function CardAgendamento({ ag, obras, cor, onChange, onPedirRemocao, onRepetir, 
   return (
     <div draggable
       onDragStart={e => { onArrastar(); if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", ag.id); } }}
-      style={{ background: "#fff", border: "1px solid " + cor + "44", borderLeft: "4px solid " + cor, borderRadius: 8, padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+      style={{ background: ag.planejado ? "#f8fafc" : "#fff", border: "1px " + (ag.planejado ? "dashed " : "solid ") + cor + (ag.planejado ? "" : "44"), borderLeft: "4px " + (ag.planejado ? "dashed " : "solid ") + cor, borderRadius: 8, padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+      {ag.origem && (
+        <div title={ag.planejado ? "Vem do cronograma da obra. Mudar algo aqui ajusta só este dia; as datas se mudam no cronograma." : "Dia do cronograma ajustado aqui no calendário"}
+          style={{ fontSize: 10, fontWeight: 800, color: ag.planejado ? "#0d9488" : "#64748b", textTransform: "uppercase", letterSpacing: 0.3 }}>
+          📅 {ag.planejado ? "do cronograma" : "do cronograma · ajustado"}
+        </div>
+      )}
 
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span title="Arraste para outra equipe" style={{ color: "#cbd5e1", cursor: "grab", fontSize: 14, lineHeight: 1 }}>☰</span>
@@ -1720,7 +1672,7 @@ function CardAgendamento({ ag, obras, cor, onChange, onPedirRemocao, onRepetir, 
 }
 
 // Tela do dia expandido: obras à esquerda, equipes à direita, arrasta e solta pra combinar.
-function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar, onAbrirObra, onEmitirOS }) {
+function DiaAgenda({ dia, obras, equipes, agenda, choques = [], onSalvar, onExcluir, onVoltar, onAbrirObra, onEmitirOS }) {
   const [busca, setBusca] = useState("");
   // Ref, não estado: o navegador lê no dragstart, antes de qualquer re-render (mesma razão do
   // arrastar da lista de obras).
@@ -1772,14 +1724,16 @@ function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar,
 
   function copiarDoDiaAnterior() {
     if (!diaAnterior) return;
+    // A cópia é serviço manual: não leva a ligação com o cronograma (senão regravaria o dia de origem).
     agenda.filter(a => a.dia === diaAnterior)
-      .forEach((a, i) => onSalvar({ ...a, id: idAgendamento(), dia, ordem: Date.now() + i }));
+      .forEach(({ planejado, origem, cancelado, ...a }, i) => onSalvar({ ...a, id: idAgendamento(), dia, ordem: Date.now() + i }));
   }
 
   // Repete o serviço nos dias úteis seguintes, até a data escolhida
   function repetir(ag, ate) {
+    const { planejado, origem, cancelado, ...base } = ag;
     diasUteisEntre(addDays(ag.dia, 1), ate)
-      .forEach((d2, i) => onSalvar({ ...ag, id: idAgendamento(), dia: d2, ordem: Date.now() + i }));
+      .forEach((d2, i) => onSalvar({ ...base, id: idAgendamento(), dia: d2, ordem: Date.now() + i }));
   }
 
   return (
@@ -1862,6 +1816,11 @@ function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar,
                   )}
                   {eq.integrantes.length > 0 && <span style={{ fontSize: 12, color: "#64748b" }}>— {eq.integrantes.join(" + ")}</span>}
                   <span style={{ fontSize: 11, color: "#94a3b8" }}>{lista.length} serviço(s)</span>
+                  {(() => {
+                    const ch = choques.find(c => c.dia === dia && c.equipeId === eq.id);
+                    return ch ? <span title={`Esta equipe está em mais de um lugar neste dia — ${ch.motivo}`}
+                      style={{ background: "#fef2f2", color: "#dc2626", border: "1px solid #fecaca", borderRadius: 999, padding: "1px 8px", fontSize: 10.5, fontWeight: 800 }}>⚠ choque de agenda</span> : null;
+                  })()}
                   {!arq && (
                     <select value="" onChange={e => {
                         const v = e.target.value;
@@ -1933,7 +1892,9 @@ function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar,
               {(equipes.find(e => e.id === confirmarRemocao.equipeId) || {}).nome || "Sem equipe"}
               {" · "}{fmtDate(confirmarRemocao.dia)}{" · "}{confirmarRemocao.periodo}
               <div style={{ marginTop: 8, color: "#dc2626" }}>
-                A descrição, a referência e os itens escolhidos são apagados junto. Não dá para desfazer.
+                {confirmarRemocao.origem
+                  ? "Este dia vem do cronograma: sai só do calendário (a tarefa continua no cronograma). Para mudar as datas de vez, ajuste o cronograma da obra."
+                  : "A descrição, a referência e os itens escolhidos são apagados junto. Não dá para desfazer."}
               </div>
             </div>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
@@ -1949,7 +1910,7 @@ function DiaAgenda({ dia, obras, equipes, agenda, onSalvar, onExcluir, onVoltar,
   );
 }
 
-function CalendarView({ obras, equipes, agenda, lembretes, mesSel, diaSel, onNavegar, onVoltarDia, onSalvarAgendamento, onExcluirAgendamento, onSalvarLembrete, onExcluirLembrete, onSelectObra, onEmitirOS, onRelatorio }) {
+function CalendarView({ obras, equipes, agenda, choques = [], lembretes, mesSel, diaSel, onNavegar, onVoltarDia, onSalvarAgendamento, onExcluirAgendamento, onSalvarLembrete, onExcluirLembrete, onSelectObra, onEmitirOS, onRelatorio }) {
   const hoje = new Date();
   // O helper global hoje() está sombreado pelo Date acima, então monta a string a partir dele.
   const hojeISO = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, "0")}-${String(hoje.getDate()).padStart(2, "0")}`;
@@ -1977,8 +1938,7 @@ function CalendarView({ obras, equipes, agenda, lembretes, mesSel, diaSel, onNav
   while (celulas.length % 7 !== 0) celulas.push(null);
 
   const diaStr = (dia) => `${ano}-${String(mes + 1).padStart(2, "0")}-${String(dia).padStart(2, "0")}`;
-  // Serviços distribuídos naquele dia. É a única coisa que o calendário mostra: nada é deduzido
-  // das datas da obra — a execução do dia é definida a mão aqui dentro.
+  // Serviços do dia: os lançados aqui e os que vêm do cronograma (tarefa com equipe).
   function agendaNoDia(dia) {
     const d = diaStr(dia);
     return agenda.filter(a => a.dia === d).sort((a, b) => (a.ordem || 0) - (b.ordem || 0));
@@ -2002,7 +1962,7 @@ function CalendarView({ obras, equipes, agenda, lembretes, mesSel, diaSel, onNav
 
   if (diaAberto) {
     return (
-      <DiaAgenda dia={diaAberto} obras={obras} equipes={equipes} agenda={agenda}
+      <DiaAgenda dia={diaAberto} obras={obras} equipes={equipes} agenda={agenda} choques={choques}
         onSalvar={onSalvarAgendamento} onExcluir={onExcluirAgendamento}
         onVoltar={onVoltarDia} onAbrirObra={onSelectObra}
         onEmitirOS={onEmitirOS} />
@@ -2092,6 +2052,7 @@ function CalendarView({ obras, equipes, agenda, lembretes, mesSel, diaSel, onNav
 
       <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: "10px 16px", fontSize: 12, color: "#64748b", marginBottom: 16 }}>
         Clique num dia para distribuir os serviços: arraste a obra para a equipe, defina o período e escreva a descrição.
+        Os dias das tarefas do cronograma que têm equipe já aparecem aqui (tracejados).
       </div>
 
       {/* Weekday header */}
@@ -2104,6 +2065,7 @@ function CalendarView({ obras, equipes, agenda, lembretes, mesSel, diaSel, onNav
       <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))", gap: 6 }}>
         {celulas.map((dia, i) => {
           const lista = dia ? agendaNoDia(dia) : [];
+          const choqueDia = dia ? choques.filter(c => c.dia === diaStr(dia)) : [];
           return (
             <div key={i}
               onClick={() => dia && onNavegar({ mes: chaveMes(ano, mes), dia: diaStr(dia) }, "push")}
@@ -2111,13 +2073,21 @@ function CalendarView({ obras, equipes, agenda, lembretes, mesSel, diaSel, onNav
               style={{ minHeight: 110, minWidth: 0, background: dia ? "#fff" : "transparent", borderRadius: 8, border: dia ? "1px solid #e2e8f0" : "none", padding: dia ? 6 : 0, boxShadow: ehHoje(dia) ? "0 0 0 2px #c9a227" : "none", cursor: dia ? "pointer" : "default" }}>
               {dia && (
                 <>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: ehHoje(dia) ? "#c9a227" : "#64748b", marginBottom: 4, textAlign: "right" }}>{dia}</div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: ehHoje(dia) ? "#c9a227" : "#64748b", marginBottom: 4, display: "flex", justifyContent: "flex-end", gap: 4 }}>
+                    {choqueDia.length > 0 && (
+                      <span title={choqueDia.map(c => `${nomeEquipe(c.equipeId)}: ${c.motivo}`).join("\n")}
+                        style={{ color: "#dc2626", fontSize: 11 }}>⚠</span>
+                    )}
+                    {dia}
+                  </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                     {lista.slice(0, 4).map(ag => (
                       <div key={ag.id}
                         onClick={e => { if (ag.obraId) { e.stopPropagation(); onSelectObra(ag.obraId); } }}
                         title={`${nomeEquipe(ag.equipeId)} — ${tituloAgendamento(ag, obras)} · ${ag.periodo}${ag.descricao ? " · " + ag.descricao : ""}`}
-                        style={{ background: corEquipe(ag.equipeId), color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        style={ag.planejado
+                          ? { background: "#fff", color: corEquipe(ag.equipeId), border: `1px dashed ${corEquipe(ag.equipeId)}`, borderRadius: 4, padding: "1px 5px", fontSize: 10, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }
+                          : { background: corEquipe(ag.equipeId), color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                         {tituloAgendamento(ag, obras)}
                       </div>
                     ))}
@@ -2900,7 +2870,7 @@ function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos
     { key: "diario", label: "Diário de Obras", icon: "📓" },
     { key: "equipes", label: "Equipes", icon: "👷" },
     { key: "estoque", label: "Estoque", icon: "📦" },
-    { key: "cronogramas", label: "Cronograma Comercial", icon: "📊" },
+    { key: "cronogramas", label: "Cronograma", icon: "📊" },
     { key: "orcamentos", label: "Orçamentos", icon: "🧾" },
     { key: "financeiro", label: "Financeiro", icon: "🔒" },
   ];
@@ -2909,32 +2879,32 @@ function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos
   return (
     <>
       <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", opacity: open ? 1 : 0, pointerEvents: open ? "auto" : "none", transition: "opacity .2s", zIndex: 40 }} />
-      <div style={{ position: "fixed", top: 0, left: 0, bottom: 0, width: 264, background: "#1a1a1a", transform: open ? "translateX(0)" : "translateX(-100%)", transition: "transform .25s ease", zIndex: 41, display: "flex", flexDirection: "column", padding: "16px 0", boxShadow: open ? "4px 0 24px rgba(0,0,0,0.3)" : "none" }}>
-        <div style={{ padding: "0 20px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+      <div style={{ position: "fixed", top: 0, left: 0, bottom: 0, width: 264, background: "#1a1a1a", transform: open ? "translateX(0)" : "translateX(-100%)", transition: "transform .25s ease", zIndex: 41, display: "flex", flexDirection: "column", padding: "16px 0", overflowY: "auto", overscrollBehavior: "contain", boxShadow: open ? "4px 0 24px rgba(0,0,0,0.3)" : "none" }}>
+        <div style={{ flexShrink: 0, padding: "0 20px 14px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <img src={logoWhite} alt="Centauro" style={{ height: 28 }} />
           <button onClick={onClose} style={{ background: "transparent", color: "#9ca3af", border: "none", fontSize: 24, lineHeight: 1, cursor: "pointer" }}>×</button>
         </div>
-        <div style={{ borderTop: "1px solid #333", margin: "4px 0 8px" }} />
+        <div style={{ flexShrink: 0, borderTop: "1px solid #333", margin: "4px 0 8px" }} />
         {items.map(it => (
           <button key={it.key} onClick={() => onNav(it.key)}
-            style={{ textAlign: "left", background: current === it.key ? "#2a2a2a" : "transparent", color: current === it.key ? "#fff" : "#d1d5db", border: "none", borderLeftWidth: 3, borderLeftStyle: "solid", borderLeftColor: current === it.key ? "#c9a227" : "transparent", padding: "13px 22px", fontSize: 14, fontWeight: 600, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
+            style={{ flexShrink: 0, textAlign: "left", background: current === it.key ? "#2a2a2a" : "transparent", color: current === it.key ? "#fff" : "#d1d5db", border: "none", borderLeftWidth: 3, borderLeftStyle: "solid", borderLeftColor: current === it.key ? "#c9a227" : "transparent", padding: "13px 22px", fontSize: 14, fontWeight: 600, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
             <span style={{ fontSize: 16 }}>{it.icon}</span> {it.label}
             {it.badge > 0 && (
               <span title={it.dica || "Obras com pendência crítica"} style={{ marginLeft: "auto", background: "#dc2626", color: "#fff", borderRadius: 999, padding: "1px 8px", fontSize: 11, fontWeight: 800 }}>{it.badge}</span>
             )}
           </button>
         ))}
-        <div style={{ borderTop: "1px solid #333", margin: "8px 0" }} />
+        <div style={{ flexShrink: 0, borderTop: "1px solid #333", margin: "8px 0" }} />
         <button onClick={onImport}
-          style={{ textAlign: "left", background: "transparent", color: "#c9a227", border: "none", padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
+          style={{ flexShrink: 0, textAlign: "left", background: "transparent", color: "#c9a227", border: "none", padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
           <span style={{ fontSize: 16 }}>📄</span> Importar PDF
         </button>
         <button onClick={onExportar} title="Baixa um arquivo com todos os dados do banco (os arquivos anexados ficam no Storage)"
-          style={{ textAlign: "left", background: "transparent", color: "#9ca3af", border: "none", padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
+          style={{ flexShrink: 0, textAlign: "left", background: "transparent", color: "#9ca3af", border: "none", padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
           <span style={{ fontSize: 16 }}>💾</span> Exportar dados (backup)
         </button>
         <button onClick={() => onNav("configuracoes")} title="Configurações do app (pede senha)"
-          style={{ textAlign: "left", background: current === "configuracoes" ? "#2a2a2a" : "transparent", color: current === "configuracoes" ? "#fff" : "#9ca3af", border: "none", padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
+          style={{ flexShrink: 0, textAlign: "left", background: current === "configuracoes" ? "#2a2a2a" : "transparent", color: current === "configuracoes" ? "#fff" : "#9ca3af", border: "none", padding: "13px 22px", fontSize: 14, fontWeight: 700, cursor: "pointer", display: "flex", gap: 12, alignItems: "center" }}>
           <span style={{ fontSize: 16 }}>⚙️</span> Configurações
         </button>
         <div style={{ marginTop: "auto", padding: "12px 22px", fontSize: 11, color: "#6b7280" }}>Centauro — Gestão de Obras</div>
@@ -3078,6 +3048,11 @@ function nomeCurtoItem(item) {
   return base.length > 60 ? base.slice(0, 57) + "…" : base;
 }
 
+// Cada tarefa por item leva `itemId` e `etapa`: é o que liga o cronograma à tela da obra (datas do
+// item), ao diário (atividade do dia) e às etapas do item (aprovar o diário com 100% marca a etapa).
+const ETAPA_DO_GRUPO = { Corte: "Produção", Usinagem: "Produção", Montagem: "Produção", "Expedição": "Produção",
+  Transporte: "Instalação", "Instalação": "Instalação", Regulagem: "Instalação", Acabamento: "Acabamentos" };
+
 function novoCronogramaComModelo(titulo, obra, temVidros) {
   const hoje = hojeISO();
   const nomeObra = (obra?.obra || "").trim() || titulo || "Projeto";
@@ -3085,26 +3060,43 @@ function novoCronogramaComModelo(titulo, obra, temVidros) {
   const tasks = [];
   let nextId = 1;
   const push = (nivel, nome, extra = {}) => {
-    tasks.push({ id: nextId++, nivel, nome, durValor: 1, durUnid: "dias", percent: 0, predecessoras: [], inicioManual: "", comentario: "", ...extra });
+    const id = nextId++;
+    tasks.push({ id, nivel, nome, durValor: 1, durUnid: "dias", percent: 0, predecessoras: [], inicioManual: "", comentario: "", ...extra });
+    return id;
   };
 
   push(0, nomeObra);
 
   push(1, "Suprimentos");
-  push(2, "Metais");
+  const idMetais = push(2, "Metais");
   push(2, "Acessórios");
   if (temVidros) push(2, "Vidros");
+
+  // Cada item anda em sequência pelos grupos (Corte → … → Acabamento), como no MS Project; o
+  // primeiro grupo da produção espera os Metais. Itens diferentes correm em paralelo.
+  const anterior = {}; // itemId → id da tarefa do grupo anterior
+  const porItem = (grupo, item) => {
+    const dep = anterior[item.id] ?? (grupo === GRUPOS_PRODUCAO[0] ? idMetais : null);
+    // A data que já existia no item (o agendamento antigo da tela da obra) vira a Instalação fixada.
+    const antigo = grupo === "Instalação" && item.inicio
+      ? { inicioManual: `${item.inicio}T${CONFIG_PADRAO.expediente[0]}`, inicioFixo: true, durValor: Number(item.diasExec) > 0 ? Number(item.diasExec) : 1 }
+      : {};
+    anterior[item.id] = push(3, nomeCurtoItem(item), {
+      descricaoCompleta: item.descricao || "", itemId: item.id, etapa: ETAPA_DO_GRUPO[grupo],
+      predecessoras: dep ? [{ id: dep, tipo: "TI" }] : [], ...antigo,
+    });
+  };
 
   push(1, "Produção");
   for (const grupo of GRUPOS_PRODUCAO) {
     push(2, grupo);
-    for (const item of itens) push(3, nomeCurtoItem(item), { descricaoCompleta: item.descricao || "" });
+    for (const item of itens) porItem(grupo, item);
   }
 
   push(1, "Instalação");
   for (const grupo of GRUPOS_INSTALACAO) {
     push(2, grupo);
-    for (const item of itens) push(3, nomeCurtoItem(item), { descricaoCompleta: item.descricao || "" });
+    for (const item of itens) porItem(grupo, item);
   }
 
   return {
@@ -3112,7 +3104,7 @@ function novoCronogramaComModelo(titulo, obra, temVidros) {
     titulo: titulo || nomeObra,
     obraId: obra ? obra.id : null,
     cliente: obra ? obra.cliente : "",
-    config: { ...CONFIG_PADRAO, dataBase: hoje },
+    config: { ...CONFIG_PADRAO, dataBase: obra?.dataInicio || hoje },
     tasks: renumerarIds(tasks),
   };
 }
@@ -3178,6 +3170,12 @@ function CronogramaMacroView({ cronogramas, obras, macro, onNovo, onNovoComModel
 
   // ── linhas do macro: um cronograma por linha ──
   const lista = ordemMacro(cronogramas);
+  // Atraso projetado por obra (planejado × realizado das tarefas) — derivado, nunca gravado.
+  const atrasoPorObra = useMemo(() => {
+    const m = {};
+    for (const id of new Set(cronogramas.map(c => c.obraId).filter(Boolean))) m[id] = andamentoObra(cronogramas, macro, id).atrasoDias;
+    return m;
+  }, [cronogramas, macro]);
   const numeroPorId = {};
   lista.forEach((c, i) => { numeroPorId[c.id] = i + 1; });
   const tituloPorId = {};
@@ -3226,7 +3224,7 @@ function CronogramaMacroView({ cronogramas, obras, macro, onNovo, onNovoComModel
   return (
     <div style={{ padding: "20px 24px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
-        <h2 style={{ fontSize: 20, fontWeight: 800, color: BRAND, margin: 0 }}>Cronograma Comercial</h2>
+        <h2 style={{ fontSize: 20, fontWeight: 800, color: BRAND, margin: 0 }}>Cronograma</h2>
         <span style={{ fontSize: 12, color: "#94a3b8" }}>visão macro — obra × obra. Clique na linha para abrir o cronograma da obra.</span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button onClick={() => setZoom(z => z === "semana" ? "mes" : "semana")} style={btn} title="Zoom da timeline">{zoom === "semana" ? "🔍 Mês" : "🔍 Semana"}</button>
@@ -3306,6 +3304,10 @@ function CronogramaMacroView({ cronogramas, obras, macro, onNovo, onNovoComModel
                   style={{ display: "flex", alignItems: "center", height: CR_ROW_H, borderBottom: "1px solid #f1f5f9", background: i % 2 ? "#fafafa" : "#fff", fontSize: 12, cursor: "pointer" }}>
                   <div style={{ width: COL.id, textAlign: "center", color: "#94a3b8" }}>{i + 1}</div>
                   <div style={{ width: COL.nome, paddingLeft: 6, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
+                    {obra && atrasoPorObra[obra.id] > 0 && obra.status !== "Concluído" && (
+                      <span title="Tarefas atrasadas: no ritmo atual a obra termina depois do planejado"
+                        style={{ color: "#dc2626", fontWeight: 800, fontSize: 10.5, marginRight: 4 }}>⏱{atrasoPorObra[obra.id]}d</span>
+                    )}
                     <b style={{ color: BRAND }}>{c.titulo}</b>
                     <span style={{ color: "#94a3b8", fontSize: 11 }}> · {obra ? `#${obra.numero} ${obra.cliente}` : "Avulso"}</span>
                   </div>
@@ -3414,7 +3416,11 @@ function CronogramaMacroView({ cronogramas, obras, macro, onNovo, onNovoComModel
   );
 }
 
-function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, dataBaseEfetiva, origemInicio, onImprimir }) {
+// `embutido`: dentro da tela da obra — o Ctrl+Z só vale com o foco no próprio cronograma (lá há
+// outros campos na tela) e a altura da grade fica limitada, com rolagem.
+// `conflitos`: { [taskId]: texto } das tarefas cuja equipe está em outra obra no mesmo dia.
+function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, onSalvarAgora, dataBaseEfetiva, origemInicio, onImprimir, embutido = false, conflitos = {}, onAbrirGeral }) {
+  const raiz = useRef(null);
   const [c, setC] = useState(cronograma);
   const [sel, setSel] = useState(null);
   const [zoom, setZoom] = useState("dia"); // dia | semana
@@ -3448,6 +3454,7 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
   useEffect(() => {
     function onKeyDown(e) {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
+        if (embutido && !raiz.current?.contains(e.target)) return;
         e.preventDefault();
         const prev = undoStack.current.pop();
         if (prev) { lastGroup.current = { key: null, time: 0 }; setC(prev); onChange(prev); }
@@ -3455,13 +3462,15 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onChange]);
+  }, [onChange, embutido]);
 
   const DAY_W = zoom === "dia" ? 26 : 12;
   // Quando o macro amarra esta obra a outra, o início herdado vence a dataBase própria — nada é
   // gravado aqui: a verdade continua sendo a predecessora do macro, então as duas telas batem.
   const cfg = normConfig(dataBaseEfetiva ? { ...c.config, dataBase: dataBaseEfetiva } : c.config);
   const sched = agendar(c.tasks, cfg);
+  const agora = new Date();
+  const equipesEscolha = equipes.filter(e => !e.arquivada);
 
   // faixa da timeline
   let tStart = null, tEnd = null;
@@ -3540,7 +3549,7 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
   const comHora = s => !s ? "" : s.includes("T") ? s : `${s}T${cfg.expediente[0]}`;
 
   const inp = { border: "1px solid #e2e8f0", borderRadius: 5, padding: "2px 5px", fontSize: 12, boxSizing: "border-box" };
-  const COL = { id: 34, nome: 240, dur: 116, pct: 60, ini: 232, term: 118, pred: 78 };
+  const COL = { id: 34, nome: 240, dur: 116, pct: 60, ini: 232, term: 118, pred: 78, eq: 128, sit: 86 };
   const GRID_W = Object.values(COL).reduce((a, b) => a + b, 0);
   const btn = { background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "6px 10px", fontWeight: 700, fontSize: 12, cursor: "pointer" };
   const obraVinculada = c.obraId ? obras.find(o => o.id === c.obraId) : null;
@@ -3552,7 +3561,7 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
   const ROWS_H = visIdxs.length * CR_ROW_H;
 
   return (
-    <div style={{ fontFamily: "'Segoe UI', sans-serif", color: "#1e293b" }}>
+    <div ref={raiz} style={{ fontFamily: "'Segoe UI', sans-serif", color: "#1e293b" }}>
       {/* Toolbar */}
       <div style={{ background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "10px 16px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
         <input value={c.titulo} onChange={e => update({ ...c, titulo: e.target.value }, "titulo")}
@@ -3575,6 +3584,7 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
             onChange={v => update({ ...c, config: { ...(c.config || {}), dataBase: v } }, "dataBase")} />
         </span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {onAbrirGeral && <button onClick={() => onAbrirGeral(c.id)} style={btn} title="Abrir este cronograma em tela cheia, no Cronograma geral">⤢ Tela cheia</button>}
           <button onClick={() => onImprimir && onImprimir(c.id)} style={btn} title="Gerar o cronograma para imprimir ou salvar em PDF">🖨️ Imprimir</button>
           <button onClick={addTarefa} style={btn}>+ Tarefa</button>
           <button onClick={() => indent(1)} style={btn} title="Indentar">→</button>
@@ -3592,7 +3602,7 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
       </div>
 
       {/* Split: grade + gantt */}
-      <div style={{ display: "flex", alignItems: "flex-start", overflowX: "auto" }}>
+      <div style={{ display: "flex", alignItems: "flex-start", overflowX: "auto", ...(embutido ? { maxHeight: "70vh", overflowY: "auto" } : {}) }}>
         {/* GRADE */}
         <div style={{ width: GRID_W, minWidth: GRID_W, borderRight: "2px solid #cbd5e1", background: "#fff", position: "relative" }}>
           {/* header grade */}
@@ -3604,6 +3614,8 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
             <div style={{ width: COL.ini, textAlign: "center" }}>Início</div>
             <div style={{ width: COL.term, textAlign: "center" }}>Término</div>
             <div style={{ width: COL.pred, textAlign: "center" }}>Pred.</div>
+            <div style={{ width: COL.eq, textAlign: "center" }} title="Equipe que executa — os dias da tarefa aparecem no Calendário">Equipe</div>
+            <div style={{ width: COL.sit, textAlign: "center" }} title="Planejado × realizado: compara o % com o que já devia estar pronto hoje">Situação</div>
           </div>
           {/* linhas */}
           {visIdxs.map((origI, i) => {
@@ -3674,6 +3686,31 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
                       const nova = parsePredecessoras(txt, t.id);
                       if (textoPredecessoras(nova) !== textoPredecessoras(t.predecessoras)) updTask(t.id, { predecessoras: nova });
                     }} />
+                </div>
+                <div style={{ width: COL.eq, display: "flex", alignItems: "center", justifyContent: "center", gap: 2 }}>
+                  {!sc.isSummary && (
+                    <select value={t.equipeId || ""} onClick={e => e.stopPropagation()}
+                      onChange={e => updTask(t.id, { equipeId: e.target.value || null })}
+                      title="Os dias desta tarefa entram no Calendário para esta equipe"
+                      style={{ ...inp, width: conflitos[t.id] ? 102 : 118, color: t.equipeId ? "#1e293b" : "#94a3b8" }}>
+                      <option value="">—</option>
+                      {equipesEscolha.map(e => <option key={e.id} value={e.id}>{e.nome}</option>)}
+                      {t.equipeId && !equipesEscolha.some(e => e.id === t.equipeId) && (
+                        <option value={t.equipeId}>{equipes.find(e => e.id === t.equipeId)?.nome || "equipe removida"} (arquivada)</option>
+                      )}
+                    </select>
+                  )}
+                  {conflitos[t.id] && <span title={conflitos[t.id]} style={{ color: "#dc2626", fontSize: 13, cursor: "help" }}>⚠</span>}
+                </div>
+                <div style={{ width: COL.sit, textAlign: "center" }}>
+                  {(() => {
+                    const k = sc.isSummary ? null : situacaoTarefa(t.percent, sc.inicio, sc.termino, agora, cfg);
+                    if (!k) return null;
+                    const r = SITUACAO_ROTULO[k];
+                    const esperado = percentEsperadoEm(sc.inicio, sc.termino, agora, cfg);
+                    return <span title={`Devia estar em ${esperado}% hoje · está em ${clampPercent(t.percent)}%`}
+                      style={{ fontSize: 10.5, fontWeight: 800, color: r.cor, background: r.cor + "14", border: `1px solid ${r.cor}44`, borderRadius: 999, padding: "1px 7px", whiteSpace: "nowrap" }}>{r.rotulo}</span>;
+                  })()}
                 </div>
               </div>
             );
@@ -3752,10 +3789,13 @@ function CronogramaEditor({ cronograma, onChange, obras, dirty, onSalvarAgora, d
                   </div>
                 );
               }
+              const atrasada = situacaoTarefa(t.percent, sc.inicio, sc.termino, agora, cfg) === "atrasada";
+              const cor = atrasada ? ["#fecaca", "#dc2626"] : ["#5eead4", "#0d9488"];
+              const eq = t.equipeId ? equipes.find(e => e.id === t.equipeId) : null;
               return (
-                <div key={t.id} title={`${t.nome}\n${fmtDataHora(sc.inicio)} → ${fmtDataHora(sc.termino)}`}
-                  style={{ position: "absolute", left: x, top: y + CR_ROW_H / 2 - 6, width: w, height: 12, background: "#5eead4", border: "1px solid #0d9488", borderRadius: 2, overflow: "hidden" }}>
-                  <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${sc.percent}%`, background: "#0d9488" }} />
+                <div key={t.id} title={`${t.nome}\n${fmtDataHora(sc.inicio)} → ${fmtDataHora(sc.termino)}${eq ? `\nEquipe: ${eq.nome}` : ""}${atrasada ? "\nAtrasada" : ""}`}
+                  style={{ position: "absolute", left: x, top: y + CR_ROW_H / 2 - 6, width: w, height: 12, background: cor[0], border: `1px solid ${cor[1]}`, borderLeft: `${eq ? 4 : 1}px solid ${eq?.cor || cor[1]}`, borderRadius: 2, overflow: "hidden" }}>
+                  <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${sc.percent}%`, background: cor[1] }} />
                 </div>
               );
             })}
@@ -3886,6 +3926,7 @@ export default function App() {
   const [equipes, setEquipes] = useState([]);
   const [cronogramas, setCronogramas] = useState([]);
   const [agenda, setAgenda] = useState([]);   // serviços do dia (obra x equipe)
+  const agendaRef = useRef([]); agendaRef.current = agenda;
   const [lembretes, setLembretes] = useState([]); // mural fixo ao lado do calendário
   const [orcamentos, setOrcamentos] = useState([]); // orçamentos livres (OrcamentoLivre.jsx)
   const [orcamentosSemTabela, setOrcamentosSemTabela] = useState(false);
@@ -4099,17 +4140,32 @@ export default function App() {
 
   // Agenda: o estado muda na hora e a gravação é debounced por serviço (a descrição é digitada,
   // não vale um upsert por tecla). Mesmo padrão de persistObra.
-  const handleSaveAgendamento = useCallback((ag) => {
+  const handleSaveAgendamento = useCallback((ag0) => {
+    // Serviço que veio do cronograma: editar (mover, trocar equipe, descrever) vira uma linha real
+    // com a mesma `origem`, e o planejado daquele dia deixa de aparecer. Id fixo: editar de novo
+    // regrava a mesma linha.
+    const { planejado, ...resto } = ag0;
+    const ag = planejado ? { ...resto, id: idAjuste(ag0.origem) } : ag0;
     setAgenda(prev => prev.some(a => a.id === ag.id) ? prev.map(a => a.id === ag.id ? ag : a) : [...prev, ag]);
     agendarGravacao(ag.id, () =>
       upsertAgendamento(ag).catch(err => showError("Erro ao salvar a agenda (rodou a migration_agenda.sql?): " + err.message)));
   }, [agendarGravacao]);
 
+  const planejadosRef = useRef([]);
   const handleDeleteAgendamento = useCallback((id) => {
+    // Tirar um dia planejado do calendário não mexe no cronograma: grava o cancelamento daquele dia.
+    const real = agendaRef.current.find(a => a.id === id);
+    const plan = !real && planejadosRef.current.find(a => a.id === id);
+    const alvo = real?.origem ? real : plan;
+    if (alvo) {
+      const { planejado, ...resto } = alvo;
+      handleSaveAgendamento({ ...resto, id: idAjuste(alvo.origem), cancelado: true });
+      return;
+    }
     cancelarGravacao(id);
     setAgenda(prev => prev.filter(a => a.id !== id));
     dbDeleteAgendamento(id).catch(err => showError("Erro ao remover da agenda: " + err.message));
-  }, [cancelarGravacao]);
+  }, [cancelarGravacao, handleSaveAgendamento]);
 
   // Lembretes e diário: mesmo desenho da agenda — estado muda na hora, gravação
   // debounced por id (texto e observações são digitados, não vale upsert por tecla).
@@ -4485,9 +4541,87 @@ export default function App() {
 
   // Agenda obra × obra uma vez só: alimenta a tela macro e o início herdado do editor de cada obra.
   const macro = useMemo(() => agendarMacro(cronogramas), [cronogramas]);
+  // O Calendário mostra a agenda manual + os dias das tarefas com equipe no cronograma (derivados,
+  // nunca gravados). Ajustar um dia planejado no calendário grava uma linha real com a `origem`.
+  const planejados = useMemo(() => servicosPlanejados(cronogramas, macro, obras), [cronogramas, macro, obras]);
+  planejadosRef.current = planejados;
+  const agendaEf = useMemo(() => agendaEfetiva(agenda, planejados), [agenda, planejados]);
+  const choques = useMemo(() => conflitosAgenda(agendaEf), [agendaEf]);
+  // Por cronograma: { [taskId]: texto } das tarefas cuja equipe tem outro serviço no mesmo dia.
+  const choquesPorCrono = useMemo(() => {
+    const porId = Object.fromEntries(agendaEf.map(a => [a.id, a]));
+    const out = {};
+    for (const ch of choques) {
+      const eq = equipes.find(e => e.id === ch.equipeId)?.nome || "Equipe";
+      const outras = ch.obraIds.map(id => "#" + (obras.find(o => o.id === id)?.numero || id)).join(", ");
+      for (const sid of ch.servicos) {
+        const o = porId[sid]?.origem;
+        if (!o) continue;
+        const m = out[o.cronoId] || (out[o.cronoId] = {});
+        if (!m[o.taskId]) m[o.taskId] = `${eq} em mais de uma obra em ${ch.dia.split("-").reverse().join("/")} (${outras}) — ${ch.motivo}`;
+      }
+    }
+    return out;
+  }, [choques, agendaEf, equipes, obras]);
   // Contador do menu: obras abertas com algum aviso crítico (sem os anexos, que a central lê à parte).
+  const ctxAvisos = useMemo(() => ({ agenda: agendaEf, cronogramas, macro, conflitos: choques, diarios, hoje: hoje() }),
+    [agendaEf, cronogramas, macro, choques, diarios]);
   const nAvisosCriticos = useMemo(() => obras.filter(o => o.status !== "Concluído"
-    && avisosDaObra(o, { agenda, cronogramas }).some(a => a.nivel === "erro")).length, [obras, agenda, cronogramas]);
+    && avisosDaObra(o, ctxAvisos).some(a => a.nivel === "erro")).length, [obras, ctxAvisos]);
+
+  // Obra aberta: o cronograma dela embutido na seção 📅.
+  const onCriarCronogramaObra = useCallback((obra, comModelo, temVidros) => {
+    const titulo = `Proposta ${obra.numero}`;
+    const cr = comModelo ? novoCronogramaComModelo(titulo, obra, temVidros) : novoCronograma(titulo, obra);
+    if (!comModelo) cr.config.dataBase = obra.dataInicio || cr.config.dataBase;
+    handleSaveCronograma(cr);
+    registrarAtividade(obra.id, comModelo ? "Cronograma criado a partir dos itens" : "Cronograma criado");
+  }, [handleSaveCronograma, registrarAtividade]);
+
+  // Aprovar o diário fecha o dia e leva o realizado para o cronograma: cada atividade ligada a uma
+  // tarefa grava o `percent` dela. Quando todas as tarefas de um item numa etapa chegam a 100%,
+  // a etapa do item é marcada — se a trava de etapas (regrasEtapas.js) deixar; senão só avisa.
+  const handleAprovarDiario = useCallback((d) => {
+    handleSaveDiario(d);
+    const porCrono = {};
+    for (const at of d.atividades) {
+      if (at.taskId == null || !at.cronoId || !at.resultado || at.percent == null) continue;
+      (porCrono[at.cronoId] ||= []).push(at);
+    }
+    const obra = obras.find(o => o.id === d.obraId);
+    let obraNova = obra;
+    let nTarefas = 0;
+    const travadas = [];
+    for (const [cronoId, ats] of Object.entries(porCrono)) {
+      const cr = cronogramas.find(c => c.id === cronoId);
+      if (!cr) continue;
+      const tasks = cr.tasks.map(t => {
+        const at = ats.find(a => a.taskId === t.id);
+        if (!at) return t;
+        nTarefas++;
+        return { ...t, percent: clampPercent(at.percent) };
+      });
+      handleSaveCronograma({ ...cr, tasks });
+      if (!obraNova || cr.obraId !== obraNova.id) continue;
+      // Etapas dos itens: só as que esta aprovação tocou e que ficaram completas no cronograma.
+      const tocadas = new Set(ats.map(a => tasks.find(t => t.id === a.taskId)).filter(t => t && t.itemId != null && t.etapa).map(t => `${t.itemId}|${t.etapa}`));
+      for (const chave of tocadas) {
+        const [itemId, etapa] = chave.split("|");
+        const todas = tasks.filter(t => String(t.itemId) === itemId && t.etapa === etapa);
+        if (!todas.every(t => clampPercent(t.percent) >= 100)) continue;
+        const item = obraNova.itens.find(i => String(i.id) === itemId);
+        if (!item || item.etapas?.[etapa]?.feito) continue;
+        const lib = liberacaoEtapa(obraNova, item, etapa);
+        if (!lib.ok) { travadas.push(`#${item.id} ${etapa}: ${lib.motivo}`); continue; }
+        obraNova = { ...obraNova, itens: obraNova.itens.map(i => i.id === item.id
+          ? { ...i, etapas: { ...i.etapas, [etapa]: { ...i.etapas[etapa], feito: true } } } : i) };
+      }
+    }
+    if (obraNova && obraNova !== obra) updateObra(obraNova);
+    if (obra) registrarAtividade(obra.id, `Diário de ${d.dia.split("-").reverse().join("/")} aprovado por ${d.aprovadoPor}`
+      + (nTarefas ? ` · ${nTarefas} tarefa(s) atualizada(s) no cronograma` : ""));
+    if (travadas.length) showError(`Tarefa(s) concluída(s), mas a etapa do item não foi marcada pela trava: ${travadas.join(" · ")}`);
+  }, [handleSaveDiario, handleSaveCronograma, obras, cronogramas, updateObra, registrarAtividade]);
 
   const handleImport = async (e) => {
     const file = e.target.files?.[0];
@@ -4581,7 +4715,7 @@ export default function App() {
     return o ? <PrintView obra={o} onBack={back} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>;
   }
   if (view.type === "relatorio") {
-    return <RelatorioPrint tipo={view.tipo} obras={obras} agenda={agenda} cronogramas={cronogramas} equipes={equipes}
+    return <RelatorioPrint tipo={view.tipo} obras={obras} agenda={agendaEf} cronogramas={cronogramas} equipes={equipes} ctxAvisos={ctxAvisos}
       inicio={view.inicio} fim={view.fim} personalizar={!!view.personalizar} onBack={back}
       onPeriodo={(inicio, fim) => navReplace({ type: "relatorio", tipo: view.tipo, inicio, fim })} />;
   }
@@ -4590,7 +4724,7 @@ export default function App() {
     return o ? <MedicaoPrint obra={o} modoInicial={view.modo} onBack={back} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>;
   }
   if (view.type === "osPrint") {
-    return <OrdemServicoPrint agenda={agenda} obras={obras} equipes={equipes}
+    return <OrdemServicoPrint agenda={agendaEf} obras={obras} equipes={equipes}
       inicio={view.inicio} fim={view.fim} onBack={back} />;
   }
   if (view.type === "diarioPrint") {
@@ -4619,8 +4753,19 @@ export default function App() {
 
   const userEmail = session.user?.email || "";
   const selectedObra = view.type === "gantt" ? obras.find(o => o.id === view.obraId) : null;
+  const crObra = selectedObra ? cronogramaDaObra(cronogramas, selectedObra.id) : null;
+  const datasItensObra = selectedObra ? datasDosItens(cronogramas, macro, selectedObra.id) : {};
+  const andamentoSel = selectedObra && crObra ? andamentoObra(cronogramas, macro, selectedObra.id) : null;
+  const crResumo = (() => {
+    const m = crObra && macro.mapa[crObra.id];
+    if (!m || !m.termino) return "";
+    const extras = cronogramasDaObra(cronogramas, selectedObra.id).length - 1;
+    return `${m.percent}% · ${fmtDataHora(m.inicio).split(" ")[0]} → ${fmtDataHora(m.termino).split(" ")[0]}`
+      + (andamentoSel?.atrasoDias ? ` · ~${andamentoSel.atrasoDias}d de atraso` : "")
+      + (extras > 0 ? ` · +${extras} cronograma(s) extra` : "");
+  })();
   const canGoBack = idxHistorico > 0 || view.type !== "dashboard";
-  const tituloView = { mensagens: "Mensagens", configuracoes: "Configurações", relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", orcamentos: "Orçamentos", cronogramas: "Cronograma Comercial", cronograma: "Cronograma" };
+  const tituloView = { mensagens: "Mensagens", configuracoes: "Configurações", relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", orcamentos: "Orçamentos", cronogramas: "Cronograma", cronograma: "Cronograma" };
 
   return (
     <ComunicacaoProvider userId={userId}>
@@ -4689,6 +4834,17 @@ export default function App() {
         ? <div style={{ textAlign: "center", padding: 80, color: "#64748b", fontSize: 15 }}>Carregando obras…</div>
         : view.type === "gantt"
           ? (selectedObra ? <GanttView key={selectedObra.id} obra={selectedObra} onChange={updateObra} equipes={equipes} fornecedores={fornecedoresConhecidos(obras)}
+              cronograma={crObra} cronogramaResumo={crResumo} datasItens={datasItensObra} andamento={andamentoSel}
+              onCriarCronograma={(comModelo, temVidros) => onCriarCronogramaObra(selectedObra, comModelo, temVidros)}
+              cronogramaSlot={crObra && (
+                <CronogramaEditor key={crObra.id} embutido cronograma={crObra} obras={obras} equipes={equipes} onChange={handleSaveCronograma}
+                  dirty={dirtyCronoIds.has(crObra.id)} onSalvarAgora={handleSaveCronogramaNow}
+                  conflitos={choquesPorCrono[crObra.id] || {}}
+                  onImprimir={id => navToSemGuarda({ type: "cronogramaPrint", id })}
+                  onAbrirGeral={id => navTo({ type: "cronograma", id })}
+                  dataBaseEfetiva={macro.mapa[crObra.id]?.origemId ? macro.mapa[crObra.id].dataBaseEfetiva : ""}
+                  origemInicio={macro.mapa[crObra.id]?.origemId ? cronogramas.find(x => x.id === macro.mapa[crObra.id].origemId)?.titulo : ""} />
+              )}
               itemAberto={view.itemId ?? null} secaoFoco={view.secao || null}
               onImprimirMedicao={modo => navTo({ type: "medicaoPrint", obraId: selectedObra.id, modo })}
               onItemAberto={id => navReplace(id == null ? { type: "gantt", obraId: selectedObra.id } : { type: "gantt", obraId: selectedObra.id, itemId: id })}
@@ -4698,7 +4854,7 @@ export default function App() {
                 ...origem, obraId: selectedObra.id, obraRotulo: `#${selectedObra.numero} — ${selectedObra.cliente}`,
               } })} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>)
           : view.type === "calendar"
-            ? <CalendarView obras={obras} equipes={equipes} agenda={agenda} lembretes={lembretes}
+            ? <CalendarView obras={obras} equipes={equipes} agenda={agendaEf} choques={choques} lembretes={lembretes}
                 mesSel={view.mes} diaSel={view.dia} onVoltarDia={back}
                 onNavegar={(p, modo) => (modo === "push" ? navTo : navReplace)({ type: "calendar", ...p })}
                 onSalvarAgendamento={handleSaveAgendamento} onExcluirAgendamento={handleDeleteAgendamento}
@@ -4707,14 +4863,15 @@ export default function App() {
                 onEmitirOS={(inicio, fim) => navTo({ type: "osPrint", inicio, fim })}
                 onRelatorio={(inicio, fim) => navTo({ type: "relatorio", tipo: "agenda", inicio, fim })} />
             : view.type === "diario"
-            ? <DiarioView obras={obras} equipes={equipes} agenda={agenda} diarios={diarios}
+            ? <DiarioView obras={obras} equipes={equipes} agenda={agendaEf} diarios={diarios} cronogramas={cronogramas} macro={macro}
+                onAprovar={handleAprovarDiario}
                 obraId={view.obraId || null} diarioId={view.diarioId || null}
                 onNavegar={p => navTo({ type: "diario", ...p })} onVoltar={back}
                 onSalvar={handleSaveDiario} onExcluir={handleDeleteDiario} onAbrirObra={openObra}
                 onImprimir={(obraId, inicio, fim) => navTo({ type: "diarioPrint", obraId, inicio, fim })} />
             : view.type === "equipes"
               ? <EquipesView equipes={equipes} onSalvar={handleSaveEquipe} onArquivar={handleArquivarEquipe}
-                  onReativar={handleReativarEquipe} onExcluir={handleDeleteEquipe} obras={obras} agenda={agenda} />
+                  onReativar={handleReativarEquipe} onExcluir={handleDeleteEquipe} obras={obras} agenda={agendaEf} />
               : view.type === "cronogramas"
                 ? <CronogramaMacroView cronogramas={cronogramas} obras={obras} macro={macro}
                     onNovo={(titulo, obra) => { const cr = novoCronograma(titulo, obra); handleSaveCronograma(cr); navTo({ type: "cronograma", id: cr.id }); }}
@@ -4725,6 +4882,7 @@ export default function App() {
                 : view.type === "cronograma"
                   ? (cronogramas.find(x => x.id === view.id)
                       ? <CronogramaEditor cronograma={cronogramas.find(x => x.id === view.id)} obras={obras} onChange={handleSaveCronograma}
+                          equipes={equipes} conflitos={choquesPorCrono[view.id] || {}}
                           dirty={dirtyCronoIds.has(view.id)} onSalvarAgora={handleSaveCronogramaNow}
                           onImprimir={id => navToSemGuarda({ type: "cronogramaPrint", id })}
                           dataBaseEfetiva={macro.mapa[view.id]?.origemId ? macro.mapa[view.id].dataBaseEfetiva : ""}
@@ -4754,7 +4912,7 @@ export default function App() {
                   : view.type === "relatorios"
                     ? <RelatoriosHub onAbrir={(tipo, personalizar) => navTo({ type: "relatorio", tipo, ...(personalizar ? { personalizar: true } : {}) })} />
                   : view.type === "avisos"
-                    ? <CentralAvisos obras={obras} agenda={agenda} cronogramas={cronogramas}
+                    ? <CentralAvisos obras={obras} ctxAvisos={ctxAvisos}
                         onRelatorio={() => navTo({ type: "relatorio", tipo: "avisos" })}
                         onAbrirObra={(obraId, secao) => navTo(secao ? { type: "gantt", obraId, secao } : { type: "gantt", obraId })} />
                     : view.type === "obrasPasta"

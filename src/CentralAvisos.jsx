@@ -17,7 +17,7 @@ const ROTULO_NIVEL = { erro: "Crítico", atencao: "Atenção", info: "Informativ
 
 const inp = { border: "1px solid #e2e8f0", borderRadius: 8, padding: "7px 10px", fontSize: 13, background: "#fff" };
 
-export default function CentralAvisos({ obras, agenda, cronogramas, onAbrirObra, onRelatorio }) {
+export default function CentralAvisos({ obras, ctxAvisos = {}, onAbrirObra, onRelatorio }) {
   const [anexos, setAnexos] = useState(undefined); // undefined = carregando, null = indisponível
   const [busca, setBusca] = useEstadoSessao("avisos.busca", "");
   const [area, setArea] = useEstadoSessao("avisos.area", "");
@@ -33,7 +33,7 @@ export default function CentralAvisos({ obras, agenda, cronogramas, onAbrirObra,
 
   // Avisos de cada contrato, já filtrados pelo nível mínimo escolhido.
   const linhas = useMemo(() => {
-    const ctx = { anexos: anexos || null, agenda, cronogramas };
+    const ctx = { ...ctxAvisos, anexos: anexos || null };
     const piso = PESO_NIVEL[nivelMin] || 1;
     return obras
       .filter(o => comConcluidas || o.status !== "Concluído")
@@ -41,7 +41,7 @@ export default function CentralAvisos({ obras, agenda, cronogramas, onAbrirObra,
         const avisos = avisosDaObra(o, ctx).filter(a => PESO_NIVEL[a.nivel] >= piso);
         return { obra: o, avisos, resumo: resumoPorArea(avisos) };
       });
-  }, [obras, agenda, cronogramas, anexos, nivelMin, comConcluidas]);
+  }, [obras, ctxAvisos, anexos, nivelMin, comConcluidas]);
 
   // KPI: quantos contratos têm pendência em cada área.
   const contagem = useMemo(() => {

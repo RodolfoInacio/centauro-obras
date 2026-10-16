@@ -381,11 +381,11 @@ function PainelFiltro({ tipo, f, set, limpar, ativo, obras, equipes, setAberto }
 const Titulo = ({ children }) => <div className="rl-bloco" style={{ fontSize: 12, fontWeight: 800, margin: "8px 0 4px" }}>{children}</div>;
 
 // ─── DESPACHO ────────────────────────────────────────────────────────────────
-export default function RelatorioPrint({ tipo, obras, agenda, cronogramas, equipes, inicio, fim, personalizar, onPeriodo, onBack }) {
+export default function RelatorioPrint({ tipo, obras, agenda, cronogramas, equipes, ctxAvisos, inicio, fim, personalizar, onPeriodo, onBack }) {
   const { f, set, ativo, limpar } = useFiltro(tipo);
   const [aberto, setAberto] = useState(!!personalizar);
   const filtro = { tipo, f, set, ativo, limpar, aberto, setAberto, obras, equipes };
-  const props = { obras, agenda, cronogramas, equipes, onBack, f, filtro };
+  const props = { obras, agenda, cronogramas, equipes, ctxAvisos, onBack, f, filtro };
   if (tipo === "avisos") return <RelAvisos {...props} />;
   if (tipo === "carteira") return <RelCarteira {...props} />;
   if (tipo === "compras") return <RelCompras {...props} />;
@@ -409,7 +409,7 @@ function Selo({ nivel }) {
   );
 }
 
-function RelAvisos({ obras, agenda, cronogramas, onBack, f, filtro }) {
+function RelAvisos({ obras, agenda, cronogramas, ctxAvisos, onBack, f, filtro }) {
   const [anexos, setAnexos] = useState(undefined);
   const comInfo = f.info, comConcluidas = f.concluidas || f.obras.length > 0;
   const sec = f.secoes;
@@ -418,14 +418,14 @@ function RelAvisos({ obras, agenda, cronogramas, onBack, f, filtro }) {
   useEffect(() => { let c = false; fetchResumoAnexos().then(m => { if (!c) setAnexos(m); }); return () => { c = true; }; }, []);
 
   const linhas = useMemo(() => {
-    const ctx = { anexos: anexos || null, agenda, cronogramas };
+    const ctx = { ...(ctxAvisos || { agenda, cronogramas }), anexos: anexos || null };
     const piso = comInfo ? 1 : 2;
     return obrasDoFiltro(obras, f).map(o => {
       const av = avisosDaObra(o, ctx).filter(a => PESO_NIVEL[a.nivel] >= piso && passa(f.areas, a.area));
       return { obra: o, avisos: av, resumo: resumoPorArea(av) };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [obras, agenda, cronogramas, anexos, comInfo, chaveF]);
+  }, [obras, agenda, cronogramas, ctxAvisos, anexos, comInfo, chaveF]);
 
   const niveis = comInfo ? ["erro", "atencao", "info"] : ["erro", "atencao"];
   const series = niveis.map(n => ({ k: n, rotulo: ROTULO_NIVEL[n], cor: COR_NIVEL[n], icone: ICONE_NIVEL[n] }));

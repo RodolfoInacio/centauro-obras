@@ -370,9 +370,59 @@ export function agendarMacro(cronogramas) {
       percent: percentPonderado(folhas, cfg),
       durDias: Math.round(minutosUteisEntre(inicio, termino, cfg) / (cfg.horasDia * 60) * 100) / 100,
       dataBaseEfetiva, origemId,
+      // As datas de cada tarefa já calculadas com o início herdado: o calendário planejado,
+      // os avisos e o diário leem daqui em vez de rodar `agendar` de novo.
+      sched, config: cfg,
     };
   }
   return { mapa, ciclo };
+}
+
+// ── andamento: planejado × realizado ──
+// Quanto da tarefa devia estar pronto no instante `quando` (0–100), pelas horas úteis decorridas.
+export function percentEsperadoEm(inicio, termino, quando, config) {
+  const cfg = normConfig(config);
+  if (!inicio || !termino || !quando) return 0;
+  if (quando <= inicio) return 0;
+  if (quando >= termino) return 100;
+  const total = minutosUteisEntre(inicio, termino, cfg);
+  if (total <= 0) return 100;
+  return Math.max(0, Math.min(100, Math.round(minutosUteisEntre(inicio, quando, cfg) / total * 100)));
+}
+
+// Folga de 5 pontos: um dia de chuva numa tarefa longa não pinta a obra de vermelho.
+export const TOLERANCIA_ATRASO = 5;
+
+// em dia | atrasada | adiantada | nao_iniciada | concluida. Derivado, nunca gravado.
+export function situacaoTarefa(percent, inicio, termino, quando, config) {
+  const p = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+  if (p >= 100) return "concluida";
+  const esperado = percentEsperadoEm(inicio, termino, quando, config);
+  if (esperado <= 0 && p === 0) return "nao_iniciada";
+  if (p + TOLERANCIA_ATRASO < esperado) return "atrasada";
+  if (p > esperado + TOLERANCIA_ATRASO) return "adiantada";
+  return "em_dia";
+}
+export const SITUACAO_ROTULO = {
+  concluida: { rotulo: "Concluída", cor: "#16a34a" },
+  nao_iniciada: { rotulo: "A iniciar", cor: "#94a3b8" },
+  atrasada: { rotulo: "Atrasada", cor: "#dc2626" },
+  adiantada: { rotulo: "Adiantada", cor: "#0d9488" },
+  em_dia: { rotulo: "Em dia", cor: "#2563eb" },
+};
+
+// Término projetado de uma tarefa atrasada: o que falta, no ritmo planejado, a partir de agora.
+// Tarefa em dia (ou ainda não começada no prazo) mantém o término do cronograma.
+export function terminoProjetado(t, sc, quando, config) {
+  const cfg = normConfig(config);
+  if (!sc || !sc.termino) return null;
+  const p = Math.max(0, Math.min(100, Number(t.percent) || 0));
+  if (p >= 100) return sc.termino;
+  const esperado = percentEsperadoEm(sc.inicio, sc.termino, quando, cfg);
+  if (p + TOLERANCIA_ATRASO >= esperado) return sc.termino;
+  const restante = duracaoParaHoras(t, cfg) * 60 * (100 - p) / 100;
+  const fim = addMinutosUteis(quando > sc.inicio ? quando : sc.inicio, restante, cfg);
+  return fim > sc.termino ? fim : sc.termino;
 }
 
 // Texto da duração para exibir na grade (resumo = calculado em dias; folha = valor informado)

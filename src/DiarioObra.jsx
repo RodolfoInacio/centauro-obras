@@ -4,13 +4,19 @@ import Modal from "./Modal";
 import FotoMarkup, { redimensionarImagem, Assinatura } from "./FotoMarkup";
 import { uploadFotoDiario } from "./api";
 import { agruparSimples } from "./agrupamento";
+import { tarefasDoDia, diariosPendentes } from "./planejamento";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Diário de Obras — um registro por obra por dia.
 //
 // O registro nasce ~80% preenchido: a agenda já sabe quem foi, para onde, e quais
-// itens seriam montados. O usuário edita a diferença. Só a data é obrigatória;
-// formulário longo com campo obrigatório é formulário não preenchido.
+// itens seriam montados; o cronograma sabe quais tarefas estavam previstas e até
+// quanto deviam andar no dia. O usuário edita a diferença e APROVA: aprovar grava o
+// % realizado de cada tarefa no cronograma. Só a data é obrigatória; formulário
+// longo com campo obrigatório é formulário não preenchido.
+//
+// O dia "aguardando diário" não é gravado: é derivado (diariosPendentes) e o registro
+// só nasce — como rascunho — quando alguém abre o dia.
 //
 // Não é obrigação legal (a Resolução CONFEA 1.094/2017 do Livro de Ordem foi
 // revogada em 2023) — é prova. O que paga a conta é o bloco de OCORRÊNCIAS com
@@ -119,6 +125,10 @@ export function normDiario(d) {
       horaInicio: e.horaInicio || "",
       horaFim: e.horaFim || "",
     })),
+    // Registro sem status é anterior à aprovação: já era o dia fechado.
+    status: d.status === "rascunho" ? "rascunho" : "aprovado",
+    aprovadoPor: d.aprovadoPor || "",
+    aprovadoEm: d.aprovadoEm || "",
     atividades: (Array.isArray(d.atividades) ? d.atividades : []).map(a => ({
       id: a.id || uid("at"),
       itemId: a.itemId ?? null,
@@ -127,6 +137,13 @@ export function normDiario(d) {
       status: a.status || "Em andamento",
       qtd: Number.isFinite(a.qtd) ? a.qtd : 0,
       local: a.local || "",
+      // Atividade que veio de uma tarefa do cronograma: aprovar grava `percent` na tarefa.
+      cronoId: a.cronoId || null,
+      taskId: a.taskId ?? null,
+      percentPlanejado: Number.isFinite(a.percentPlanejado) ? a.percentPlanejado : null,
+      percentAntes: Number.isFinite(a.percentAntes) ? a.percentAntes : 0,
+      percent: Number.isFinite(a.percent) ? a.percent : null,
+      resultado: ["conforme", "parcial", "nao"].includes(a.resultado) ? a.resultado : "",
     })),
     ocorrencias: (Array.isArray(d.ocorrencias) ? d.ocorrencias : []).map(o => ({
       id: o.id || uid("oc"),
@@ -153,7 +170,7 @@ export function normDiario(d) {
 // `responsavel` fica em branco de propósito: quem preenche o diário nem sempre é
 // quem está logado (o login é do escritório). Campo livre até haver cadastro de
 // pessoas de verdade para escolher.
-export function novoDiario({ obra, dia, agenda, equipes, diariosDaObra }) {
+export function novoDiario({ obra, dia, agenda, equipes, diariosDaObra, tarefas = [] }) {
   const servicos = (agenda || []).filter(a => a.dia === dia && a.obraId === obra.id);
 
   const vistas = new Set();
@@ -169,14 +186,25 @@ export function novoDiario({ obra, dia, agenda, equipes, diariosDaObra }) {
     });
   });
 
-  const idsItens = [...new Set(servicos.flatMap(s => s.itens || []))];
-  const atividades = idsItens.map(id => {
+  // Uma atividade por tarefa do cronograma prevista no dia, com o quanto ela devia andar.
+  const doCrono = tarefas.map(a => ({
+    id: uid("at"), itemId: a.task.itemId ?? null, texto: a.task.nome || "",
+    etapa: a.task.etapa || "Instalação", status: "Em andamento", qtd: 0,
+    local: ((obra.itens || []).find(i => String(i.id) === String(a.task.itemId)) || {}).localizacao || "",
+    cronoId: a.cronoId, taskId: a.task.id,
+    percentPlanejado: a.percentPlanejado, percentAntes: Math.round(Number(a.task.percent) || 0),
+    percent: null, resultado: "",
+  }));
+  // Itens marcados à mão na agenda que nenhuma tarefa do dia já cobre.
+  const cobertos = new Set(doCrono.map(a => String(a.itemId)));
+  const idsItens = [...new Set(servicos.flatMap(s => s.itens || []))].filter(id => !cobertos.has(String(id)));
+  const atividades = [...doCrono, ...idsItens.map(id => {
     const item = (obra.itens || []).find(i => String(i.id) === String(id));
     return {
       id: uid("at"), itemId: id, texto: "", etapa: "Instalação",
       status: "Em andamento", qtd: 0, local: (item && item.localizacao) || "",
     };
-  });
+  })];
 
   const maiorNumero = (diariosDaObra || []).reduce((n, d) => Math.max(n, d.numero || 0), 0);
 
@@ -189,6 +217,7 @@ export function novoDiario({ obra, dia, agenda, equipes, diariosDaObra }) {
     equipes: eqs,
     atividades,
     responsavel: "",
+    status: "rascunho",
   });
 }
 
@@ -220,6 +249,7 @@ function Bloco({ titulo, sub, acao, children }) {
 // A obra e o registro abertos vêm da view do App (rotas.js), não de estado local: voltar da
 // impressão ou de uma obra aberta pelo caderno cai no mesmo lugar.
 export default function DiarioView({ obras, equipes, agenda, diarios, obraId = null, diarioId = null,
+  cronogramas = [], macro = null, onAprovar,
   onNavegar, onVoltar, onSalvar, onExcluir, onImprimir, onAbrirObra }) {
   const abertoId = diarioId;
   const setObraId = (id) => onNavegar(id ? { obraId: id } : {});
@@ -232,7 +262,7 @@ export default function DiarioView({ obras, equipes, agenda, diarios, obraId = n
   if (aberto && obra) {
     return (
       <EditorDiario diario={aberto} obra={obra} equipes={equipes} agenda={agenda}
-        onSalvar={onSalvar} onExcluir={onExcluir}
+        onSalvar={onSalvar} onExcluir={onExcluir} onAprovar={onAprovar}
         onVoltar={onVoltar}
         onImprimir={() => onImprimir(obra.id, aberto.dia, aberto.dia)} />
     );
@@ -240,7 +270,7 @@ export default function DiarioView({ obras, equipes, agenda, diarios, obraId = n
 
   if (obra) {
     return (
-      <CadernoObra obra={obra} equipes={equipes} agenda={agenda} diarios={diarios}
+      <CadernoObra obra={obra} equipes={equipes} agenda={agenda} diarios={diarios} cronogramas={cronogramas} macro={macro}
         onSalvar={onSalvar} onExcluir={onExcluir} onAbrir={setAbertoId}
         onVoltar={onVoltar} onImprimir={onImprimir} onAbrirObra={onAbrirObra} />
     );
@@ -293,6 +323,10 @@ export default function DiarioView({ obras, equipes, agenda, diarios, obraId = n
                     ? `${registrosDoGrupo.length} registro${registrosDoGrupo.length > 1 ? "s" : ""} · último em ${dataBR(ultimoGrupo)}`
                     : "Nenhum registro ainda"}
                 </div>
+                {(() => {
+                  const pend = g.contratos.reduce((n, o) => { const p = diariosPendentes(o.id, agenda, diarios, hojeLocal()); return n + p.semRegistro.length + p.rascunhos.length; }, 0);
+                  return pend ? <div style={{ fontSize: 11, color: "#b45309", fontWeight: 800, marginTop: 4 }}>⏳ {pend} dia(s) aguardando diário ou aprovação</div> : null;
+                })()}
               </div>
 
               {/* Uma linha por contrato: é ele que o registro do dia amarra. */}
@@ -309,6 +343,8 @@ export default function DiarioView({ obras, equipes, agenda, diarios, obraId = n
                       <span style={{ flex: 1, minWidth: 0, fontSize: 12, color: "#475569", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {o.obra || "—"}
                       </span>
+                      {(() => { const p = diariosPendentes(o.id, agenda, diarios, hojeLocal()); const n = p.semRegistro.length + p.rascunhos.length;
+                        return n ? <span title="Dias aguardando diário ou aprovação" style={{ fontSize: 10, fontWeight: 800, color: "#b45309", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 999, padding: "0 6px" }}>⏳ {n}</span> : null; })()}
                       <span style={{ fontSize: 10.5, fontWeight: 700, color: meus.length ? "#c9a227" : "#cbd5e1", flexShrink: 0 }}>
                         {meus.length || "—"}
                       </span>
@@ -332,7 +368,7 @@ export default function DiarioView({ obras, equipes, agenda, diarios, obraId = n
 // ─────────────────────────────────────────────────────────────────────────────
 // Nível 2: o caderno da obra
 // ─────────────────────────────────────────────────────────────────────────────
-function CadernoObra({ obra, equipes, agenda, diarios, onSalvar, onExcluir, onAbrir, onVoltar, onImprimir, onAbrirObra }) {
+function CadernoObra({ obra, equipes, agenda, diarios, cronogramas, macro, onSalvar, onExcluir, onAbrir, onVoltar, onImprimir, onAbrirObra }) {
   const [criando, setCriando] = useState(false);
   const [diaNovo, setDiaNovo] = useState(hojeLocal());
   const [imprimindo, setImprimindo] = useState(false);
@@ -348,7 +384,8 @@ function CadernoObra({ obra, equipes, agenda, diarios, onSalvar, onExcluir, onAb
 
   function criar() {
     if (jaExiste) { onAbrir(jaExiste.id); setCriando(false); return; }
-    const d = novoDiario({ obra, dia: diaNovo, agenda, equipes, diariosDaObra: meus });
+    const tarefas = macro ? tarefasDoDia(cronogramas, macro, obra.id, diaNovo) : [];
+    const d = novoDiario({ obra, dia: diaNovo, agenda, equipes, diariosDaObra: meus, tarefas });
     onSalvar(d);
     setCriando(false);
     onAbrir(d.id);
@@ -359,12 +396,9 @@ function CadernoObra({ obra, equipes, agenda, diarios, onSalvar, onExcluir, onAb
     onImprimir(obra.id, ini, pFim);
   }
 
-  // Quantos serviços dessa obra estão na agenda sem registro no diário — o "faltou fechar o dia".
-  const semRegistro = useMemo(() => {
-    const dias = new Set(agenda.filter(a => a.obraId === obra.id).map(a => a.dia));
-    meus.forEach(d => dias.delete(d.dia));
-    return [...dias].filter(d => d <= hojeLocal()).sort().reverse();
-  }, [agenda, meus, obra.id]);
+  // Dias com serviço (lançado ou vindo do cronograma) sem registro — o "faltou fechar o dia" —
+  // e os registros abertos que ainda não foram aprovados.
+  const { semRegistro, rascunhos } = useMemo(() => diariosPendentes(obra.id, agenda, diarios, hojeLocal()), [agenda, diarios, obra.id]);
 
   return (
     <div style={{ padding: "24px 28px", maxWidth: 1000, margin: "0 auto" }}>
@@ -386,7 +420,7 @@ function CadernoObra({ obra, equipes, agenda, diarios, onSalvar, onExcluir, onAb
 
       {semRegistro.length > 0 && (
         <div style={{ background: "#fffbeb", border: "1px solid #fde68a", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 12.5, color: "#92400e" }}>
-          <strong>{semRegistro.length} dia(s) com serviço na agenda e sem diário:</strong>{" "}
+          <strong>⏳ {semRegistro.length} dia(s) com serviço previsto aguardando diário:</strong>{" "}
           {semRegistro.slice(0, 6).map(d => (
             <button key={d} onClick={() => { setDiaNovo(d); setCriando(true); }}
               style={{ background: "#fff", color: "#92400e", border: "1px solid #fde68a", borderRadius: 6, padding: "2px 8px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", marginRight: 5 }}>
@@ -394,6 +428,18 @@ function CadernoObra({ obra, equipes, agenda, diarios, onSalvar, onExcluir, onAb
             </button>
           ))}
           {semRegistro.length > 6 && <span>e mais {semRegistro.length - 6}…</span>}
+          <div style={{ fontSize: 11.5, marginTop: 4, color: "#a16207" }}>Clique no dia: o registro já abre com a equipe e as tarefas previstas no cronograma.</div>
+        </div>
+      )}
+      {rascunhos.length > 0 && (
+        <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 12.5, color: "#1e40af" }}>
+          <strong>{rascunhos.length} registro(s) aguardando aprovação:</strong>{" "}
+          {rascunhos.slice(0, 6).map(d => (
+            <button key={d.id} onClick={() => onAbrir(d.id)}
+              style={{ background: "#fff", color: "#1e40af", border: "1px solid #bfdbfe", borderRadius: 6, padding: "2px 8px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", marginRight: 5 }}>
+              {dataBR(d.dia)}
+            </button>
+          ))}
         </div>
       )}
 
@@ -414,8 +460,8 @@ function CadernoObra({ obra, equipes, agenda, diarios, onSalvar, onExcluir, onAb
 
       <Modal open={criando} title="Novo registro do diário" onClose={() => setCriando(false)}>
         <div style={{ fontSize: 13, color: "#475569", marginBottom: 14, lineHeight: 1.5 }}>
-          Escolha o dia. O registro já nasce com a equipe, o endereço e os itens que estavam
-          na agenda dessa data.
+          Escolha o dia. O registro já nasce com a equipe, o endereço e as tarefas que estavam
+          previstas para essa data (agenda e cronograma).
         </div>
         <input type="date" value={diaNovo} onChange={e => setDiaNovo(e.target.value)}
           style={{ ...inp, width: "100%", marginBottom: 12 }} />
@@ -500,6 +546,9 @@ function LinhaRegistro({ d, equipes, onAbrir, onExcluir }) {
         </div>
       </div>
       <div style={{ display: "flex", gap: 5, flexShrink: 0, alignItems: "center" }}>
+        {d.status === "rascunho" && (
+          <span style={{ background: "#dbeafe", color: "#1e40af", borderRadius: 999, padding: "2px 8px", fontSize: 10, fontWeight: 800 }}>AGUARDANDO APROVAÇÃO</span>
+        )}
         {impraticavel && (
           <span style={{ background: "#fef3c7", color: "#92400e", borderRadius: 999, padding: "2px 8px", fontSize: 10, fontWeight: 800 }}>IMPRATICÁVEL</span>
         )}
@@ -518,8 +567,10 @@ function LinhaRegistro({ d, equipes, onAbrir, onExcluir }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Nível 3: o editor do registro
 // ─────────────────────────────────────────────────────────────────────────────
-function EditorDiario({ diario, obra, equipes, agenda, onSalvar, onExcluir, onVoltar, onImprimir }) {
+function EditorDiario({ diario, obra, equipes, agenda, onSalvar, onExcluir, onAprovar, onVoltar, onImprimir }) {
   const [editandoFoto, setEditandoFoto] = useState(null);   // { foto, destino }
+  const [aprovando, setAprovando] = useState(false);
+  const [quemAprova, setQuemAprova] = useState("");
   const [enviando, setEnviando] = useState(false);
   const [erro, setErro] = useState("");
   const inputGeral = useRef(null);
@@ -628,8 +679,66 @@ function EditorDiario({ diario, obra, equipes, agenda, onSalvar, onExcluir, onVo
           </div>
           <div style={{ fontSize: 12, color: "#64748b" }}>{diaSemana(diario.dia)} · #{obra.numero} {obra.cliente}</div>
         </div>
-        <button onClick={onImprimir} style={{ ...btnDourado, marginLeft: "auto" }}>🖨️ Imprimir / PDF</button>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          {diario.status === "rascunho" ? (
+            <button onClick={() => { setQuemAprova(diario.responsavel || ""); setAprovando(true); }}
+              title="Fecha o dia: o % de cada tarefa do cronograma passa a ser o realizado aqui"
+              style={{ ...btnEscuro, background: "#16a34a" }}>✔ Aprovar diário</button>
+          ) : (
+            <span title={diario.aprovadoEm ? `Aprovado em ${new Date(diario.aprovadoEm).toLocaleString("pt-BR")}` : "Registro fechado"}
+              style={{ fontSize: 11.5, fontWeight: 800, color: "#16a34a", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 999, padding: "4px 10px" }}>
+              ✓ Aprovado{diario.aprovadoPor ? ` por ${diario.aprovadoPor}` : ""}
+            </span>
+          )}
+          {diario.status !== "rascunho" && diario.atividades.some(a => a.taskId != null) && (
+            <button onClick={() => salvar({ status: "rascunho" })} title="Reabrir para corrigir; aprovar de novo regrava o % no cronograma" style={btnClaro}>Reabrir</button>
+          )}
+          <button onClick={onImprimir} style={btnDourado}>🖨️ Imprimir / PDF</button>
+        </div>
       </div>
+
+      {diario.status === "rascunho" && (
+        <div style={{ background: "#eff6ff", border: "1px solid #bfdbfe", color: "#1e40af", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 12.5 }}>
+          <b>Aguardando aprovação.</b> Confira quem foi, marque em cada tarefa se deu certo (✔), andou em parte (◐) ou não foi feita (✖),
+          registre ocorrências e fotos e clique em <b>Aprovar diário</b>: o cronograma passa a mostrar o realizado.
+        </div>
+      )}
+
+      <Modal open={aprovando} title="Aprovar o diário" onClose={() => setAprovando(false)}>
+        {(() => {
+          const ligadas = diario.atividades.filter(a => a.taskId != null);
+          const semResultado = ligadas.filter(a => !a.resultado);
+          return (
+            <>
+              <div style={{ fontSize: 13, color: "#475569", marginBottom: 12, lineHeight: 1.5 }}>
+                {ligadas.length
+                  ? <>O % de <b>{ligadas.length - semResultado.length}</b> tarefa(s) do cronograma vai ser atualizado com o realizado neste dia.
+                      Tarefa que chega a 100% marca a etapa do item, se a trava de etapas deixar.</>
+                  : "Nenhuma atividade deste dia está ligada ao cronograma — aprovar só fecha o registro."}
+                {semResultado.length > 0 && (
+                  <div style={{ marginTop: 8, color: "#b45309" }}>
+                    {semResultado.length} tarefa(s) sem resultado marcado ficam como estão no cronograma.
+                  </div>
+                )}
+              </div>
+              <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 4 }}>Quem aprova</div>
+              <input value={quemAprova} onChange={e => setQuemAprova(e.target.value)} autoFocus placeholder="Nome"
+                style={{ ...inp, width: "100%", marginBottom: 16 }} />
+              <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+                <button onClick={() => setAprovando(false)} style={btnClaro}>Cancelar</button>
+                <button disabled={!quemAprova.trim()}
+                  onClick={() => {
+                    const proximo = { ...ref.current, status: "aprovado", aprovadoPor: quemAprova.trim(), aprovadoEm: new Date().toISOString() };
+                    ref.current = proximo;
+                    setAprovando(false);
+                    if (onAprovar) onAprovar(proximo); else onSalvar(proximo);
+                  }}
+                  style={{ ...btnEscuro, background: "#16a34a", opacity: quemAprova.trim() ? 1 : 0.5 }}>Aprovar</button>
+              </div>
+            </>
+          );
+        })()}
+      </Modal>
 
       {erro && (
         <div style={{ background: "#fee2e2", border: "1px solid #fecaca", color: "#dc2626", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12.5, fontWeight: 600 }}>{erro}</div>
@@ -787,7 +896,7 @@ function EditorDiario({ diario, obra, equipes, agenda, onSalvar, onExcluir, onVo
       </Bloco>
 
       {/* Atividades */}
-      <Bloco titulo="O que foi feito" sub="Os itens vieram da agenda do dia. Ajuste a etapa e o andamento."
+      <Bloco titulo="O que foi feito" sub="As tarefas vieram do cronograma e os itens da agenda do dia. Marque o resultado de cada uma."
         acao={
           <div style={{ display: "flex", gap: 6 }}>
             <select value="" onChange={e => {
@@ -830,6 +939,34 @@ function EditorDiario({ diario, obra, equipes, agenda, onSalvar, onExcluir, onVo
                   <button onClick={() => salvar({ atividades: ref.current.atividades.filter((_, i) => i !== idx) })}
                     style={{ background: "none", border: "none", color: "#cbd5e1", cursor: "pointer", fontSize: 13 }}>✕</button>
                 </div>
+                {at.taskId != null && (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 8, background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 8, padding: "6px 8px" }}>
+                    <span title="Tarefa do cronograma da obra" style={{ fontSize: 11, fontWeight: 800, color: "#0d9488" }}>📅 {at.texto || "Tarefa"}</span>
+                    <span style={{ fontSize: 11, color: "#64748b" }}>
+                      previsto até o fim do dia: <b>{at.percentPlanejado ?? "—"}%</b> · antes: {at.percentAntes}%
+                    </span>
+                    <div style={{ marginLeft: "auto", display: "flex", gap: 4, alignItems: "center" }}>
+                      {[["conforme", "✔ Conforme", "#16a34a"], ["parcial", "◐ Parcial", "#d97706"], ["nao", "✖ Não feito", "#dc2626"]].map(([k, rot, cor]) => {
+                        const on = at.resultado === k;
+                        const percent = k === "conforme" ? Math.max(at.percentAntes, at.percentPlanejado ?? 100)
+                          : k === "nao" ? at.percentAntes
+                          : (at.percent ?? Math.round((at.percentAntes + (at.percentPlanejado ?? 100)) / 2));
+                        return (
+                          <button key={k} onClick={() => trocar({ resultado: on ? "" : k, percent: on ? null : percent,
+                              status: on ? at.status : percent >= 100 ? "Concluído" : k === "nao" ? "Não iniciado" : "Em andamento" })}
+                            style={{ background: on ? cor : "#fff", color: on ? "#fff" : cor, border: `1px solid ${cor}66`, borderRadius: 999, padding: "4px 10px", fontSize: 11, fontWeight: 800, cursor: "pointer" }}>{rot}</button>
+                        );
+                      })}
+                      {at.resultado === "parcial" && (
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: 11, color: "#475569" }}>
+                          <input type="text" inputMode="numeric" value={at.percent ?? ""} onFocus={e => e.target.select()}
+                            onChange={e => { const v = Math.max(0, Math.min(100, parseInt(e.target.value.replace(/\D/g, "") || "0", 10))); trocar({ percent: v, status: v >= 100 ? "Concluído" : "Em andamento" }); }}
+                            style={{ ...inp, width: 48, padding: "3px 6px", fontSize: 12, textAlign: "center" }} />%
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                   <select value={at.etapa} onChange={e => trocar({ etapa: e.target.value })}
                     style={{ ...inp, fontSize: 11.5, padding: "5px 8px", background: "#fff", color: ETAPA_COR[at.etapa] || "#475569", fontWeight: 700 }}>

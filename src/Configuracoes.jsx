@@ -15,7 +15,8 @@ export const SECOES_OBRA = [
   { id: "cadastro", rotulo: "Cadastro do cliente" },
   { id: "anexos", rotulo: "Anexos" },
   { id: "checklist", rotulo: "Checklist de abertura" },
-  { id: "itens", rotulo: "Itens e cronograma" },
+  { id: "cronograma", rotulo: "Cronograma" },
+  { id: "itens", rotulo: "Itens" },
   { id: "compras", rotulo: "Compras" },
   { id: "financeiro", rotulo: "Financeiro" },
   { id: "equipe", rotulo: "Equipe e status" },
@@ -38,7 +39,7 @@ export const MENU_OCULTAVEL = [
   { id: "diario", rotulo: "Diário de Obras", icone: "📓" },
   { id: "equipes", rotulo: "Equipes", icone: "👷" },
   { id: "estoque", rotulo: "Estoque", icone: "📦" },
-  { id: "cronogramas", rotulo: "Cronograma Comercial", icone: "📊" },
+  { id: "cronogramas", rotulo: "Cronograma", icone: "📊" },
   { id: "orcamentos", rotulo: "Orçamentos", icone: "🧾" },
   { id: "financeiro", rotulo: "Financeiro", icone: "🔒" },
 ];
