@@ -591,14 +591,40 @@ export async function ocultarComentario(id, oculto) {
 
 // ─── PESSOAS, NOTIFICAÇÕES E MENSAGENS (migration_mensagens.sql) ─────────────
 // Cada pessoa é um login (auth.users) com o nome em profiles.nome.
+// Com a migration_acessos_compras.sql vêm também acessos, master, e-mail e WhatsApp. Sem ela,
+// `acessos` volta null (ver temAcesso em Comunicacao.jsx) e a menção segue funcionando.
 export async function fetchPessoas() {
   try {
-    const linhas = await todasAsLinhas(() => supabase.from("profiles").select("id, nome").order("id"));
-    return linhas.map(r => ({ id: r.id, nome: (r.nome || "").trim() }));
+    const linhas = await todasAsLinhas(() => supabase.from("profiles").select("id, nome, acessos, master, email, whatsapp").order("id"));
+    return linhas.map(r => ({ id: r.id, nome: (r.nome || "").trim(), acessos: r.acessos || [], master: !!r.master, email: r.email || "", whatsapp: r.whatsapp || "" }));
   } catch (err) {
-    console.warn("fetchPessoas:", err.message);
-    return [];
+    if (!/acessos|master|email|whatsapp|column/i.test(err.message || "")) { console.warn("fetchPessoas:", err.message); return []; }
+    try {
+      const linhas = await todasAsLinhas(() => supabase.from("profiles").select("id, nome").order("id"));
+      return linhas.map(r => ({ id: r.id, nome: (r.nome || "").trim(), acessos: null, master: false, email: "", whatsapp: "" }));
+    } catch (err2) {
+      console.warn("fetchPessoas:", err2.message);
+      return [];
+    }
   }
+}
+
+// Só o master consegue (trigger profiles_guarda); para os outros o banco recusa.
+export async function salvarAcessosPessoa(userId, { acessos, whatsapp }) {
+  const campos = {};
+  if (acessos) campos.acessos = acessos;
+  if (whatsapp !== undefined) campos.whatsapp = whatsapp || null;
+  const { data, error } = await supabase.from("profiles").update(campos).eq("id", userId).select("id");
+  if (error) throw error;
+  if (!data || data.length === 0) throw new Error("Não gravou — perfil não encontrado ou sem permissão.");
+}
+
+// Aviso de compra no 🔔 (pedido / liberada / recusada). Os destinatários quem escolhe é o banco,
+// pelo acesso de cada um (migration_acessos_compras.sql). O texto nunca leva valor em R$.
+export async function notificarCompra({ tipo, obraId, texto, dados, para = null }) {
+  const { data, error } = await supabase.rpc("notificar_compra", { p_tipo: tipo, p_obra_id: obraId, p_texto: texto, p_dados: dados || null, p_para: para });
+  if (error) throw error;
+  return data;
 }
 
 export async function salvarMeuNome(userId, nome) {
@@ -608,7 +634,7 @@ export async function salvarMeuNome(userId, nome) {
 }
 
 function notificacao(r) {
-  return { id: r.id, tipo: r.tipo, deId: r.de_id, deNome: r.de_nome || "", obraId: r.obra_id, comentarioId: r.comentario_id, texto: r.texto || "", createdAt: r.created_at, lidaEm: r.lida_em || null };
+  return { id: r.id, tipo: r.tipo, deId: r.de_id, deNome: r.de_nome || "", obraId: r.obra_id, comentarioId: r.comentario_id, texto: r.texto || "", dados: r.dados || null, createdAt: r.created_at, lidaEm: r.lida_em || null };
 }
 
 // As 50 mais recentes. `null` = tabela ainda não criada.

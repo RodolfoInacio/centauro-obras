@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState } from "react";
 import { supabase } from "./supabase";
-import { fetchConfiguracoes, salvarConfiguracoes } from "./api";
+import { fetchConfiguracoes, salvarConfiguracoes, salvarAcessosPessoa } from "./api";
+import { useComunicacao, ACESSOS, nomePessoa } from "./Comunicacao";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Configurações do app, iguais para todos os computadores (tabela `configuracoes`, uma linha
@@ -174,9 +175,79 @@ function Marcavel({ marcado, onChange, children }) {
   );
 }
 
+// ─── PESSOAS E ACESSOS (só o master) ─────────────────────────────────────────
+// Vale pelo login, não pela senha da tela: só aparece para quem tem profiles.master, e o banco
+// (trigger profiles_guarda) recusa a gravação de qualquer outro. Grava na hora, pessoa a pessoa.
+function PessoasAcessos() {
+  const c = useComunicacao();
+  const [gravando, setGravando] = useState(null);
+  const [erro, setErro] = useState("");
+  const [zap, setZap] = useState({});
+  if (!c) return null;
+  const pessoas = [...c.pessoas].sort((a, b) => nomePessoa(a).localeCompare(nomePessoa(b)));
+
+  async function gravar(p, campos) {
+    setGravando(p.id); setErro("");
+    try { await salvarAcessosPessoa(p.id, campos); await c.recarregarPessoas(); }
+    catch (err) { setErro(`${nomePessoa(p)}: ${err.message}`); }
+    finally { setGravando(null); }
+  }
+  const alternar = (p, acesso, ligar) =>
+    gravar(p, { acessos: ligar ? [...p.acessos.filter(a => a !== acesso), acesso] : p.acessos.filter(a => a !== acesso) });
+
+  return (
+    <div style={cartao}>
+      <div style={tituloSecao}>👥 Pessoas e acessos</div>
+      <div style={ajuda}>
+        Só você vê esta parte. Cada pessoa é um login (Supabase → Authentication → Users); quem entra pela
+        primeira vez aparece aqui sem acesso nenhum. Marcar grava na hora.
+      </div>
+      {erro && <div style={{ background: "#fee2e2", color: "#dc2626", borderRadius: 8, padding: "8px 12px", fontSize: 13, marginBottom: 10 }}>{erro}</div>}
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
+          <thead>
+            <tr style={{ textAlign: "left", color: "#64748b", fontSize: 12 }}>
+              <th style={{ padding: "6px 8px" }}>Pessoa</th>
+              {ACESSOS.map(a => <th key={a.id} title={a.desc} style={{ padding: "6px 8px", whiteSpace: "nowrap" }}>{a.rotulo}</th>)}
+              <th style={{ padding: "6px 8px" }} title="Para o aviso por WhatsApp (ainda não ligado)">WhatsApp</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pessoas.map(p => (
+              <tr key={p.id} style={{ borderTop: "1px solid #f1f5f9", opacity: gravando === p.id ? 0.5 : 1 }}>
+                <td style={{ padding: "8px" }}>
+                  <div style={{ fontWeight: 700 }}>{nomePessoa(p)}{p.master && <span style={{ marginLeft: 6, fontSize: 10.5, background: "#1a1a1a", color: "#fff", borderRadius: 999, padding: "1px 7px" }}>master</span>}</div>
+                  <div style={{ fontSize: 11.5, color: "#94a3b8" }}>{p.email}</div>
+                </td>
+                {ACESSOS.map(a => (
+                  <td key={a.id} style={{ padding: "8px", textAlign: "center" }}>
+                    <input type="checkbox" checked={p.acessos.includes(a.id)} disabled={gravando === p.id}
+                      onChange={e => alternar(p, a.id, e.target.checked)} />
+                  </td>
+                ))}
+                <td style={{ padding: "8px" }}>
+                  <input value={zap[p.id] ?? p.whatsapp} placeholder="(42) 99999-9999"
+                    onChange={e => setZap(z => ({ ...z, [p.id]: e.target.value }))}
+                    onBlur={() => { const v = (zap[p.id] ?? p.whatsapp).trim(); if (v !== p.whatsapp) gravar(p, { whatsapp: v }); }}
+                    style={{ border: "1px solid #e2e8f0", borderRadius: 6, padding: "5px 8px", fontSize: 12.5, width: 140 }} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ fontSize: 11.5, color: "#94a3b8", marginTop: 8 }}>O aviso por WhatsApp ainda não está ligado — o número fica guardado para quando estiver.</div>
+    </div>
+  );
+}
+
 export function ConfiguracoesView({ onSalvo }) {
   const { cfg, disponivel, salvar } = useConfig();
-  const [ok, setOk] = useState(liberada);
+  const com = useComunicacao();
+  const souMaster = !!(com?.acessosAtivos && com.eu?.master);
+  // O master entra direto: a tela é dele.
+  const [ok, setOk] = useState(liberada || souMaster);
+  useEffect(() => { if (souMaster) setOk(true); }, [souMaster]);
   const [rasc, setRasc] = useState(cfg);
   const [gravando, setGravando] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -206,6 +277,8 @@ export function ConfiguracoesView({ onSalvo }) {
     <div style={{ padding: "20px 16px 40px", maxWidth: 760, margin: "0 auto" }}>
       <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 4 }}>⚙️ Configurações</div>
       <div style={{ fontSize: 13, color: "#64748b", marginBottom: 16 }}>Valem para todos os computadores e celulares do escritório.</div>
+
+      {souMaster && <PessoasAcessos />}
 
       {!disponivel && (
         <div style={{ background: "#fffbeb", border: "1px solid #fde68a", color: "#92400e", borderRadius: 8, padding: "10px 14px", fontSize: 13, marginBottom: 12 }}>

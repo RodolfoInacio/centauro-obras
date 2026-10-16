@@ -18,6 +18,21 @@ import {
 // quando a aba volta ao foco. Sem a migration_mensagens.sql, sino e cartinha somem da barra.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Acessos que o master liga por pessoa (Configurações → Pessoas e acessos). Lista pronta para
+// crescer; a chave é o que vai para profiles.acessos.
+export const ACESSOS = [
+  { id: "aprova_compras", rotulo: "Aprova compras", desc: "Recebe os pedidos de aprovação e é quem libera ou recusa o orçamento." },
+  { id: "compras", rotulo: "Compras", desc: "Recebe o aviso quando uma compra é liberada ou recusada." },
+];
+
+// Sem a migration_acessos_compras.sql (acessos === null) ninguém fica travado no que já fazia:
+// todo mundo segue em "compras", e ninguém vira aprovador sozinho.
+export function pessoaTemAcesso(p, acesso) {
+  if (!p) return false;
+  if (p.acessos === null || p.acessos === undefined) return acesso === "compras";
+  return p.acessos.includes(acesso);
+}
+
 const ComunicacaoCtx = createContext(null);
 export const useComunicacao = () => useContext(ComunicacaoCtx);
 
@@ -114,12 +129,15 @@ export function ComunicacaoProvider({ userId, children }) {
   }, [userId]);
 
   const eu = pessoas.find(p => p.id === userId) || null;
+  const temAcesso = useCallback((acesso) => pessoaTemAcesso(eu, acesso), [eu]);
+  // A migration de acessos rodou? (sem ela, `acessos` vem null e a tela do master não aparece)
+  const acessosAtivos = pessoas.length > 0 && pessoas[0].acessos !== null;
   const valor = useMemo(() => ({
-    userId, eu, pessoas, notificacoes, resumo, ativo, novaMensagem,
+    userId, eu, pessoas, notificacoes, resumo, ativo, novaMensagem, temAcesso, acessosAtivos,
     naoLidasNotif: notificacoes.filter(n => !n.lidaEm).length,
     naoLidasMsg: resumo.reduce((s, r) => s + r.naoLidas, 0),
     recarregar, recarregarPessoas, marcarLidas, lerConversa,
-  }), [userId, eu, pessoas, notificacoes, resumo, ativo, novaMensagem, recarregar, recarregarPessoas, marcarLidas, lerConversa]);
+  }), [userId, eu, pessoas, notificacoes, resumo, ativo, novaMensagem, recarregar, recarregarPessoas, marcarLidas, lerConversa, temAcesso, acessosAtivos]);
 
   return <ComunicacaoCtx.Provider value={valor}>{children}</ComunicacaoCtx.Provider>;
 }
@@ -145,7 +163,18 @@ export function BotaoMensagens({ onAbrir }) {
   );
 }
 
-export function SinoNotificacoes({ obras, onAbrirObra }) {
+const ICONE_NOTIF = { compra_pedido: "📝", compra_aprovada: "✅", compra_recusada: "✖" };
+function tituloNotif(n, rotuloObra) {
+  const quem = <b>{n.deNome || "Alguém"}</b>;
+  const obra = <b>{rotuloObra(n.obraId)}</b>;
+  if (n.tipo === "compra_pedido") return <>{quem} pediu aprovação de compra em {obra}</>;
+  if (n.tipo === "compra_aprovada") return <>{quem} liberou compra em {obra}</>;
+  if (n.tipo === "compra_recusada") return <>{quem} recusou compra em {obra}</>;
+  return <>{quem} marcou você em {obra}</>;
+}
+
+// `onAbrir(n)` decide para onde o clique leva (pedido → Aprovações; liberada/recusada → Compras da obra).
+export function SinoNotificacoes({ obras, onAbrirObra, onAbrir }) {
   const c = useComunicacao();
   const [aberto, setAberto] = useState(false);
   const caixa = useRef(null);
@@ -176,18 +205,18 @@ export function SinoNotificacoes({ obras, onAbrirObra }) {
           <div style={{ maxHeight: 420, overflowY: "auto" }}>
             {notificacoes.length === 0 && (
               <div style={{ padding: "22px 14px", fontSize: 12.5, color: "#94a3b8", textAlign: "center" }}>
-                Nada por aqui. Quando alguém marcar você com <b>@</b> num comentário de obra, aparece aqui.
+                Nada por aqui. Menções com <b>@</b> e avisos de aprovação de compra aparecem aqui.
               </div>
             )}
             {notificacoes.map(n => (
               <button key={n.id}
-                onClick={() => { marcarLidas([n.id]); setAberto(false); if (n.obraId) onAbrirObra(n.obraId); }}
+                onClick={() => { marcarLidas([n.id]); setAberto(false); if (onAbrir) onAbrir(n); else if (n.obraId) onAbrirObra(n.obraId); }}
                 style={{ display: "flex", gap: 10, width: "100%", textAlign: "left", background: n.lidaEm ? "#fff" : "#eff6ff", border: "none", borderBottom: "1px solid #f1f5f9", padding: "10px 14px", cursor: "pointer" }}>
-                <Avatar nome={n.deNome} tamanho={30} />
+                {ICONE_NOTIF[n.tipo]
+                  ? <div style={{ width: 30, height: 30, borderRadius: "50%", background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, flexShrink: 0 }}>{ICONE_NOTIF[n.tipo]}</div>
+                  : <Avatar nome={n.deNome} tamanho={30} />}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 12.5 }}>
-                    <b>{n.deNome || "Alguém"}</b> marcou você em <b>{rotuloObra(n.obraId)}</b>
-                  </div>
+                  <div style={{ fontSize: 12.5 }}>{tituloNotif(n, rotuloObra)}</div>
                   <div style={{ fontSize: 12, color: "#475569", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{n.texto}</div>
                   <div style={{ fontSize: 10.5, color: "#94a3b8", marginTop: 3 }}>{fmtQuando(n.createdAt)}</div>
                 </div>

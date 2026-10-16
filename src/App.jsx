@@ -2,7 +2,8 @@ import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from "rea
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
-import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens, fetchFotosCapa, fetchOrcamentos, upsertOrcamento, deleteOrcamento as dbDeleteOrcamento, excluirObraDefinitivo } from "./api";
+import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens, fetchFotosCapa, fetchOrcamentos, upsertOrcamento, deleteOrcamento as dbDeleteOrcamento, excluirObraDefinitivo, notificarCompra } from "./api";
+import AprovacoesCompra, { contarAguardando } from "./AprovacoesCompra";
 import { normArquivo, obraAtiva, comPasso, AcoesArquivo, PastaArquivo, ACAO_ROTULO } from "./ArquivoObras";
 import OrcamentosView, { OrcamentoPrint, normOrcamento } from "./OrcamentoLivre";
 import { cronogramaDaObra, cronogramasDaObra, datasDosItens, servicosPlanejados, agendaEfetiva, conflitosAgenda, andamentoObra, idAjuste } from "./planejamento";
@@ -695,7 +696,7 @@ function ChecklistObra({ itens, onChange }) {
 // O planejamento da obra é o cronograma (seção 📅), não mais datas por item: `datasItens` é o
 // período de cada item lido do cronograma e `cronogramaSlot` é o próprio editor, montado pelo App.
 function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque, onEntradaEstoque, onAtividade, atividadeVersao = 0, itemAberto = null, onItemAberto, onImprimirMedicao, secaoFoco = null,
-  cronograma = null, cronogramaSlot = null, cronogramaResumo = "", datasItens = {}, andamento = null, onCriarCronograma, onPassoArquivo }) {
+  cronograma = null, cronogramaSlot = null, cronogramaResumo = "", datasItens = {}, andamento = null, onCriarCronograma, onPassoArquivo, onAvisoCompra }) {
   // Item expandido mora na view (#/obra/2729/item/5): voltar de outra tela reabre o mesmo item.
   const expandedId = itemAberto;
   const setExpandedId = (id) => onItemAberto?.(id);
@@ -1047,7 +1048,8 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
               )}
               <ComprasObra compras={localObra.compras} sugestoes={fornecedores}
                 onChange={c => update({ ...localObra, compras: c })}
-                onEntradaEstoque={onEntradaEstoque} onAbrirDocEstoque={onAbrirDocEstoque} onAtividade={onAtividade} />
+                onEntradaEstoque={onEntradaEstoque} onAbrirDocEstoque={onAbrirDocEstoque} onAtividade={onAtividade}
+                onAvisoCompra={onAvisoCompra && (aviso => onAvisoCompra({ ...aviso, obraId: obra.id }))} />
               <SaidasEstoqueObra obraId={obra.id} onAbrirDoc={onAbrirDocEstoque} />
             </div>
           </Secao>
@@ -2876,12 +2878,14 @@ function OrdemServicoPrint({ agenda, obras, equipes, inicio, fim, onBack }) {
 
 
 // ─── MENU LATERAL ─────────────────────────────────────────────────────────────
-function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos = 0 }) {
+function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos = 0, nAprovacoes = 0 }) {
   const { cfg } = useConfig();
   const com = useComunicacao();
   const todos = [
     { key: "dashboard", label: "Obras", icon: "🏠" },
     { key: "avisos", label: "Central de avisos", icon: "⚠️", badge: nAvisos },
+    // Só para quem aprova compras (acesso dado pelo master).
+    ...(com?.acessosAtivos && com.temAcesso("aprova_compras") ? [{ key: "aprovacoes", label: "Aprovações de compra", icon: "✅", badge: nAprovacoes, dica: "Compras esperando aprovação" }] : []),
     { key: "relatorios", label: "Relatórios", icon: "📈" },
     ...(com?.ativo ? [{ key: "mensagens", label: "Mensagens", icon: "✉️", badge: com.naoLidasMsg, dica: "Mensagens não lidas" }] : []),
     { key: "calendar", label: "Calendário", icon: "📅" },
@@ -4622,6 +4626,11 @@ export default function App() {
   // Contador do menu: obras abertas com algum aviso crítico (sem os anexos, que a central lê à parte).
   const ctxAvisos = useMemo(() => ({ agenda: agendaEf, cronogramas, macro, conflitos: choques, diarios, hoje: hoje() }),
     [agendaEf, cronogramas, macro, choques, diarios]);
+  const nAprovacoes = useMemo(() => contarAguardando(obras), [obras]);
+  // Aviso de compra no 🔔. Falhar o aviso não desfaz a gravação: só avisa na faixa vermelha.
+  const avisoCompra = useCallback((aviso) => {
+    notificarCompra(aviso).catch(err => showError("A compra foi gravada, mas o aviso no 🔔 não saiu: " + err.message));
+  }, []);
   const nAvisosCriticos = useMemo(() => obras.filter(o => o.status !== "Concluído"
     && avisosDaObra(o, ctxAvisos).some(a => a.nivel === "erro")).length, [obras, ctxAvisos]);
 
@@ -4823,12 +4832,12 @@ export default function App() {
       + (extras > 0 ? ` · +${extras} cronograma(s) extra` : "");
   })();
   const canGoBack = idxHistorico > 0 || view.type !== "dashboard";
-  const tituloView = { mensagens: "Mensagens", configuracoes: "Configurações", relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", orcamentos: "Orçamentos", cronogramas: "Cronograma", cronograma: "Cronograma" };
+  const tituloView = { aprovacoes: "Aprovações de compra", mensagens: "Mensagens", configuracoes: "Configurações", relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", orcamentos: "Orçamentos", cronogramas: "Cronograma", cronograma: "Cronograma" };
 
   return (
     <ComunicacaoProvider userId={userId}>
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
-      <SideMenu open={menuOpen} onClose={() => setMenuOpen(false)} current={view.type} nAvisos={nAvisosCriticos}
+      <SideMenu open={menuOpen} onClose={() => setMenuOpen(false)} current={view.type} nAvisos={nAvisosCriticos} nAprovacoes={nAprovacoes}
         onNav={(key) => navTo({ type: key })}
         onImport={() => { setMenuOpen(false); fileRef.current.click(); }}
         onExportar={exportarDados} />
@@ -4860,7 +4869,9 @@ export default function App() {
             <button onClick={() => navTo({ type: "print", obraId: selectedObra.id })}
               style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Nota de Serviço</button>
           )}
-          <SinoNotificacoes obras={obras} onAbrirObra={obraId => navTo({ type: "gantt", obraId })} />
+          <SinoNotificacoes obras={obras} onAbrirObra={obraId => navTo({ type: "gantt", obraId })}
+            onAbrir={n => n.tipo === "compra_pedido" ? navTo({ type: "aprovacoes" })
+              : n.obraId ? navTo(n.tipo.startsWith("compra_") ? { type: "gantt", obraId: n.obraId, secao: "compras" } : { type: "gantt", obraId: n.obraId }) : null} />
           <BotaoMensagens onAbrir={() => navTo({ type: "mensagens" })} />
           <OlhoFinanceiro escuro size={16} />
           <MeuPerfil email={userEmail} />
@@ -4907,7 +4918,7 @@ export default function App() {
               onImprimirMedicao={modo => navTo({ type: "medicaoPrint", obraId: selectedObra.id, modo })}
               onItemAberto={id => navReplace(id == null ? { type: "gantt", obraId: selectedObra.id } : { type: "gantt", obraId: selectedObra.id, itemId: id })}
               onAtividade={texto => registrarAtividade(selectedObra.id, texto)} atividadeVersao={atividadeVersao}
-              onPassoArquivo={handlePassoArquivo}
+              onPassoArquivo={handlePassoArquivo} onAvisoCompra={avisoCompra}
               onAbrirDocEstoque={docId => navTo({ type: "estoqueDoc", docId })}
               onEntradaEstoque={origem => navTo({ type: "estoque", entradaCompra: {
                 ...origem, obraId: selectedObra.id, obraRotulo: `#${selectedObra.numero} — ${selectedObra.cliente}`,
@@ -4970,6 +4981,10 @@ export default function App() {
                         onAbrirObra={openObra} />
                   : view.type === "relatorios"
                     ? <RelatoriosHub onAbrir={(tipo, personalizar) => navTo({ type: "relatorio", tipo, ...(personalizar ? { personalizar: true } : {}) })} />
+                  : view.type === "aprovacoes"
+                    ? <AprovacoesCompra obras={obras} onAtualizarObra={updateObra} onAvisoCompra={avisoCompra}
+                        onAtividade={registrarAtividade}
+                        onAbrirObra={obraId => navTo({ type: "gantt", obraId, secao: "compras" })} />
                   : view.type === "avisos"
                     ? <CentralAvisos obras={obras} ctxAvisos={ctxAvisos}
                         onRelatorio={() => navTo({ type: "relatorio", tipo: "avisos" })}

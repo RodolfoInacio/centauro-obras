@@ -31,6 +31,7 @@ export function viewParaHash(v) {
     case "cronogramaPrint": return `#/cronograma/${enc(v.id)}/imprimir`;
     case "financeiro": return "#/financeiro";
     case "avisos": return "#/avisos";
+    case "aprovacoes": return "#/aprovacoes";
     case "relatorios": return "#/relatorios";
     case "configuracoes": return "#/configuracoes";
     case "mensagens": return v.conversa ? `#/mensagens/${enc(v.conversa)}` : "#/mensagens";
@@ -70,6 +71,7 @@ export function hashParaView(hash) {
     case "cronograma": return b ? (c === "imprimir" ? { type: "cronogramaPrint", id: b } : { type: "cronograma", id: b }) : { type: "cronogramas" };
     case "financeiro": return { type: "financeiro" };
     case "avisos": return { type: "avisos" };
+    case "aprovacoes": return { type: "aprovacoes" };
     case "relatorios": return { type: "relatorios" };
     case "configuracoes": return { type: "configuracoes" };
     case "mensagens": return { type: "mensagens", ...(b ? { conversa: b } : {}) };

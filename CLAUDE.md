@@ -64,6 +64,7 @@ src/
   Comunicacao.jsx  Pessoas (profiles), 🔔 notificações de @menção, ✉️ chat (Geral + conversa direta),
                    provider com Realtime, campo de texto com @ e a tela de Mensagens.
   OrcamentoLivre.jsx  🧾 Orçamentos livres (fora do Wvetro): modelo, lista, editor, cálculo por vãos e a folha A4 com a marca.
+  AprovacoesCompra.jsx  ✅ Aprovações de compra: os pedidos de todas as obras, orçamentos lado a lado, aprovar/recusar.
   ArquivoObras.jsx Arquivar → Excluídas → exclusão definitiva: modelo (`obra.arquivo`), botões da obra e as duas pastas.
   NovoContrato.jsx Popup "+ Novo cliente / contrato" (cliente novo ou contrato de obra existente).
   index.css        CSS global mínimo.
@@ -84,6 +85,8 @@ supabase/
   migration_orcamentos.sql   Tabela `orcamentos` (orçamentos livres, único em `numero`) — rodar separado.
   migration_mensagens.sql    `obra_comentarios.mencoes`, `notificacoes`, `mensagens`, `mensagens_lidas`,
                              RPC `resumo_mensagens` e Realtime — rodar separado, depois da ficha_obra.
+  migration_acessos_compras.sql  `profiles.acessos/master/email/whatsapp`, trava `profiles_guarda`, tipos de
+                             notificação de compra + `dados`, RPC `notificar_compra` — rodar depois da de mensagens.
   migration_exclusao_obras.sql  `obras_excluidas` + RPC `obra_excluir_definitivo` (senha) — rodar separado, depois da ficha_obra.
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF do orçamento.
   functions/analisar-documento/  Edge Function que lê um anexo (contrato, comprovante, NF, orçamento de fornecedor).
@@ -146,8 +149,8 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 | `obras_historico` | `id` (bigserial) | `obra_id`, `operacao`, `gravado_em`, `data` | a versão anterior da obra, gravada por trigger |
 | `configuracoes` | `id` (só `'geral'`) | `updated_at`, `data` | as configurações do app (`normConfiguracoes`): tamanho das capas, seções abertas, ordem da lista, itens ocultos do menu, minutos para esconder os valores |
 | `orcamentos` | `id` | `numero` (único), `cliente`, `status`, `obra_id`, `updated_at`, `data` | o orçamento livre: cliente, itens (com `calc` de vãos), desconto, condições (`normOrcamento`) |
-| `profiles` | `id` (= auth.users) | `nome`, `papel` | — (`nome` é o nome exibido no chat e nas menções; cada um troca o seu em Mensagens) |
-| `notificacoes` | `id` (uuid) | `user_id` (destinatário), `tipo`, `de_id`, `de_nome`, `obra_id`, `comentario_id`, `texto`, `created_at`, `lida_em` | — (**não usa `data`**; só nasce pelo trigger do comentário) |
+| `profiles` | `id` (= auth.users) | `nome`, `papel`, `acessos text[]`, `master`, `email`, `whatsapp` | — (`nome` é o nome exibido no chat e nas menções; cada um troca o seu. `acessos`/`master`/`whatsapp` só o master muda — trigger `profiles_guarda`) |
+| `notificacoes` | `id` (uuid) | `user_id` (destinatário), `tipo` (`mencao`, `compra_pedido`, `compra_aprovada`, `compra_recusada`), `de_id`, `de_nome`, `obra_id`, `comentario_id`, `texto`, `dados` (`{itens:[{cat,itemId}]}`), `created_at`, `lida_em` | — (**não usa `data`**; só nasce pelo trigger do comentário ou pela RPC `notificar_compra`) |
 | `mensagens` | `id` (uuid) | `conversa` (`geral` ou `dm:<uuid>:<uuid>`), `de_id`, `de_nome`, `para_id`, `texto`, `obra_id`, `created_at` | — (**não usa `data`**; imutável) |
 | `mensagens_lidas` | (`user_id`,`conversa`) | `lida_ate` | — |
 | `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (**vazia**, fundação para o futuro) |
@@ -230,7 +233,7 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   `print` (`obraId`), `medicaoPrint` (`obraId`, `modo`), `avisos`, `relatorios`, `relatorio` (`tipo`, `inicio`/`fim` na agenda), `calendar` (`mes`, `dia`), `equipes`, `osPrint` (`inicio`, `fim`),
   `cronogramas` (o **macro**: todas as obras, uma por linha), `cronograma` (`id`, o micro de uma
   obra), `cronogramaPrint` (`id`), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`),
-  `estoque` (`codigo` opcional, vindo do QR), `estoqueDoc` (`docId`), `estoqueEtiquetas` (`itemIds`),
+  `aprovacoes`, `estoque` (`codigo` opcional, vindo do QR), `estoqueDoc` (`docId`), `estoqueEtiquetas` (`itemIds`),
   `orcamentos` (`id` opcional = editor aberto), `orcamentoPrint` (`id`), `mensagens` (`conversa` opcional).
   `relatorio` aceita `personalizar: true` (só no `history.state`), que abre o painel de filtros.
   `DiaAgenda`, as três telas do diário e as quatro do estoque continuam sendo early-returns dos
@@ -649,6 +652,22 @@ do dono é `lida_em` / `mensagens_lidas`. A conversa direta tem chave `dm:<menor
 por `check` no banco. Sino e cartinha acendem pelo Realtime (respeita RLS) e, sem ele, a cada
 minuto e ao voltar para a aba. Sem a migration, os dois ícones e o item do menu somem e o
 comentário comum grava como antes (`mencoes` só vai no INSERT quando há alguém marcado).
+
+**Aprovação de compra: por login, com acesso dado pelo master.** Antes qualquer um clicava "Aprovar"
+no orçamento e o sócio aprovava no papel. Hoje o item de compra tem `aprovacao {estado: ""|pendente|
+aprovada|recusada, pedidoPorId/Por/Em, obs, decididoPorId/Por/Em, motivo}` (`normAprovacao`) e o
+orçamento aprovado leva `aprovadoPor/Em`. Compras pede (um item ou o lote dos orçados, **uma**
+notificação por pedido), o aprovador decide em ✅ Aprovações (`AprovacoesCompra.jsx`) ou dentro da obra,
+e Compras recebe o retorno. Quem pede e quem aprova é o **login** (`profiles`), não o nome digitado: aqui
+a identidade é o controle — exceção deliberada à regra do `autor`/`responsavel` digitado.
+Acessos (`ACESSOS` em `Comunicacao.jsx`: `aprova_compras`, `compras`) moram em `profiles.acessos`;
+só o master (`profiles.master`, marcado à mão no SQL — o e-mail não vai para o repositório) muda, na
+seção "Pessoas e acessos" de Configurações, que para ele abre sem a senha. Os destinatários quem
+escolhe é o banco (`notificar_compra`, pelo acesso), e "aprovada/recusada" só sai de quem tem
+`aprova_compras`. O texto do aviso nunca leva R$. Sem a migration, `acessos` vem `null`: todo mundo
+aprova como antes e não há pedido. Limite aceito: a flag `aprovado` continua no `jsonb` da obra, então
+o banco não impede alguém de marcá-la por fora — fica o rastro em `aprovadoPor` e `obras_historico`.
+WhatsApp é a fase 2 (webhook em `notificacoes` → Edge Function); o número já fica em `profiles.whatsapp`.
 
 **O cronograma é a fonte única do planejamento.** Havia três agendas que não se falavam: datas por
 item na tela da obra (`item.inicio`/`diasExec`, cada item isolado), o Cronograma Comercial (ligado à

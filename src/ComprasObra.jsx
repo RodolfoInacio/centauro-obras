@@ -1,7 +1,8 @@
-import { Fragment, useState } from "react";
+import { Fragment, createContext, useContext, useState } from "react";
 import { Dinheiro, Oculto } from "./Sigilo";
 import { chaveCliente } from "./agrupamento";
 import { lerAutor } from "./ComentariosObra";
+import { useComunicacao, nomePessoa } from "./Comunicacao";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Compras por categoria (Perfil/Pintura/Acessório/Vidro), do jeito que o setor de compras
@@ -39,6 +40,9 @@ function normFornecedor(f, idx, aprovadoPadrao = false) {
     id: f.id || `fn_${idx}`,
     nome: f.nome || "",
     aprovado: f.aprovado === undefined ? aprovadoPadrao : !!f.aprovado,
+    // Quem aprovou (login) e quando. Vazio em aprovação antiga, de antes dos acessos.
+    aprovadoPor: f.aprovado ? (f.aprovadoPor || "") : "",
+    aprovadoEm: f.aprovado ? (f.aprovadoEm || "") : "",
     orcamento: { data: o.data || "", valor: dinheiro(o.valor), obs: o.obs || "" },
     compra:    { data: c.data || "", valor: dinheiro(c.valor), obs: c.obs || "" },
     entrega:   { data: e.data || "", recebido: !!e.recebido, obs: e.obs || "" },
@@ -57,7 +61,62 @@ function normItemCompra(it, idx, aprovadoPadrao = false) {
     tipo: it.tipo || "",
     estoque: { usado: est.usado === "sim" || est.usado === "nao" ? est.usado : "", obs: est.obs || "" },
     fornecedores: forn.filter(ehObjeto).map((f, i) => normFornecedor(f, i, aprovadoPadrao)),
+    aprovacao: normAprovacao(it.aprovacao),
   };
+}
+
+// ─── APROVAÇÃO DA COMPRA ─────────────────────────────────────────────────────
+// Compras pede, o aprovador (acesso 'aprova_compras', ver Comunicacao.jsx) escolhe o orçamento
+// ou recusa. Quem pede e quem decide é o LOGIN (id + nome do perfil), não um nome digitado: aqui a
+// identidade é o controle. Item antigo abre com estado "" e o `aprovado` dos orçamentos vale como era.
+const ESTADOS_APROVACAO = ["pendente", "aprovada", "recusada"];
+export function normAprovacao(a) {
+  a = ehObjeto(a) ? a : {};
+  return {
+    estado: ESTADOS_APROVACAO.includes(a.estado) ? a.estado : "",
+    pedidoPorId: a.pedidoPorId || "", pedidoPor: a.pedidoPor || "", pedidoEm: a.pedidoEm || "", obs: a.obs || "",
+    decididoPorId: a.decididoPorId || "", decididoPor: a.decididoPor || "", decididoEm: a.decididoEm || "", motivo: a.motivo || "",
+  };
+}
+
+// Dá para pedir aprovação: tem orçamento com valor, nada escolhido/comprado e não está esperando.
+export const podePedirAprovacao = item =>
+  item.aprovacao.estado !== "pendente" && !item.fornecedores.some(ativo) && item.fornecedores.some(f => f.orcamento.valor > 0);
+
+export function pedirAprovacao(item, quem, obs = "") {
+  return { ...item, aprovacao: { ...normAprovacao(null), estado: "pendente", pedidoPorId: quem.id, pedidoPor: quem.nome, pedidoEm: new Date().toISOString(), obs } };
+}
+
+// Aprovar = marcar os orçamentos escolhidos (um, ou dois se a compra for dividida).
+export function aprovarItem(item, fornIds, quem) {
+  const em = new Date().toISOString();
+  return {
+    ...item,
+    fornecedores: item.fornecedores.map(f => fornIds.includes(f.id) ? { ...f, aprovado: true, aprovadoPor: quem.nome, aprovadoEm: em } : f),
+    aprovacao: { ...item.aprovacao, estado: "aprovada", decididoPorId: quem.id, decididoPor: quem.nome, decididoEm: em, motivo: "" },
+  };
+}
+
+export function recusarItem(item, motivo, quem) {
+  return { ...item, aprovacao: { ...item.aprovacao, estado: "recusada", decididoPorId: quem.id, decididoPor: quem.nome, decididoEm: new Date().toISOString(), motivo } };
+}
+
+// Itens esperando o aprovador, de todas as categorias da obra.
+export function itensAguardandoAprovacao(obra) {
+  const c = normCompras(obra.compras);
+  const out = [];
+  for (const cat of CATEGORIAS_COMPRA) {
+    if (c[cat].naoSeAplica) continue;
+    c[cat].itens.forEach((item, i) => { if (item.aprovacao.estado === "pendente") out.push({ cat, item, n: i + 1 }); });
+  }
+  return out;
+}
+
+export const nomeItemCompra = (cat, item, n) => `${CATEGORIA_LABEL[cat]} · ${item.tipo || `item ${n}`}`;
+
+export function fmtQuandoISO(iso) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
 // Registro da tela antiga (previsto/realizado/dataCompra/previsaoEntrega soltos na categoria).
@@ -210,7 +269,10 @@ export function pendenciasCompras(obra, hoje = hojeLocal()) {
     .map(s => ({
       cat: s.cat,
       nivel: s.situacao,
-      texto: s.vazio ? `${CATEGORIA_LABEL[s.cat]}: nada lançado (ou marque "não se aplica")` : `${s.nome}: ${rotuloNivel[s.situacao]}`,
+      texto: s.vazio ? `${CATEGORIA_LABEL[s.cat]}: nada lançado (ou marque "não se aplica")`
+        : s.situacao === "aprovar" ? `${s.nome}: ${s.aguardandoAprovacao ? "aguardando aprovação" : "orçado, pedir aprovação"}`
+        : `${s.nome}: ${rotuloNivel[s.situacao]}`,
+      aguardandoAprovacao: !!s.aguardandoAprovacao,
     }));
 }
 
@@ -238,7 +300,8 @@ export function situacaoItensCompra(obra, hoje = hojeLocal()) {
       else if (ativos.some(f => atrasada(f, hoje))) situacao = "atrasada";
       else if (ativos.every(f => f.entrega.recebido)) situacao = "entregue";
       else situacao = "aguardando";
-      out.push({ cat, nome, tipo: it.tipo, itemId: it.id, situacao, entregas, fornecedores: it.fornecedores, estoque: it.estoque });
+      out.push({ cat, nome, tipo: it.tipo, itemId: it.id, situacao, entregas, fornecedores: it.fornecedores, estoque: it.estoque,
+        aguardandoAprovacao: situacao === "aprovar" && it.aprovacao.estado === "pendente" });
     });
   }
   return out;
@@ -355,7 +418,11 @@ function Etapa({ titulo, cor, children }) {
   );
 }
 
-function CartaoFornecedor({ f, n, st, menor, onChange, onRemover, onEntradaEstoque, onAbrirDocEstoque }) {
+// Quem pode aprovar e as ações de aprovação, montados no ComprasObra (ver lá).
+const AprovCtx = createContext(null);
+
+function CartaoFornecedor({ f, n, st, menor, onChange, onAprovar, onRemover, onEntradaEstoque, onAbrirDocEstoque }) {
+  const ap = useContext(AprovCtx);
   const set = (etapa, campo, valor) => onChange({ ...f, [etapa]: { ...f[etapa], [campo]: valor } });
   return (
     <div style={{ background: "#fff", border: `1px solid ${f.aprovado ? "#0891b255" : "#e2e8f0"}`, borderRadius: 8, padding: 10, opacity: st.apagado ? 0.6 : 1 }}>
@@ -367,8 +434,13 @@ function CartaoFornecedor({ f, n, st, menor, onChange, onRemover, onEntradaEstoq
         <Chip cor={st.cor}>{st.rotulo}</Chip>
         {menor && <Chip cor="#16a34a" title="Enquanto nenhum orçamento é aprovado, é este que conta no A comprar">menor</Chip>}
         <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
-          {!comprado(f) && (
-            <button type="button" onClick={() => onChange({ ...f, aprovado: !f.aprovado })}
+          {f.aprovado && (f.aprovadoPor || !ap?.podeAprovar) && (
+            <span title={f.aprovadoEm ? `em ${fmtQuandoISO(f.aprovadoEm)}` : ""} style={{ fontSize: 11.5, color: "#0891b2", fontWeight: 700, alignSelf: "center" }}>
+              ✓ Aprovado{f.aprovadoPor ? ` por ${f.aprovadoPor}` : ""}
+            </span>
+          )}
+          {!comprado(f) && ap?.podeAprovar && (
+            <button type="button" onClick={() => onAprovar(!f.aprovado)}
               title={f.aprovado ? "Desfazer aprovação" : "Este é o orçamento que vai ser comprado"}
               style={f.aprovado
                 ? { background: "#0891b2", color: "#fff", border: "1px solid #0891b2", borderRadius: 6, padding: "2px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" }
@@ -433,8 +505,39 @@ function CartaoFornecedor({ f, n, st, menor, onChange, onRemover, onEntradaEstoq
   );
 }
 
-function CartaoItem({ item, n, aberto, onAlternar, onChange, onRemover, onEntradaEstoque, onAbrirDocEstoque }) {
+function ChipAprovacao({ a }) {
+  if (a.estado === "pendente") return <Chip cor="#b45309" title={`Pedido por ${a.pedidoPor || "?"} em ${fmtQuandoISO(a.pedidoEm)}${a.obs ? ` — ${a.obs}` : ""}`}>⏳ Aguardando aprovação</Chip>;
+  if (a.estado === "recusada") return <Chip cor="#dc2626" title={`Recusado por ${a.decididoPor || "?"} em ${fmtQuandoISO(a.decididoEm)}: ${a.motivo}`}>✖ Recusado</Chip>;
+  return null;
+}
+
+// Faixa da aprovação dentro do item: quem pediu, quem decidiu e os botões de cada lado.
+function FaixaAprovacao({ item, cat, n }) {
+  const ap = useContext(AprovCtx);
+  const a = item.aprovacao;
+  const podePedir = ap?.podePedir && podePedirAprovacao(item);
+  if (!a.estado && !podePedir) return null;
+  const cores = { pendente: ["#fffbeb", "#fde68a", "#92400e"], recusada: ["#fef2f2", "#fecaca", "#991b1b"], aprovada: ["#ecfeff", "#a5f3fc", "#155e75"], "": ["#f8fafc", "#e2e8f0", "#475569"] }[a.estado];
+  const botao = (cor) => ({ background: cor, color: "#fff", border: "none", borderRadius: 6, padding: "4px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" });
+  return (
+    <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", background: cores[0], border: `1px solid ${cores[1]}`, color: cores[2], borderRadius: 8, padding: "7px 10px", marginBottom: 10, fontSize: 12.5 }}>
+      <div style={{ flex: "1 1 240px" }}>
+        {a.estado === "pendente" && <>⏳ <b>Aguardando aprovação</b> — pedido por {a.pedidoPor || "?"} em {fmtQuandoISO(a.pedidoEm)}{a.obs && <> · <i>{a.obs}</i></>}</>}
+        {a.estado === "aprovada" && <>✓ <b>Aprovado</b> por {a.decididoPor || "?"} em {fmtQuandoISO(a.decididoEm)} — pode comprar</>}
+        {a.estado === "recusada" && <>✖ <b>Recusado</b> por {a.decididoPor || "?"} em {fmtQuandoISO(a.decididoEm)}: {a.motivo}</>}
+        {!a.estado && <>Orçado. Quando os orçamentos estiverem completos, peça a aprovação.</>}
+      </div>
+      {podePedir && <button type="button" onClick={() => ap.pedir([{ cat, item, n }])} style={botao("#b45309")}>📝 {a.estado === "recusada" ? "Pedir de novo" : "Pedir aprovação"}</button>}
+      {a.estado === "pendente" && ap?.podeAprovar && ap.temLogin && (
+        <button type="button" onClick={() => ap.recusar(cat, item, n)} style={botao("#dc2626")}>Recusar</button>
+      )}
+    </div>
+  );
+}
+
+function CartaoItem({ item, n, cat, aberto, onAlternar, onChange, onRemover, onEntradaEstoque, onAbrirDocEstoque }) {
   const hoje = hojeLocal();
+  const ap = useContext(AprovCtx);
   const st = statusItem(item, hoje);
   const t = totaisItem(item);
   const menor = decidido(item) ? null : menorOrcamento(item);
@@ -460,6 +563,7 @@ function CartaoItem({ item, n, aberto, onAlternar, onChange, onRemover, onEntrad
           {item.tipo || "sem especificação"}
         </span>
         <Chip cor={st.cor}>{st.rotulo}</Chip>
+        <ChipAprovacao a={item.aprovacao} />
         <span style={{ fontSize: 11, color: "#94a3b8", whiteSpace: "nowrap" }}>{qtdOrc} orçamento{qtdOrc === 1 ? "" : "s"}</span>
         <span style={{ fontSize: 12, color: "#64748b", whiteSpace: "nowrap" }}>A comprar <b style={{ color: t.aComprar > 0 ? "#dc2626" : "#1e293b" }}><Dinheiro v={t.aComprar} /></b></span>
         <span style={{ fontSize: 12, color: "#64748b", whiteSpace: "nowrap" }}>Gasto <b style={{ color: "#1e293b" }}><Dinheiro v={t.gasto} /></b></span>
@@ -494,10 +598,11 @@ function CartaoItem({ item, n, aberto, onAlternar, onChange, onRemover, onEntrad
             </div>
           </div>
 
+          <FaixaAprovacao item={item} cat={cat} n={n} />
           <label style={rotulo}>Orçamentos</label>
           {qtdOrc > 1 && !decidido(item) && (
             <div style={{ fontSize: 11, color: "#64748b", marginBottom: 6 }}>
-              Nenhum aprovado ainda — o A comprar usa o orçamento mais barato. Aprove o escolhido (ou dois, se a compra for dividida).
+              Nenhum aprovado ainda — o A comprar usa o orçamento mais barato.{ap?.podeAprovar ? " Aprove o escolhido (ou dois, se a compra for dividida)." : ""}
             </div>
           )}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -507,6 +612,7 @@ function CartaoItem({ item, n, aberto, onAlternar, onChange, onRemover, onEntrad
             {item.fornecedores.map((f, i) => (
               <CartaoFornecedor key={f.id} f={f} n={i + 1} st={statusFornecedor(f, item, hoje)} menor={menor?.id === f.id && qtdOrc > 1}
                 onChange={novo => setForn(f.id, novo)} onRemover={() => removerOrcamento(f)}
+                onAprovar={ligar => ap.aprovarForn(cat, item, n, f, ligar)}
                 onEntradaEstoque={onEntradaEstoque && (() => onEntradaEstoque(item, f))} onAbrirDocEstoque={onAbrirDocEstoque} />
             ))}
           </div>
@@ -520,7 +626,7 @@ function CartaoItem({ item, n, aberto, onAlternar, onChange, onRemover, onEntrad
   );
 }
 
-function CorpoCategoria({ v, onChange, onEntradaEstoque, onAbrirDocEstoque }) {
+function CorpoCategoria({ v, cat, onChange, onEntradaEstoque, onAbrirDocEstoque }) {
   // Com um item só, já abre direto nele; com vários, começa tudo fechado para dar o panorama.
   const [abertos, setAbertos] = useState(() => new Set(v.itens.length === 1 ? [v.itens[0].id] : []));
   const t = totaisCategoria(v);
@@ -549,7 +655,7 @@ function CorpoCategoria({ v, onChange, onEntradaEstoque, onAbrirDocEstoque }) {
           <div style={{ fontSize: 12, color: "#94a3b8", fontStyle: "italic" }}>Nenhum item lançado ainda.</div>
         )}
         {v.itens.map((it, i) => (
-          <CartaoItem key={it.id} item={it} n={i + 1} aberto={abertos.has(it.id)} onAlternar={() => alternar(it.id)}
+          <CartaoItem key={it.id} item={it} n={i + 1} cat={cat} aberto={abertos.has(it.id)} onAlternar={() => alternar(it.id)}
             onChange={novo => setItem(it.id, novo)} onRemover={() => removerItem(it)}
             onEntradaEstoque={onEntradaEstoque} onAbrirDocEstoque={onAbrirDocEstoque} />
         ))}
@@ -573,11 +679,68 @@ function CorpoCategoria({ v, onChange, onEntradaEstoque, onAbrirDocEstoque }) {
 
 // onEntradaEstoque recebe a origem (categoria/item/orçamento) e o que a entrada já pode trazer
 // preenchido. Quem monta o documento é a tela de Estoque; aqui é só o atalho.
-export default function ComprasObra({ compras, onChange, sugestoes = [], onEntradaEstoque, onAbrirDocEstoque, onAtividade }) {
+// onAvisoCompra({tipo, texto, dados, para}) manda o aviso pelo 🔔 (quem recebe o banco decide pelo
+// acesso). Sem a migration de acessos, fica tudo como antes: qualquer um aprova e não há pedido.
+export default function ComprasObra({ compras, onChange, sugestoes = [], onEntradaEstoque, onAbrirDocEstoque, onAtividade, onAvisoCompra }) {
   const [abertas, setAbertas] = useState(() => new Set());
   const hoje = hojeLocal();
   const c = normCompras(compras);
   const total = comprasTotais({ compras: c });
+
+  const com = useComunicacao();
+  const acessosAtivos = !!com?.acessosAtivos;
+  const eu = com?.eu ? { id: com.eu.id, nome: nomePessoa(com.eu) } : null;
+  const quem = eu || { id: "", nome: lerAutor() };
+  const trocarItem = (cat, novo) => onChange({ ...c, [cat]: { ...c[cat], itens: c[cat].itens.map(it => it.id === novo.id ? novo : it) } });
+  const aprov = {
+    temLogin: !!eu,
+    podeAprovar: !acessosAtivos || !!com?.temAcesso("aprova_compras"),
+    podePedir: acessosAtivos && !!eu && !!onAvisoCompra,
+    // Um pedido (um ou vários itens) = uma notificação só.
+    pedir(lista) {
+      const obs = window.prompt(lista.length > 1
+        ? `Pedir aprovação de ${lista.length} itens. Observação para quem aprova (opcional):`
+        : "Observação para quem aprova (opcional):", "");
+      if (obs === null) return;
+      const porCat = {};
+      for (const { cat, item } of lista) {
+        porCat[cat] = porCat[cat] || {};
+        porCat[cat][item.id] = pedirAprovacao(item, quem, obs.trim());
+      }
+      const nova = { ...c };
+      for (const [cat, mapa] of Object.entries(porCat)) nova[cat] = { ...c[cat], itens: c[cat].itens.map(it => mapa[it.id] || it) };
+      onChange(nova);
+      const nomes = lista.map(({ cat, item, n }) => nomeItemCompra(cat, item, n));
+      const texto = (lista.length > 1 ? `${lista.length} itens: ${nomes.join("; ")}` : nomes[0]) + (obs.trim() ? ` — ${obs.trim()}` : "");
+      onAvisoCompra({ tipo: "compra_pedido", texto, dados: { itens: lista.map(({ cat, item }) => ({ cat, itemId: item.id })) } });
+      onAtividade?.(`Pedido de aprovação de compra por ${quem.nome}: ${nomes.join("; ")}`);
+    },
+    aprovarForn(cat, item, n, f, ligar) {
+      const nome = nomeItemCompra(cat, item, n);
+      if (!ligar) {
+        const forn = item.fornecedores.map(x => x.id === f.id ? { ...x, aprovado: false, aprovadoPor: "", aprovadoEm: "" } : x);
+        const algum = forn.some(x => x.aprovado);
+        trocarItem(cat, { ...item, fornecedores: forn, aprovacao: algum || item.aprovacao.estado !== "aprovada" ? item.aprovacao : normAprovacao(null) });
+        onAtividade?.(`Aprovação desfeita: ${nome} — ${f.nome || "sem nome"}`);
+        return;
+      }
+      trocarItem(cat, aprovarItem(item, [f.id], quem));
+      onAtividade?.(`Compra aprovada por ${quem.nome}: ${nome} — ${f.nome || "sem nome"}`);
+      if (acessosAtivos && onAvisoCompra) onAvisoCompra({ tipo: "compra_aprovada", texto: `${nome} — ${f.nome || "fornecedor sem nome"}`,
+        dados: { itens: [{ cat, itemId: item.id }] }, para: item.aprovacao.pedidoPorId || null });
+    },
+    recusar(cat, item, n) {
+      const motivo = window.prompt("Motivo da recusa (vai para quem pediu):", "");
+      if (motivo === null) return;
+      if (!motivo.trim()) { window.alert("Escreva o motivo — é o que diz ao compras o que fazer."); return; }
+      const nome = nomeItemCompra(cat, item, n);
+      trocarItem(cat, recusarItem(item, motivo.trim(), quem));
+      onAtividade?.(`Compra recusada por ${quem.nome}: ${nome} — ${motivo.trim()}`);
+      onAvisoCompra?.({ tipo: "compra_recusada", texto: `${nome} — ${motivo.trim()}`, dados: { itens: [{ cat, itemId: item.id }] }, para: item.aprovacao.pedidoPorId || null });
+    },
+  };
+  const paraPedir = aprov.podePedir ? CATEGORIAS_COMPRA.flatMap(cat => c[cat].naoSeAplica ? []
+    : c[cat].itens.map((item, i) => ({ cat, item, n: i + 1 })).filter(x => podePedirAprovacao(x.item))) : [];
 
   const alternar = cat => setAbertas(s => {
     const n = new Set(s);
@@ -601,7 +764,17 @@ export default function ComprasObra({ compras, onChange, sugestoes = [], onEntra
     }
   }
   return (
+    <AprovCtx.Provider value={aprov}>
     <div style={{ overflowX: "auto" }}>
+      {paraPedir.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, padding: "8px 10px", borderRadius: 8, background: "#fffbeb", border: "1px solid #fde68a", fontSize: 12.5, color: "#92400e", flexWrap: "wrap" }}>
+          <span style={{ flex: "1 1 240px" }}><b>{paraPedir.length}</b> {paraPedir.length === 1 ? "item orçado esperando" : "itens orçados esperando"} o pedido de aprovação.</span>
+          <button type="button" onClick={() => aprov.pedir(paraPedir)}
+            style={{ background: "#b45309", color: "#fff", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+            📝 Pedir aprovação{paraPedir.length > 1 ? ` dos ${paraPedir.length}` : ""}
+          </button>
+        </div>
+      )}
       <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, padding: "8px 10px", borderRadius: 8, cursor: "pointer",
         background: cf ? "#f0fdf4" : "#fffbeb", border: `1px solid ${cf ? "#bbf7d0" : "#fde68a"}`, fontSize: 12.5, color: cf ? "#166534" : "#92400e" }}>
         <input type="checkbox" checked={!!cf} onChange={alternarConferido} />
@@ -676,7 +849,7 @@ export default function ComprasObra({ compras, onChange, sugestoes = [], onEntra
                     style={{ cursor: "pointer" }} />
                 </span>
               </div>
-              {aberta && <CorpoCategoria v={v} onChange={nv => setCat(cat, nv)} onAbrirDocEstoque={onAbrirDocEstoque}
+              {aberta && <CorpoCategoria v={v} cat={cat} onChange={nv => setCat(cat, nv)} onAbrirDocEstoque={onAbrirDocEstoque}
                 onEntradaEstoque={onEntradaEstoque && ((item, f) => onEntradaEstoque({
                   cat, itemId: item.id, fornId: f.id, categoria: CATEGORIA_LABEL[cat], tipo: item.tipo,
                   fornecedor: f.nome, nf: f.nf.numero,
@@ -702,5 +875,6 @@ export default function ComprasObra({ compras, onChange, sugestoes = [], onEntra
         </div>
       </div>
     </div>
+    </AprovCtx.Provider>
   );
 }
