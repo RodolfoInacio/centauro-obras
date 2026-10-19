@@ -23,13 +23,15 @@ import {
 export const ACESSOS = [
   { id: "aprova_compras", rotulo: "Aprova compras", desc: "Recebe os pedidos de aprovação e é quem libera ou recusa o orçamento." },
   { id: "compras", rotulo: "Compras", desc: "Recebe o aviso quando uma compra é liberada ou recusada." },
+  { id: "comercial", rotulo: "Comercial", desc: "Cria negociações, libera para orçamento, negocia, converte em obra ou declina. Recebe o aviso de orçamento pronto." },
+  { id: "orcamentista", rotulo: "Orçamentista", desc: "Recebe as negociações liberadas para orçamento e devolve o orçamento pronto." },
 ];
 
 // Sem a migration_acessos_compras.sql (acessos === null) ninguém fica travado no que já fazia:
-// todo mundo segue em "compras", e ninguém vira aprovador sozinho.
+// todo mundo segue em "compras", e ninguém vira aprovador sozinho. No comercial, todos podem tudo.
 export function pessoaTemAcesso(p, acesso) {
   if (!p) return false;
-  if (p.acessos === null || p.acessos === undefined) return acesso === "compras";
+  if (p.acessos === null || p.acessos === undefined) return ["compras", "comercial", "orcamentista"].includes(acesso);
   return p.acessos.includes(acesso);
 }
 
@@ -163,13 +165,20 @@ export function BotaoMensagens({ onAbrir }) {
   );
 }
 
-const ICONE_NOTIF = { compra_pedido: "📝", compra_aprovada: "✅", compra_recusada: "✖" };
+const ICONE_NOTIF = {
+  compra_pedido: "📝", compra_aprovada: "✅", compra_recusada: "✖",
+  comercial_liberado: "📐", comercial_pronto: "💼", comercial_revisao: "🔁", comercial_atribuido: "👤",
+};
 function tituloNotif(n, rotuloObra) {
   const quem = <b>{n.deNome || "Alguém"}</b>;
   const obra = <b>{rotuloObra(n.obraId)}</b>;
   if (n.tipo === "compra_pedido") return <>{quem} pediu aprovação de compra em {obra}</>;
   if (n.tipo === "compra_aprovada") return <>{quem} liberou compra em {obra}</>;
   if (n.tipo === "compra_recusada") return <>{quem} recusou compra em {obra}</>;
+  if (n.tipo === "comercial_liberado") return <>{quem} liberou para orçamento: {obra}</>;
+  if (n.tipo === "comercial_pronto") return <>{quem} terminou o orçamento de {obra}</>;
+  if (n.tipo === "comercial_revisao") return <>{quem} pediu revisão do orçamento de {obra}</>;
+  if (n.tipo === "comercial_atribuido") return <>{quem} colocou você em {obra}</>;
   return <>{quem} marcou você em {obra}</>;
 }
 

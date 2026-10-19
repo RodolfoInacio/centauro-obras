@@ -66,7 +66,9 @@ src/
   OrcamentoLivre.jsx  🧾 Orçamentos livres (fora do Wvetro): modelo, lista, editor, cálculo por vãos e a folha A4 com a marca.
   AprovacoesCompra.jsx  ✅ Aprovações de compra: os pedidos de todas as obras, orçamentos lado a lado, aprovar/recusar.
   ArquivoObras.jsx Arquivar → Excluídas → exclusão definitiva: modelo (`obra.arquivo`), botões da obra e as duas pastas.
-  NovoContrato.jsx Popup "+ Novo cliente / contrato" (cliente novo ou contrato de obra existente).
+  NovoContrato.jsx Popup "+ Novo cliente / contrato" (cliente novo ou contrato de obra existente; `inicial` = conversão).
+  Comercial.jsx    💼 Comercial: negociações (prospecção → orçamento → negociação → obra/declinada), modelo,
+                   `useNegociacoes` (carga + gravação com trava de versão), painel, quadro por etapa, ficha e popups.
   index.css        CSS global mínimo.
   assets/          Logos.
 supabase/
@@ -90,6 +92,8 @@ supabase/
   migration_whatsapp.sql     `pg_net` + gatilho em `notificacoes` que chama `whatsapp-notificar`, e o log
                              `whatsapp_envios` — rodar depois da de acessos (precisa do segredo no Vault).
   migration_exclusao_obras.sql  `obras_excluidas` + RPC `obra_excluir_definitivo` (senha) — rodar separado, depois da ficha_obra.
+  migration_comercial.sql    `negociacoes` (anti-DELETE), tipos `comercial_*` em `notificacoes` e RPC `notificar_comercial`
+                             — rodar depois da de acessos. Acessos novos: `comercial`, `orcamentista`.
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF do orçamento.
   functions/whatsapp-notificar/  Edge Function que manda o aviso do 🔔 pelo WhatsApp (Evolution API v2).
   functions/analisar-documento/  Edge Function que lê um anexo (contrato, comprovante, NF, orçamento de fornecedor).
@@ -153,9 +157,10 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 | `configuracoes` | `id` (só `'geral'`) | `updated_at`, `data` | as configurações do app (`normConfiguracoes`): tamanho das capas, seções abertas, ordem da lista, itens ocultos do menu, minutos para esconder os valores |
 | `orcamentos` | `id` | `numero` (único), `cliente`, `status`, `obra_id`, `updated_at`, `data` | o orçamento livre: cliente, itens (com `calc` de vãos), desconto, condições (`normOrcamento`) |
 | `profiles` | `id` (= auth.users) | `nome`, `papel`, `acessos text[]`, `master`, `email`, `whatsapp` | — (`nome` é o nome exibido no chat e nas menções; cada um troca o seu. `acessos`/`master`/`whatsapp` só o master muda — trigger `profiles_guarda`) |
-| `notificacoes` | `id` (uuid) | `user_id` (destinatário), `tipo` (`mencao`, `compra_pedido`, `compra_aprovada`, `compra_recusada`), `de_id`, `de_nome`, `obra_id`, `comentario_id`, `texto`, `dados` (`{itens:[{cat,itemId}]}`), `created_at`, `lida_em` | — (**não usa `data`**; só nasce pelo trigger do comentário ou pela RPC `notificar_compra`) |
+| `notificacoes` | `id` (uuid) | `user_id` (destinatário), `tipo` (`mencao`, `compra_pedido`, `compra_aprovada`, `compra_recusada`, `comercial_liberado`, `comercial_pronto`, `comercial_revisao`, `comercial_atribuido`), `de_id`, `de_nome`, `obra_id`, `comentario_id`, `texto`, `dados` (`{itens:[{cat,itemId}]}`), `created_at`, `lida_em` | — (**não usa `data`**; só nasce pelo trigger do comentário ou pela RPC `notificar_compra`) |
 | `mensagens` | `id` (uuid) | `conversa` (`geral` ou `dm:<uuid>:<uuid>`), `de_id`, `de_nome`, `para_id`, `texto`, `obra_id`, `created_at` | — (**não usa `data`**; imutável) |
 | `mensagens_lidas` | (`user_id`,`conversa`) | `lida_ate` | — |
+| `negociacoes` | `id` (= `numero`, `NEG-0001`) | `numero` (único), `cliente`, `etapa`, `vendedor_id`, `orcamentista_id`, `obra_id`, `updated_at`, `data` | a negociação (`normNegociacao`): cliente/obra/cidade/vendedor/`cadastro` no formato da obra, responsáveis (login), `orcamento {numeroProposta, valor, validade, pronto…}`, `revisoes`, `declinio`, `conversao`, `historico` de etapas, `capa` |
 | `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (**vazia**, fundação para o futuro) |
 
 - `obra_membros` e os papéis `encarregado`/`cliente` existem no schema mas **não são usados**: as
@@ -241,7 +246,8 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   `cronogramas` (o **macro**: todas as obras, uma por linha), `cronograma` (`id`, o micro de uma
   obra), `cronogramaPrint` (`id`), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`),
   `aprovacoes`, `estoque` (`codigo` opcional, vindo do QR), `estoqueDoc` (`docId`), `estoqueEtiquetas` (`itemIds`),
-  `orcamentos` (`id` opcional = editor aberto), `orcamentoPrint` (`id`), `mensagens` (`conversa` opcional).
+  `orcamentos` (`id` opcional = editor aberto), `orcamentoPrint` (`id`), `mensagens` (`conversa` opcional),
+  `comercial` (`pasta: "andamento"|"declinadas"|"convertidas"` ou `id` = ficha da negociação; sem nada = painel).
   `relatorio` aceita `personalizar: true` (só no `history.state`), que abre o painel de filtros.
   `DiaAgenda`, as três telas do diário e as quatro do estoque continuam sendo early-returns dos
   próprios componentes, mas guiados pelos parâmetros da view (`diario` tem `obraId`/`diarioId`,
@@ -709,6 +715,24 @@ fixada. Tudo o mais é **derivado** em `planejamento.js`, nunca gravado:
   o término pelo que falta no ritmo planejado → "~N dias de atraso" no cabeçalho da obra, no macro e
   aviso quando passa da `dataLimiteEntrega`.
 Limite aceito: tarefa **sem equipe** não vai ao calendário e por isso não gera diário pendente.
+
+**Comercial: a negociação é registro próprio, e vira obra copiando os anexos.** Antes da obra existe o
+funil: prospecção → aguardando orçamento → em orçamento → orçamento pronto → negociação → convertida |
+declinada (com motivo; reabre). Não é uma obra com status "prospecção" porque o id da obra é o nº da
+proposta do Wvetro, que só nasce no orçamento, e porque a obra entraria em todas as contas do app. Então
+`negociacoes` tem id próprio (`NEG-0001`, o próximo depois do maior, único no banco) e a mesma trava de
+versão da obra (`useNegociacoes`): comercial e orçamentista mexem no mesmo registro. Cliente, endereço e
+`cadastro` ficam no formato da obra, para `CadastroObra` servir e a conversão só copiar. Fotos, anexos e
+comentários usam `obra_anexos`/`obra_comentarios` com o id `NEG-…` (sem FK com obras, de propósito) — a
+coluna de atividade é o histórico ativo, e `historico` no `jsonb` guarda cada troca de etapa com o login.
+Quem faz cada passo é o **login** (como nas aprovações): acessos `comercial` (cria, libera, negocia,
+converte, declina) e `orcamentista` (pega e devolve pronto); sem a migration de acessos todos podem tudo.
+Cada passo avisa pelo 🔔 (`notificar_comercial`: a pessoa escolhida, ou todos com o acesso) e, pelo gatilho,
+no WhatsApp. "Converter em obra" abre o `NovoContrato` com `inicial`; depois do INSERT, `copiarAnexos`
+copia cada arquivo **dentro do Storage** (`path` é único em `obra_anexos`, não dá para reaproveitar a linha),
+a capa vai junto, o checklist marca pelas categorias, a obra grava `origemComercial` (selo "↩ veio de NEG-…")
+e a negociação vai para `convertida` com `conversao.obraId`. "Parada há N dias" sai de `etapaEm`; nada grava
+atraso. O valor exibido é o orçado, ou o estimado enquanto não há orçamento.
 
 **Central de avisos é derivada.** `avisosDaObra` (avisos.js) deduz tudo dos dados — nada é gravado.
 Documentos vêm de `fetchResumoAnexos` (categoria dos anexos fora da lixeira) ou do checklist marcado.

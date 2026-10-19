@@ -41,6 +41,7 @@ export const MENU_OCULTAVEL = [
   { id: "equipes", rotulo: "Equipes", icone: "👷" },
   { id: "estoque", rotulo: "Estoque", icone: "📦" },
   { id: "cronogramas", rotulo: "Cronograma", icone: "📊" },
+  { id: "comercial", rotulo: "Comercial", icone: "💼" },
   { id: "orcamentos", rotulo: "Orçamentos", icone: "🧾" },
   { id: "financeiro", rotulo: "Financeiro", icone: "🔒" },
 ];

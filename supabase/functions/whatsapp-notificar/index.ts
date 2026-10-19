@@ -59,16 +59,24 @@ type Notif = { id: string; user_id: string; tipo: string; de_nome: string | null
 function montarMensagem(n: Notif, obra: { numero?: string; cliente?: string } | null): string {
   const quem = n.de_nome || "Alguém";
   const rotuloObra = obra ? `#${obra.numero || n.obra_id} ${obra.cliente || ""}`.trim() : (n.obra_id ? `#${n.obra_id}` : "");
+  // Aviso do 💼 Comercial (ou @menção na ficha da negociação): obra_id é o NEG-….
+  const ehNeg = /^NEG-/.test(n.obra_id || "");
   const titulo = {
     compra_pedido: `📝 *${quem}* pediu aprovação de compra`,
     compra_aprovada: `✅ *${quem}* liberou uma compra`,
     compra_recusada: `✖ *${quem}* recusou uma compra`,
     mencao: `💬 *${quem}* marcou você num comentário`,
+    comercial_liberado: `📐 *${quem}* liberou para orçamento`,
+    comercial_pronto: `💼 *${quem}* terminou o orçamento`,
+    comercial_revisao: `🔁 *${quem}* pediu revisão do orçamento`,
+    comercial_atribuido: `👤 *${quem}* colocou você numa negociação`,
   }[n.tipo] || `🔔 Aviso de *${quem}*`;
-  const link = n.tipo === "compra_pedido" ? `${APP_URL}/#/aprovacoes` : n.obra_id ? `${APP_URL}/#/obra/${encodeURIComponent(n.obra_id)}` : APP_URL;
+  const link = n.tipo === "compra_pedido" ? `${APP_URL}/#/aprovacoes`
+    : ehNeg ? `${APP_URL}/#/comercial/${encodeURIComponent(n.obra_id!)}`
+    : n.obra_id ? `${APP_URL}/#/obra/${encodeURIComponent(n.obra_id)}` : APP_URL;
   return [
     titulo,
-    rotuloObra ? `Obra: *${rotuloObra}*` : "",
+    rotuloObra ? `${ehNeg ? "Negociação" : "Obra"}: *${rotuloObra}*` : "",
     (n.texto || "").trim(),
     "",
     `Abrir: ${link}`,
@@ -125,9 +133,10 @@ Deno.serve(async (req: Request) => {
   const numero = normalizarNumero(p?.whatsapp || "");
   if (!numero) return json({ ok: true, ignorado: "sem número" }, 200);
 
-  const { data: obra } = n.obra_id
-    ? await admin.from("obras").select("numero, cliente").eq("id", n.obra_id).maybeSingle()
-    : { data: null };
+  const { data: obra } = !n.obra_id ? { data: null }
+    : /^NEG-/.test(n.obra_id)
+      ? await admin.from("negociacoes").select("numero, cliente").eq("id", n.obra_id).maybeSingle()
+      : await admin.from("obras").select("numero, cliente").eq("id", n.obra_id).maybeSingle();
 
   try {
     await enviarEvolution(numero, montarMensagem(n as Notif, obra));

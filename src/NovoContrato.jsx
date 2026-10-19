@@ -13,6 +13,9 @@ import { Oculto } from "./Sigilo";
 //
 // O nº da proposta é obrigatório e continua sendo o id da obra. Quem grava é o App (onSalvar),
 // com INSERT: proposta repetida é recusada, nunca sobrescrita.
+//
+// `inicial` (conversão de uma negociação do 💼 Comercial): pula a escolha e abre o cadastro já
+// preenchido com o que a negociação tem. Os anexos dela são copiados pelo App depois de gravar.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const VAZIO = () => ({
@@ -25,7 +28,7 @@ const lbl = { fontSize: 10.5, fontWeight: 700, color: "#94a3b8", textTransform: 
 const btnSec = { background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 14px", fontWeight: 700, fontSize: 12.5, cursor: "pointer" };
 const btnPri = { background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "8px 16px", fontWeight: 700, fontSize: 12.5, cursor: "pointer" };
 
-export default function NovoContrato({ open, obras, onFechar, onLerPdf, onSalvar }) {
+export default function NovoContrato({ open, obras, onFechar, onLerPdf, onSalvar, inicial = null }) {
   const [etapa, setEtapa] = useState("tipo");       // tipo | cadastro
   const [modo, setModo] = useState("novo");         // novo | existente
   const [grupoChave, setGrupoChave] = useState("");
@@ -39,7 +42,8 @@ export default function NovoContrato({ open, obras, onFechar, onLerPdf, onSalvar
 
   useEffect(() => {
     if (!open) return;
-    setEtapa("tipo"); setModo("novo"); setGrupoChave(""); setF(VAZIO()); setArquivos([]);
+    setEtapa(inicial ? "cadastro" : "tipo"); setModo("novo"); setGrupoChave("");
+    setF(inicial ? { ...VAZIO(), ...inicial.dados, cadastro: normCadastro(inicial.dados?.cadastro) } : VAZIO()); setArquivos([]);
     setLendo(false); setAviso(""); setErro(""); setSalvando(false);
   }, [open]);
 
@@ -136,7 +140,7 @@ export default function NovoContrato({ open, obras, onFechar, onLerPdf, onSalvar
   }
 
   return (
-    <Modal open={open} title={etapa === "tipo" ? "Novo cliente / contrato" : (modo === "existente" ? `Novo contrato — ${grupoEscolhido?.nome || ""}` : "Cadastro do cliente novo")}
+    <Modal open={open} title={inicial ? `Converter ${inicial.negId} em obra` : etapa === "tipo" ? "Novo cliente / contrato" : (modo === "existente" ? `Novo contrato — ${grupoEscolhido?.nome || ""}` : "Cadastro do cliente novo")}
       onClose={fechar} width={etapa === "tipo" ? 520 : 820}>
       {etapa === "tipo" ? (
         <div>
@@ -184,6 +188,12 @@ export default function NovoContrato({ open, obras, onFechar, onLerPdf, onSalvar
                 onChange={e => { const fl = e.target.files?.[0]; if (fl) lerPdf(fl); e.target.value = ""; }} />
             </div>
 
+            {inicial && (
+              <div style={{ fontSize: 12.5, color: "#166534", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 9, padding: "9px 12px", marginBottom: 12 }}>
+                Dados da negociação <b>{inicial.negId}</b> já preenchidos. Ao cadastrar, as fotos e os anexos dela são copiados para a obra
+                e a negociação vai para "Convertidas". O nº da proposta vira o número da obra.
+              </div>
+            )}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "10px 14px", marginBottom: 12 }}>
               <label>
                 <span style={lbl}>Nº da proposta *</span>
@@ -226,11 +236,11 @@ export default function NovoContrato({ open, obras, onFechar, onLerPdf, onSalvar
 
           {erro && <div style={{ fontSize: 12.5, color: "#dc2626", marginTop: 10 }}>{erro}</div>}
           <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
-            <button onClick={() => { setEtapa("tipo"); setErro(""); }} disabled={salvando} style={btnSec}>← Voltar</button>
+            {inicial ? <span /> : <button onClick={() => { setEtapa("tipo"); setErro(""); }} disabled={salvando} style={btnSec}>← Voltar</button>}
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={fechar} disabled={salvando} style={btnSec}>Cancelar</button>
               <button onClick={salvar} disabled={salvando} style={{ ...btnPri, background: salvando ? "#64748b" : "#10b981", cursor: salvando ? "wait" : "pointer" }}>
-                {salvando ? (arquivos.length ? "Gravando e enviando anexos…" : "Gravando…") : "Cadastrar obra"}
+                {salvando ? (arquivos.length || inicial ? "Gravando e copiando anexos…" : "Gravando…") : inicial ? "🏗 Converter em obra" : "Cadastrar obra"}
               </button>
             </div>
           </div>

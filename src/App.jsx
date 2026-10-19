@@ -2,7 +2,8 @@ import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from "rea
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
-import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens, fetchFotosCapa, fetchOrcamentos, upsertOrcamento, deleteOrcamento as dbDeleteOrcamento, excluirObraDefinitivo, notificarCompra } from "./api";
+import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens, fetchFotosCapa, fetchOrcamentos, upsertOrcamento, deleteOrcamento as dbDeleteOrcamento, excluirObraDefinitivo, notificarCompra, copiarAnexos } from "./api";
+import ComercialView, { useNegociacoes, contarPendentesComercial } from "./Comercial";
 import AprovacoesCompra, { contarAguardando } from "./AprovacoesCompra";
 import { normArquivo, obraAtiva, comPasso, AcoesArquivo, PastaArquivo, ACAO_ROTULO } from "./ArquivoObras";
 import OrcamentosView, { OrcamentoPrint, normOrcamento } from "./OrcamentoLivre";
@@ -154,6 +155,8 @@ function normObra(o) {
     documentosLidos: normDocumentosLidos(o.documentosLidos),
     // Arquivada / em Excluídas + histórico com data e hora de cada passo (ArquivoObras.jsx).
     arquivo: normArquivo(o.arquivo),
+    // Negociação do 💼 Comercial que virou esta obra ("" = cadastrada direto).
+    origemComercial: typeof o.origemComercial === "string" ? o.origemComercial : "",
     // Obra cadastrada à mão nasce sem itens (entram depois pelo PDF) — e um registro sem
     // `itens` derrubava a carga de todas as obras.
     itens: (Array.isArray(o.itens) ? o.itens : []).map(normItem),
@@ -696,7 +699,7 @@ function ChecklistObra({ itens, onChange }) {
 // O planejamento da obra é o cronograma (seção 📅), não mais datas por item: `datasItens` é o
 // período de cada item lido do cronograma e `cronogramaSlot` é o próprio editor, montado pelo App.
 function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque, onEntradaEstoque, onAtividade, atividadeVersao = 0, itemAberto = null, onItemAberto, onImprimirMedicao, secaoFoco = null,
-  cronograma = null, cronogramaSlot = null, cronogramaResumo = "", datasItens = {}, andamento = null, onCriarCronograma, onPassoArquivo, onAvisoCompra }) {
+  cronograma = null, cronogramaSlot = null, cronogramaResumo = "", datasItens = {}, andamento = null, onCriarCronograma, onPassoArquivo, onAvisoCompra, onAbrirNegociacao }) {
   // Item expandido mora na view (#/obra/2729/item/5): voltar de outra tela reabre o mesmo item.
   const expandedId = itemAberto;
   const setExpandedId = (id) => onItemAberto?.(id);
@@ -799,6 +802,12 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
         <div style={{ flex: "1 1 280px", minWidth: 0 }}>
           <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>
             Proposta #{localObra.numero}{cad.lojaFaturamento ? ` · ${cad.lojaFaturamento}` : ""}
+            {localObra.origemComercial && (
+              <button onClick={() => onAbrirNegociacao?.(localObra.origemComercial)} title="Abrir a negociação que virou esta obra"
+                style={{ marginLeft: 8, background: "#f0fdf4", color: "#166534", border: "1px solid #bbf7d0", borderRadius: 999, padding: "0 8px", fontSize: 10.5, fontWeight: 800, cursor: "pointer", textTransform: "none" }}>
+                ↩ veio de {localObra.origemComercial}
+              </button>
+            )}
           </div>
           <div style={{ fontWeight: 800, fontSize: 16, color: BRAND }}>{localObra.obra || localObra.cliente}</div>
           <div style={{ fontSize: 12, color: "#64748b" }}>
@@ -2878,11 +2887,12 @@ function OrdemServicoPrint({ agenda, obras, equipes, inicio, fim, onBack }) {
 
 
 // ─── MENU LATERAL ─────────────────────────────────────────────────────────────
-function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos = 0, nAprovacoes = 0 }) {
+function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos = 0, nAprovacoes = 0, negs = [] }) {
   const { cfg } = useConfig();
   const com = useComunicacao();
   const todos = [
     { key: "dashboard", label: "Obras", icon: "🏠" },
+    { key: "comercial", label: "Comercial", icon: "💼", badge: contarPendentesComercial(negs, com), dica: "Negociações esperando por você" },
     { key: "avisos", label: "Central de avisos", icon: "⚠️", badge: nAvisos },
     // Só para quem aprova compras (acesso dado pelo master).
     ...(com?.acessosAtivos && com.temAcesso("aprova_compras") ? [{ key: "aprovacoes", label: "Aprovações de compra", icon: "✅", badge: nAprovacoes, dica: "Compras esperando aprovação" }] : []),
@@ -3991,6 +4001,9 @@ export default function App() {
   const [conflitos, setConflitos] = useState([]);           // obras em conflito, para a faixa vermelha
   const [atividadeVersao, setAtividadeVersao] = useState(0); // recarrega comentários e anexos da obra aberta
   const [novoContratoAberto, setNovoContratoAberto] = useState(false);
+  const [conversao, setConversao] = useState(null);   // { neg, quem }: "Converter em obra" do Comercial
+  // Negociações do 💼 Comercial: carga e gravação (trava de versão) moram em Comercial.jsx.
+  const comercial = useNegociacoes(session?.user?.id || null, (msg) => showError(msg));
   const temObraPendente = () => Object.keys(revObra.current).some(id => (revObra.current[id] || 0) !== (revSalva.current[id] || 0));
   const [dirtyCronoIds, setDirtyCronoIds] = useState(() => new Set()); // cronogramas com gravação pendente (debounce)
   const [pendingExit, setPendingExit] = useState(null); // ação de navegação adiada até o usuário decidir sobre alterações não salvas
@@ -4411,24 +4424,58 @@ export default function App() {
   // "+ Novo cliente / contrato": grava a obra, sobe os anexos e só então abre a obra (senão o
   // bloco de anexos carregaria antes de os arquivos chegarem). O checklist já nasce marcado
   // no que veio anexado.
+  const negsRef = useRef([]);
+  negsRef.current = comercial.negs;
+  const salvarNeg = comercial.salvar;
   const handleNovoContrato = useCallback(async ({ obra, arquivos }) => {
-    const cats = new Set(arquivos.map(a => a.categoria));
-    const marca = { ck_projeto: cats.has("projeto") || cats.has("foto"), ck_orcamento: cats.has("orcamento"), ck_contrato: cats.has("contrato") };
+    const conv = conversao;
+    const marcar = (o, cats) => {
+      const marca = { ck_projeto: cats.has("projeto") || cats.has("foto"), ck_orcamento: cats.has("orcamento"), ck_contrato: cats.has("contrato") };
+      return { ...o, checklist: o.checklist.map(c => marca[c.id] && !c.feito ? { ...c, feito: true, feitoEm: hoje() } : c) };
+    };
     // Obra nova nasce com a trava de etapas (regrasEtapas.js); as já cadastradas seguem livres.
-    const base = normObra({ ...obra, regrasEtapas: VERSAO_REGRAS, criadaEm: hoje() });
-    const nova = { ...base, checklist: base.checklist.map(c => marca[c.id] ? { ...c, feito: true, feitoEm: hoje() } : c) };
+    const base = normObra({ ...obra, regrasEtapas: VERSAO_REGRAS, criadaEm: hoje(), ...(conv ? { origemComercial: conv.neg.id } : {}) });
+    const nova = marcar(base, new Set(arquivos.map(a => a.categoria)));
     await criarObra(nova);
-    registrarAtividade(nova.id, "Obra cadastrada");
+    registrarAtividade(nova.id, conv ? `Obra criada a partir da negociação ${conv.neg.id}` : "Obra cadastrada");
+    let atual = nova;
+    let mudou = false;
+    if (conv) {
+      // Fotos e anexos da negociação vêm junto (cópia no Storage, linha nova em obra_anexos) e
+      // contam no checklist; a capa escolhida lá vira a capa da obra.
+      try {
+        const { anexos, mapa } = await copiarAnexos(conv.neg.id, nova.id);
+        if (anexos.length) {
+          registrarAtividade(nova.id, `Trouxe da negociação ${conv.neg.id}: ${anexos.map(a => a.nome).join(", ")}`);
+          atual = marcar(atual, new Set(anexos.map(a => a.categoria)));
+          const foto = (conv.neg.capa?.anexoId && mapa[conv.neg.capa.anexoId]) || anexos.find(a => a.categoria === "foto" && /^image\//.test(a.mime));
+          if (foto) atual = { ...atual, capa: { anexoId: foto.id, path: foto.path } };
+          mudou = true;
+        }
+      } catch (err) {
+        showError("A obra foi criada, mas nem todos os anexos da negociação vieram — anexe o que faltar na obra: " + err.message);
+      }
+      const n = negsRef.current.find(x => x.id === conv.neg.id) || conv.neg;
+      const em = new Date().toISOString();
+      salvarNeg({
+        ...n, etapa: "convertida", etapaEm: em,
+        conversao: { obraId: nova.id, porId: conv.quem.id, porNome: conv.quem.nome, em },
+        historico: [...n.historico, { etapa: "convertida", de: n.etapa, em, porId: conv.quem.id, porNome: conv.quem.nome, obs: `obra #${nova.id}` }],
+      }, true);
+      registrarAtividade(n.id, `Convertida na obra #${nova.id} por ${conv.quem.nome}`);
+    }
     if (arquivos.length) {
       const { ok, falhas } = await enviarArquivos(nova.id, arquivos);
       if (ok.length) registrarAtividade(nova.id, `Anexou no cadastro: ${ok.map(a => a.nome).join(", ")}`);
       const foto = ok.find(a => /^image\//.test(a.mime));
-      if (foto) updateObra({ ...nova, capa: { anexoId: foto.id, path: foto.path } });
+      if (foto && !atual.capa) { atual = { ...atual, capa: { anexoId: foto.id, path: foto.path } }; mudou = true; }
       if (falhas.length) showError("A obra foi cadastrada, mas estes anexos não subiram — anexe de novo na obra: " + falhas.join(" · "));
     }
+    if (mudou) updateObra(atual);
     setNovoContratoAberto(false);
+    setConversao(null);
     navTo({ type: "gantt", obraId: nova.id });
-  }, [criarObra, registrarAtividade, updateObra, navTo]);
+  }, [criarObra, registrarAtividade, updateObra, navTo, conversao, salvarNeg]);
 
   // Entrada lançada pelo botão de um orçamento de Compras: grava no orçamento o documento que
   // nasceu dele, e o botão vira "📦 No estoque · ENT-…" — não dá para dar entrada duas vezes.
@@ -4627,6 +4674,8 @@ export default function App() {
   const ctxAvisos = useMemo(() => ({ agenda: agendaEf, cronogramas, macro, conflitos: choques, diarios, hoje: hoje() }),
     [agendaEf, cronogramas, macro, choques, diarios]);
   const nAprovacoes = useMemo(() => contarAguardando(obras), [obras]);
+  // O 🔔 rotula pelo id da obra; aviso do Comercial (e @menção na ficha da negociação) traz o NEG-….
+  const obrasENegs = useMemo(() => [...obras, ...comercial.negs.map(n => ({ id: n.id, numero: n.numero, cliente: n.cliente }))], [obras, comercial.negs]);
   // Aviso de compra no 🔔. Falhar o aviso não desfaz a gravação: só avisa na faixa vermelha.
   const avisoCompra = useCallback((aviso) => {
     notificarCompra(aviso).catch(err => showError("A compra foi gravada, mas o aviso no 🔔 não saiu: " + err.message));
@@ -4832,12 +4881,12 @@ export default function App() {
       + (extras > 0 ? ` · +${extras} cronograma(s) extra` : "");
   })();
   const canGoBack = idxHistorico > 0 || view.type !== "dashboard";
-  const tituloView = { aprovacoes: "Aprovações de compra", mensagens: "Mensagens", configuracoes: "Configurações", relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", orcamentos: "Orçamentos", cronogramas: "Cronograma", cronograma: "Cronograma" };
+  const tituloView = { comercial: "💼 Comercial", aprovacoes: "Aprovações de compra", mensagens: "Mensagens", configuracoes: "Configurações", relatorios: "Relatórios", avisos: "Central de avisos", dashboard: "Obras", calendar: "Calendário de Obras", diario: "Diário de Obras", equipes: "Equipes", estoque: "Estoque", financeiro: "Financeiro", orcamentos: "Orçamentos", cronogramas: "Cronograma", cronograma: "Cronograma" };
 
   return (
     <ComunicacaoProvider userId={userId}>
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
-      <SideMenu open={menuOpen} onClose={() => setMenuOpen(false)} current={view.type} nAvisos={nAvisosCriticos} nAprovacoes={nAprovacoes}
+      <SideMenu open={menuOpen} onClose={() => setMenuOpen(false)} current={view.type} nAvisos={nAvisosCriticos} nAprovacoes={nAprovacoes} negs={comercial.negs}
         onNav={(key) => navTo({ type: key })}
         onImport={() => { setMenuOpen(false); fileRef.current.click(); }}
         onExportar={exportarDados} />
@@ -4858,7 +4907,11 @@ export default function App() {
             ? `#${selectedObra.numero} — ${selectedObra.cliente}`
             : view.type === "obrasPasta"
               ? ({ concluidas: "📁 Obras Concluídas", arquivadas: "🗄 Obras Arquivadas", excluidas: "🗑 Obras Excluídas" }[view.pasta] || "📁 Obras em Andamento")
-              : (tituloView[view.type] || "")}
+              : view.type === "comercial" && view.id
+                ? `💼 ${view.id} — ${comercial.negs.find(n => n.id === view.id)?.cliente || ""}`
+                : view.type === "comercial" && view.pasta
+                  ? ({ andamento: "💼 Negociações em andamento", declinadas: "💼 Negociações declinadas", convertidas: "💼 Convertidas em obra" }[view.pasta] || "💼 Comercial")
+                  : (tituloView[view.type] || "")}
         </div>
 
         <div style={{ marginLeft: "auto", display: "flex", gap: 12, alignItems: "center" }}>
@@ -4869,8 +4922,9 @@ export default function App() {
             <button onClick={() => navTo({ type: "print", obraId: selectedObra.id })}
               style={{ background: "#10b981", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Nota de Serviço</button>
           )}
-          <SinoNotificacoes obras={obras} onAbrirObra={obraId => navTo({ type: "gantt", obraId })}
-            onAbrir={n => n.tipo === "compra_pedido" ? navTo({ type: "aprovacoes" })
+          <SinoNotificacoes obras={obrasENegs} onAbrirObra={obraId => navTo(/^NEG-/.test(obraId) ? { type: "comercial", id: obraId } : { type: "gantt", obraId })}
+            onAbrir={n => /^NEG-/.test(n.obraId || "") ? navTo({ type: "comercial", id: n.obraId })
+              : n.tipo === "compra_pedido" ? navTo({ type: "aprovacoes" })
               : n.obraId ? navTo(n.tipo.startsWith("compra_") ? { type: "gantt", obraId: n.obraId, secao: "compras" } : { type: "gantt", obraId: n.obraId }) : null} />
           <BotaoMensagens onAbrir={() => navTo({ type: "mensagens" })} />
           <OlhoFinanceiro escuro size={16} />
@@ -4919,6 +4973,7 @@ export default function App() {
               onItemAberto={id => navReplace(id == null ? { type: "gantt", obraId: selectedObra.id } : { type: "gantt", obraId: selectedObra.id, itemId: id })}
               onAtividade={texto => registrarAtividade(selectedObra.id, texto)} atividadeVersao={atividadeVersao}
               onPassoArquivo={handlePassoArquivo} onAvisoCompra={avisoCompra}
+              onAbrirNegociacao={id => navTo({ type: "comercial", id })}
               onAbrirDocEstoque={docId => navTo({ type: "estoqueDoc", docId })}
               onEntradaEstoque={origem => navTo({ type: "estoque", entradaCompra: {
                 ...origem, obraId: selectedObra.id, obraRotulo: `#${selectedObra.numero} — ${selectedObra.cliente}`,
@@ -4971,6 +5026,13 @@ export default function App() {
                         onAbrir={id => navTo({ type: "orcamentos", id })}
                         onSalvar={handleSaveOrcamento} onExcluir={handleDeleteOrcamento}
                         onImprimir={id => navTo({ type: "orcamentoPrint", id })} />
+                  : view.type === "comercial"
+                    ? <ComercialView negs={comercial.negs} semTabela={comercial.semTabela} conflitos={comercial.conflitos}
+                        pasta={view.pasta || null} negId={view.id || null} obras={obrasTodas} orcamentos={orcamentos} atividadeVersao={atividadeVersao}
+                        onNavegar={p => navTo({ type: "comercial", ...p })}
+                        onSalvar={comercial.salvar} onCriar={comercial.criar} onRecarregar={comercial.recarregar}
+                        onAtividade={registrarAtividade} onErro={showError} onAbrirObra={openObra}
+                        onConverter={(neg, quem) => setConversao({ neg, quem })} />
                   : view.type === "financeiro"
                     ? <FinanceiroView obras={obras} onRelatorio={() => navTo({ type: "relatorio", tipo: "financeiro" })} />
                   : view.type === "configuracoes"
@@ -4998,7 +5060,15 @@ export default function App() {
                           onNovoContrato={() => setNovoContratoAberto(true)} />
       }
 
-      <NovoContrato open={novoContratoAberto} obras={obras} onFechar={() => setNovoContratoAberto(false)}
+      <NovoContrato open={novoContratoAberto || !!conversao} obras={obras} onFechar={() => { setNovoContratoAberto(false); setConversao(null); }}
+        inicial={conversao ? {
+          negId: conversao.neg.id,
+          dados: {
+            numero: conversao.neg.orcamento.numeroProposta, cliente: conversao.neg.cliente, obra: conversao.neg.obra,
+            cidade: conversao.neg.cidade, vendedor: conversao.neg.vendedor || conversao.neg.vendedorNome, cadastro: conversao.neg.cadastro,
+            valorTotal: conversao.neg.orcamento.valor || conversao.neg.valorEstimado, dataContrato: hoje(),
+          },
+        } : null}
         onLerPdf={parsePDFFileComIA} onSalvar={handleNovoContrato} />
 
       <Modal open={pendingExit !== null} title="Alterações não salvas" onClose={() => setPendingExit(null)}>

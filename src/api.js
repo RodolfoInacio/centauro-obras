@@ -708,6 +708,87 @@ export async function marcarConversaLida(userId, conversa) {
   if (error) throw error;
 }
 
+// ─── COMERCIAL (negociações, migration_comercial.sql) ────────────────────────
+// Mesma trava de versão da obra: comercial e orçamentista mexem no mesmo registro, e o
+// "última gravação vence" apagaria em silêncio o que o outro acabou de lançar.
+function linhaNegociacao(n) {
+  return {
+    numero: n.numero, cliente: n.cliente || "", etapa: n.etapa || "prospeccao",
+    vendedor_id: n.vendedorId || null, orcamentista_id: n.orcamentistaId || null,
+    obra_id: n.conversao?.obraId || null, updated_at: new Date().toISOString(), data: n,
+  };
+}
+
+// null = tabela ainda não existe (a tela mostra o aviso da migration).
+export async function fetchNegociacoes() {
+  try {
+    const linhas = await todasAsLinhas(() => supabase.from("negociacoes").select("data, updated_at").order("id"));
+    return linhas.map(r => ({ neg: r.data, versao: r.updated_at || null }));
+  } catch (error) {
+    if (tabelaAusente(error)) { console.warn("fetchNegociacoes:", error.message); return null; }
+    throw error;
+  }
+}
+
+export async function fetchNegociacao(id) {
+  const { data, error } = await supabase.from("negociacoes").select("data, updated_at").eq("id", id).maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error("A negociação não existe mais no banco.");
+  return { neg: data.data, versao: data.updated_at || null };
+}
+
+export async function inserirNegociacao(n) {
+  const { data, error } = await supabase.from("negociacoes").insert({ id: n.id, ...linhaNegociacao(n) }).select("updated_at");
+  if (error) {
+    if (error.code === "23505") throw new Error(`O número ${n.numero} já existe — recarregue a página e tente de novo.`);
+    throw error;
+  }
+  return data[0].updated_at;
+}
+
+export async function salvarNegociacao(n, versao) {
+  let q = supabase.from("negociacoes").update(linhaNegociacao(n)).eq("id", n.id);
+  q = versao ? q.eq("updated_at", versao) : q.is("updated_at", null);
+  const { data, error } = await q.select("updated_at");
+  if (error) throw error;
+  if (!data || data.length === 0) {
+    const err = new Error("A negociação foi alterada em outro lugar depois que você abriu.");
+    err.conflito = true;
+    throw err;
+  }
+  return data[0].updated_at;
+}
+
+// Aviso do comercial no 🔔. Quem recebe decide o banco (p_para ou pelo acesso). Sem R$ no texto.
+export async function notificarComercial({ tipo, negId, texto, dados, para = null }) {
+  const { data, error } = await supabase.rpc("notificar_comercial", { p_tipo: tipo, p_neg_id: negId, p_texto: texto, p_dados: dados || null, p_para: para });
+  if (error) throw error;
+  return data;
+}
+
+// Conversão em obra: os anexos da negociação passam a ser também da obra. `path` é único em
+// obra_anexos, então o arquivo é copiado dentro do próprio Storage (nada desce para o navegador)
+// e ganha uma linha nova. O original continua na negociação. Devolve {anexos, mapa: {idAntigo: novo}}.
+export async function copiarAnexos(deId, paraId) {
+  const origem = (await fetchAnexosObra(deId)) || [];
+  const mapa = {};
+  const anexos = [];
+  for (const a of origem.filter(x => !x.removidoEm)) {
+    const path = `${saneado(String(paraId))}/${crypto.randomUUID()}-${saneado(a.nome)}`;
+    const cp = await supabase.storage.from(BUCKET_OBRAS).copy(a.path, path);
+    if (cp.error) throw new Error(`"${a.nome}" não foi copiado: ${cp.error.message}`);
+    const { data, error } = await supabase.from("obra_anexos").insert({
+      obra_id: paraId, nome: a.nome, path, mime: a.mime || null, tamanho: a.tamanho || null,
+      categoria: a.categoria, autor: a.autor || null,
+    }).select("*").single();
+    if (error) throw new Error(`"${a.nome}" foi copiado, mas não foi registrado na obra: ${error.message}`);
+    const novo = anexo(data);
+    mapa[a.id] = novo;
+    anexos.push(novo);
+  }
+  return { anexos, mapa };
+}
+
 // ─── BACKUP COMPLETO (botão "Exportar dados") ────────────────────────────────
 // Todas as tabelas, paginadas. Obras é obrigatória; o resto vira null se a tabela não existir.
 // Os arquivos em si (anexos, fotos, desenhos) ficam no Storage e não entram aqui.
@@ -718,7 +799,7 @@ export async function fetchBackupCompleto() {
   };
   const obras = await tabela("obras");
   const nomes = ["equipes", "agenda", "cronogramas", "lembretes", "diarios", "obra_anexos", "obra_comentarios",
-    "obras_historico", "orcamentos", "mensagens", "notificacoes", "estoque_itens", "estoque_documentos", "estoque_movimentos"];
+    "obras_historico", "orcamentos", "negociacoes", "mensagens", "notificacoes", "estoque_itens", "estoque_documentos", "estoque_movimentos"];
   const resto = await Promise.all(nomes.map(opcional));
   return { geradoEm: new Date().toISOString(), obras, ...Object.fromEntries(nomes.map((n, i) => [n, resto[i]])) };
 }

@@ -14,6 +14,7 @@ const dec = (s) => { try { return decodeURIComponent(s); } catch { return s; } }
 export const VIEW_INICIAL = { type: "dashboard" };
 
 const PASTAS = ["andamento", "concluidas", "arquivadas", "excluidas"];
+const PASTAS_COMERCIAL = ["andamento", "declinadas", "convertidas"];
 
 export function viewParaHash(v) {
   if (!v || !v.type) return "#/";
@@ -49,6 +50,9 @@ export function viewParaHash(v) {
     case "estoqueEtiquetas": return "#/estoque/etiquetas";
     case "orcamentos": return v.id ? `#/orcamentos/${enc(v.id)}` : "#/orcamentos";
     case "orcamentoPrint": return `#/orcamentos/${enc(v.id)}/imprimir`;
+    case "comercial":
+      if (v.id) return `#/comercial/${enc(v.id)}`;
+      return PASTAS_COMERCIAL.includes(v.pasta) ? `#/comercial/pasta/${v.pasta}` : "#/comercial";
     default: return "#/";
   }
 }
@@ -88,6 +92,9 @@ export function hashParaView(hash) {
     case "orcamentos":
       if (b && c === "imprimir") return { type: "orcamentoPrint", id: b };
       return { type: "orcamentos", ...(b ? { id: b } : {}) };
+    case "comercial":
+      if (b === "pasta") return { type: "comercial", ...(PASTAS_COMERCIAL.includes(c) ? { pasta: c } : {}) };
+      return { type: "comercial", ...(b ? { id: b } : {}) };
     default: return VIEW_INICIAL;
   }
 }
@@ -114,6 +121,7 @@ export function paiDe(v) {
     case "relatorio": return { type: "relatorios" };
     case "orcamentos": return v.id ? { type: "orcamentos" } : VIEW_INICIAL;
     case "orcamentoPrint": return { type: "orcamentos", id: v.id };
+    case "comercial": return v.id ? { type: "comercial", pasta: "andamento" } : v.pasta ? { type: "comercial" } : VIEW_INICIAL;
     default: return VIEW_INICIAL;
   }
 }
