@@ -9,6 +9,7 @@ import { chaveCliente } from "./agrupamento";
 import { useEstadoSessao } from "./rotas";
 import {
   fetchNegociacoes, fetchNegociacao, inserirNegociacao, salvarNegociacao, notificarComercial, fetchFotosCapa,
+  excluirNegociacao, fetchNumerosNegExcluidas,
 } from "./api";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -92,10 +93,12 @@ export function normNegociacao(n) {
   };
 }
 
-// NEG-0001: o próximo depois do maior (inclusive declinadas e convertidas). Número único no banco:
-// duas abas criando ao mesmo tempo dão erro visível em vez de dois NEG iguais.
-export function proximoNumeroNeg(negs) {
-  const max = negs.reduce((m, n) => Math.max(m, Number(String(n.numero).replace(/\D/g, "")) || 0), 0);
+// NEG-0001: o próximo depois do maior (inclusive declinadas, convertidas e as excluídas — anexos e
+// comentários da excluída continuam presos ao número dela). Número único no banco: duas abas criando
+// ao mesmo tempo dão erro visível em vez de dois NEG iguais.
+export function proximoNumeroNeg(negs, excluidos = []) {
+  const num = (s) => Number(String(s).replace(/\D/g, "")) || 0;
+  const max = Math.max(negs.reduce((m, n) => Math.max(m, num(n.numero)), 0), ...excluidos.map(num), 0);
   return `NEG-${String(max + 1).padStart(4, "0")}`;
 }
 
@@ -150,6 +153,7 @@ export function useNegociacoes(userId, onErro) {
   const [negs, setNegs] = useState([]);
   const [semTabela, setSemTabela] = useState(false);
   const [conflitos, setConflitos] = useState([]);
+  const [excluidos, setExcluidos] = useState([]);   // números de negociações excluídas (não voltam)
   const versao = useRef({});
   const fila = useRef({});
   const timers = useRef({});
@@ -169,6 +173,7 @@ export function useNegociacoes(userId, onErro) {
       versao.current = Object.fromEntries(linhas.map(r => [r.neg.id, r.versao]));
       setNegs(linhas.map(r => normNegociacao(r.neg)));
     }).catch(err => { if (!cancel) erroRef.current?.("Erro ao carregar as negociações: " + err.message); });
+    fetchNumerosNegExcluidas().then(l => { if (!cancel) setExcluidos(l); }).catch(err => console.warn("negociacoes_excluidas:", err.message));
     return () => { cancel = true; };
   }, [userId]);
 
@@ -234,7 +239,18 @@ export function useNegociacoes(userId, onErro) {
     return () => { document.removeEventListener("visibilitychange", aoEsconder); window.removeEventListener("beforeunload", aoSair); };
   }, []);
 
-  return { negs, semTabela, conflitos, salvar, criar, recarregar };
+  // Excluir de vez (só master, só declinada). Espera a gravação pendente e passa pela fila: nenhuma
+  // gravação atrasada tenta regravar uma negociação apagada.
+  const excluir = useCallback(async (id) => {
+    if (timers.current[id]) { clearTimeout(timers.current[id]); pendentes.current[id]?.(); }
+    await enfileirar(id, () => excluirNegociacao(id));
+    geracao.current[id] = (geracao.current[id] || 0) + 1;
+    delete versao.current[id];
+    setNegs(prev => prev.filter(x => x.id !== id));
+    setExcluidos(prev => [...prev, id]);
+  }, [enfileirar]);
+
+  return { negs, semTabela, conflitos, excluidos, salvar, criar, recarregar, excluir };
 }
 
 // ─── ESTILOS ─────────────────────────────────────────────────────────────────
@@ -304,8 +320,8 @@ function ChipDias({ n }) {
 // ─── TELA ────────────────────────────────────────────────────────────────────
 // view: { pasta?: "andamento"|"declinadas"|"convertidas", id? }
 export default function ComercialView({
-  negs, semTabela, conflitos = [], pasta, negId, obras = [], orcamentos = [], atividadeVersao = 0,
-  onNavegar, onSalvar, onCriar, onRecarregar, onAtividade, onConverter, onAbrirObra, onErro,
+  negs, semTabela, conflitos = [], excluidos = [], pasta, negId, obras = [], orcamentos = [], atividadeVersao = 0,
+  onNavegar, onSalvar, onCriar, onRecarregar, onAtividade, onConverter, onAbrirObra, onErro, onExcluir,
 }) {
   const com = useComunicacao();
   const eu = com?.eu || null;
@@ -386,8 +402,9 @@ export default function ComercialView({
   }
 
   async function criarNova(dados) {
+    const numeroNovo = proximoNumeroNeg(negs, excluidos);
     const n = normNegociacao({
-      ...dados, id: proximoNumeroNeg(negs), numero: proximoNumeroNeg(negs),
+      ...dados, id: numeroNovo, numero: numeroNovo,
       etapa: "prospeccao", criadaEm: agoraISO(), etapaEm: agoraISO(), criadaPorId: quem.id, criadaPorNome: quem.nome,
       historico: [{ etapa: "prospeccao", de: "", em: agoraISO(), porId: quem.id, porNome: quem.nome, obs: "criada" }],
     });
@@ -399,7 +416,21 @@ export default function ComercialView({
     onNavegar({ id: n.id });
   }
 
-  const ctx = { pode, quem, executar, setModal, capaDe, onNavegar, onConverter, onAbrirObra };
+  // 🗑 Excluir de vez: só o master, e só declinada (o banco confere as duas coisas de novo).
+  const podeExcluir = !!eu?.master && !!onExcluir;
+  async function excluir(n) {
+    if (!window.confirm(`Excluir de vez a negociação ${n.numero} — ${n.cliente || "sem cliente"}?
+
+Ela sai do app; uma cópia fica guardada no banco (negociacoes_excluidas). Fotos, anexos e comentários não são apagados.`)) return;
+    try {
+      await onExcluir(n.id);
+      if (negId === n.id) onNavegar({ pasta: "declinadas" }, true);
+    } catch (err) {
+      onErro?.("Não deu para excluir a negociação: " + err.message);
+    }
+  }
+
+  const ctx = { pode, quem, executar, setModal, capaDe, onNavegar, onConverter, onAbrirObra, podeExcluir, excluir };
 
   let conteudo;
   if (semTabela) {
@@ -724,6 +755,10 @@ function ListaFinal({ negs, pasta, ctx }) {
               </div>
             )}
             {pasta === "declinadas" && <BotoesAcao n={n} ctx={ctx} compacto />}
+            {pasta === "declinadas" && ctx.podeExcluir && (
+              <button onClick={e => { e.stopPropagation(); ctx.excluir(n); }} title="Excluir de vez (só o master)"
+                style={{ ...btnSec, color: "#dc2626", borderColor: "#fecaca", padding: "5px 10px", fontSize: 11.5 }}>🗑 Excluir</button>
+            )}
           </div>
         );
       })}
@@ -823,7 +858,11 @@ function FichaNegociacao({ n, ctx, pessoas, obras, orcamentos, atividadeVersao, 
                 {n.conversao?.obraId && <button onClick={() => ctx.onAbrirObra(n.conversao.obraId)} style={{ ...btnSec, color: "#166534", borderColor: "#bbf7d0" }}>
                   🏗 Abrir obra #{n.conversao.obraId}{obraConv ? "" : " (não encontrada)"}</button>}</>
             ) : (
-              <>✖ Declinada por <b>{n.declinio?.porNome}</b> em {fmtData(n.declinio?.em)}: <b>{ROTULO_MOTIVO[n.declinio?.motivo] || "—"}</b>{n.declinio?.obs ? ` — ${n.declinio.obs}` : ""}</>
+              <>✖ Declinada por <b>{n.declinio?.porNome}</b> em {fmtData(n.declinio?.em)}: <b>{ROTULO_MOTIVO[n.declinio?.motivo] || "—"}</b>{n.declinio?.obs ? ` — ${n.declinio.obs}` : ""}
+                {ctx.podeExcluir && (
+                  <button onClick={() => ctx.excluir(n)} title="Excluir de vez (só o master)"
+                    style={{ ...btnSec, marginLeft: "auto", color: "#dc2626", borderColor: "#fecaca" }}>🗑 Excluir de vez</button>
+                )}</>
             )}
           </div>
         )}

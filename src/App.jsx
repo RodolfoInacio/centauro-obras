@@ -2887,6 +2887,17 @@ function OrdemServicoPrint({ agenda, obras, equipes, inicio, fim, onBack }) {
 
 
 // ─── MENU LATERAL ─────────────────────────────────────────────────────────────
+// Quem tem o acesso "Vê valores" entra com os R$ abertos (Sigilo.jsx). Fica dentro do
+// ComunicacaoProvider, que é onde o perfil de quem entrou é conhecido.
+function LiberaValores() {
+  const com = useComunicacao();
+  const { liberarSempre } = useSigilo();
+  const sim = !!(com?.acessosAtivos && com.temAcesso("ver_valores"));
+  useEffect(() => { liberarSempre(sim); }, [sim]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => () => liberarSempre(false), []); // eslint-disable-line react-hooks/exhaustive-deps
+  return null;
+}
+
 function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos = 0, nAprovacoes = 0, negs = [] }) {
   const { cfg } = useConfig();
   const com = useComunicacao();
@@ -4885,6 +4896,7 @@ export default function App() {
 
   return (
     <ComunicacaoProvider userId={userId}>
+    <LiberaValores />
     <div style={{ fontFamily: "'Segoe UI', sans-serif", background: "#f1f5f9", minHeight: "100vh", color: "#1e293b" }}>
       <SideMenu open={menuOpen} onClose={() => setMenuOpen(false)} current={view.type} nAvisos={nAvisosCriticos} nAprovacoes={nAprovacoes} negs={comercial.negs}
         onNav={(key) => navTo({ type: key })}
@@ -5027,9 +5039,10 @@ export default function App() {
                         onSalvar={handleSaveOrcamento} onExcluir={handleDeleteOrcamento}
                         onImprimir={id => navTo({ type: "orcamentoPrint", id })} />
                   : view.type === "comercial"
-                    ? <ComercialView negs={comercial.negs} semTabela={comercial.semTabela} conflitos={comercial.conflitos}
+                    ? <ComercialView negs={comercial.negs} semTabela={comercial.semTabela} conflitos={comercial.conflitos} excluidos={comercial.excluidos}
+                        onExcluir={comercial.excluir}
                         pasta={view.pasta || null} negId={view.id || null} obras={obrasTodas} orcamentos={orcamentos} atividadeVersao={atividadeVersao}
-                        onNavegar={p => navTo({ type: "comercial", ...p })}
+                        onNavegar={(p, substituir) => (substituir ? navReplace : navTo)({ type: "comercial", ...p })}
                         onSalvar={comercial.salvar} onCriar={comercial.criar} onRecarregar={comercial.recarregar}
                         onAtividade={registrarAtividade} onErro={showError} onAbrirObra={openObra}
                         onConverter={(neg, quem) => setConversao({ neg, quem })} />

@@ -94,6 +94,8 @@ supabase/
   migration_exclusao_obras.sql  `obras_excluidas` + RPC `obra_excluir_definitivo` (senha) — rodar separado, depois da ficha_obra.
   migration_comercial.sql    `negociacoes` (anti-DELETE), tipos `comercial_*` em `notificacoes` e RPC `notificar_comercial`
                              — rodar depois da de acessos. Acessos novos: `comercial`, `orcamentista`.
+  migration_comercial_excluir.sql  `negociacoes_excluidas` (imutável) + RPC `negociacao_excluir` (só master,
+                             só declinada) + trigger que não deixa reusar número excluído — rodar depois da comercial.
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF do orçamento.
   functions/whatsapp-notificar/  Edge Function que manda o aviso do 🔔 pelo WhatsApp (Evolution API v2).
   functions/analisar-documento/  Edge Function que lê um anexo (contrato, comprovante, NF, orçamento de fornecedor).
@@ -673,7 +675,7 @@ orçamento aprovado leva `aprovadoPor/Em`. Compras pede (um item ou o lote dos o
 notificação por pedido), o aprovador decide em ✅ Aprovações (`AprovacoesCompra.jsx`) ou dentro da obra,
 e Compras recebe o retorno. Quem pede e quem aprova é o **login** (`profiles`), não o nome digitado: aqui
 a identidade é o controle — exceção deliberada à regra do `autor`/`responsavel` digitado.
-Acessos (`ACESSOS` em `Comunicacao.jsx`: `aprova_compras`, `compras`) moram em `profiles.acessos`;
+Acessos (`ACESSOS` em `Comunicacao.jsx`: `aprova_compras`, `compras`, `ver_valores`, `comercial`, `orcamentista`) moram em `profiles.acessos`;
 só o master (`profiles.master`, marcado à mão no SQL — o e-mail não vai para o repositório) muda, na
 seção "Pessoas e acessos" de Configurações, que para ele abre sem a senha. Os destinatários quem
 escolhe é o banco (`notificar_compra`, pelo acesso), e "aprovada/recusada" só sai de quem tem
@@ -733,6 +735,11 @@ copia cada arquivo **dentro do Storage** (`path` é único em `obra_anexos`, nã
 a capa vai junto, o checklist marca pelas categorias, a obra grava `origemComercial` (selo "↩ veio de NEG-…")
 e a negociação vai para `convertida` com `conversao.obraId`. "Parada há N dias" sai de `etapaEm`; nada grava
 atraso. O valor exibido é o orçado, ou o estimado enquanto não há orçamento.
+Declinada pode ser **excluída de vez só pelo master** (🗑 na pasta Declinadas e na ficha): a RPC
+`negociacao_excluir` confere `is_master()` e a etapa, guarda a cópia em `negociacoes_excluidas` e libera o
+trigger anti-DELETE só para aquele id (mesmo desenho da exclusão de obra). Anexos e comentários ficam com o
+id antigo, por isso o número **nunca volta**: `proximoNumeroNeg` conta os excluídos e um trigger recusa INSERT
+de id já excluído.
 
 **Central de avisos é derivada.** `avisosDaObra` (avisos.js) deduz tudo dos dados — nada é gravado.
 Documentos vêm de `fetchResumoAnexos` (categoria dos anexos fora da lixeira) ou do checklist marcado.
@@ -762,7 +769,10 @@ O contador do menu e o chip "⚠ N pendências" do cabeçalho da obra usam a mes
   Está no bundle publicado; qualquer um lê no devtools. É uma tranca visual, não segurança: os
   valores chegam ao navegador do mesmo jeito. Todo R$ nasce oculto; a mesma senha libera o app
   inteiro (olho da barra do topo, olho do bloco, clique no valor ou a tela Financeiro) até
-  recarregar, sair ou clicar no olho de novo. Valor novo na tela passa por `<Dinheiro v={...} />`,
+  recarregar, sair ou clicar no olho de novo. Exceção: quem tem o acesso `ver_valores` ("Vê valores",
+  marcado pelo master em Pessoas e acessos) entra com tudo aberto — `LiberaValores` (App.jsx, dentro do
+  `ComunicacaoProvider`) chama `liberarSempre` do Sigilo; o olho oculta e reabre sem senha e não há
+  ocultação por inatividade para essa pessoa. Valor novo na tela passa por `<Dinheiro v={...} />`,
   campo de valor por `<Oculto>`; folha impressa **omite** o valor quando oculto, em vez de imprimir
   a máscara. O CSV de movimentos do estoque sai sem a coluna "Valor unit." quando oculto.
 - **`pdf.js` vem de CDN em runtime**, injetado por `useEffect` no `App`. Sem internet (ou com o

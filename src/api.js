@@ -759,6 +759,23 @@ export async function salvarNegociacao(n, versao) {
   return data[0].updated_at;
 }
 
+// Excluir de vez uma negociação declinada: só o master (migration_comercial_excluir.sql). A função
+// guarda a cópia em negociacoes_excluidas antes de apagar; anexos e comentários ficam.
+export async function excluirNegociacao(id) {
+  const { error } = await supabase.rpc("negociacao_excluir", { p_id: id });
+  if (error) {
+    if (/negociacao_excluir|schema cache|does not exist/i.test(error.message || ""))
+      throw new Error("Falta rodar a migration_comercial_excluir.sql no Supabase.");
+    throw error;
+  }
+}
+
+// Números já usados por negociações excluídas: o próximo NEG nunca reaproveita um deles. [] sem a migration.
+export async function fetchNumerosNegExcluidas() {
+  const linhas = await lerOpcional("negociacoes_excluidas", () => supabase.from("negociacoes_excluidas").select("id, neg_id").order("id"));
+  return linhas.map(r => r.neg_id);
+}
+
 // Aviso do comercial no 🔔. Quem recebe decide o banco (p_para ou pelo acesso). Sem R$ no texto.
 export async function notificarComercial({ tipo, negId, texto, dados, para = null }) {
   const { data, error } = await supabase.rpc("notificar_comercial", { p_tipo: tipo, p_neg_id: negId, p_texto: texto, p_dados: dados || null, p_para: para });
@@ -799,7 +816,7 @@ export async function fetchBackupCompleto() {
   };
   const obras = await tabela("obras");
   const nomes = ["equipes", "agenda", "cronogramas", "lembretes", "diarios", "obra_anexos", "obra_comentarios",
-    "obras_historico", "orcamentos", "negociacoes", "mensagens", "notificacoes", "estoque_itens", "estoque_documentos", "estoque_movimentos"];
+    "obras_historico", "orcamentos", "negociacoes", "negociacoes_excluidas", "mensagens", "notificacoes", "estoque_itens", "estoque_documentos", "estoque_movimentos"];
   const resto = await Promise.all(nomes.map(opcional));
   return { geradoEm: new Date().toISOString(), obras, ...Object.fromEntries(nomes.map((n, i) => [n, resto[i]])) };
 }

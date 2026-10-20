@@ -24,6 +24,7 @@ export const ACESSOS = [
   { id: "aprova_compras", rotulo: "Aprova compras", desc: "Recebe os pedidos de aprovação e é quem libera ou recusa o orçamento." },
   { id: "compras", rotulo: "Compras", desc: "Recebe o aviso quando uma compra é liberada ou recusada." },
   { id: "comercial", rotulo: "Comercial", desc: "Cria negociações, libera para orçamento, negocia, converte em obra ou declina. Recebe o aviso de orçamento pronto." },
+  { id: "ver_valores", rotulo: "Vê valores", desc: "Os valores em R$ já aparecem abertos, sem pedir a senha (financeiro, compras)." },
   { id: "orcamentista", rotulo: "Orçamentista", desc: "Recebe as negociações liberadas para orçamento e devolve o orçamento pronto." },
 ];
 

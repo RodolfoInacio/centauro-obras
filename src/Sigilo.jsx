@@ -7,16 +7,21 @@ import { useConfig } from "./Configuracoes";
 // senha — no olho da barra do topo, no olho de cada bloco ou clicando no próprio valor. Vale para
 // o app inteiro e dura até recarregar a página, sair ou clicar no olho de novo.
 // É tranca visual: a senha está no bundle e os valores chegam ao navegador do mesmo jeito.
+//
+// Quem tem o acesso "Vê valores" (Pessoas e acessos) entra com tudo aberto e o olho não pede senha:
+// o App chama `liberarSempre` depois de ler o perfil. Ocultar continua valendo (reunião com cliente),
+// e a ocultação automática por inatividade não se aplica a essa pessoa.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SENHA_FINANCEIRO = "00centauro00";
 export const MASCARA = "••••••";
 
-const SigiloCtx = createContext({ visivel: false, pedir: () => {}, ocultar: () => {}, desbloquear: () => false });
+const SigiloCtx = createContext({ visivel: false, pedir: () => {}, ocultar: () => {}, desbloquear: () => false, liberarSempre: () => {} });
 export const useSigilo = () => useContext(SigiloCtx);
 
 export function SigiloProvider({ children }) {
   const [visivel, setVisivel] = useState(false);
+  const [sempre, setSempre] = useState(false);
   const [pedindo, setPedindo] = useState(false);
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
@@ -25,14 +30,14 @@ export function SigiloProvider({ children }) {
   // Esconde de novo depois de N minutos sem mexer no app (⚙️ Configurações; 0 = nunca).
   useEffect(() => {
     const min = cfg.sigiloMinutos;
-    if (!visivel || !min) return;
+    if (!visivel || !min || sempre) return;
     let timer;
     const armar = () => { clearTimeout(timer); timer = setTimeout(() => setVisivel(false), min * 60000); };
     const eventos = ["mousemove", "mousedown", "keydown", "touchstart", "scroll"];
     eventos.forEach(ev => window.addEventListener(ev, armar, { passive: true }));
     armar();
     return () => { clearTimeout(timer); eventos.forEach(ev => window.removeEventListener(ev, armar)); };
-  }, [visivel, cfg.sigiloMinutos]);
+  }, [visivel, cfg.sigiloMinutos, sempre]);
 
   function desbloquear(senha) {
     if (senha !== SENHA_FINANCEIRO) return false;
@@ -43,7 +48,17 @@ export function SigiloProvider({ children }) {
     visivel,
     desbloquear,
     ocultar: () => setVisivel(false),
-    pedir: () => { setPw(""); setErr(""); setPedindo(true); },
+    pedir: () => {
+      if (sempre) { setVisivel(true); return; }
+      setPw(""); setErr(""); setPedindo(true);
+    },
+    // Ligar abre os valores na hora; desligar (logout, acesso tirado) volta a esconder.
+    liberarSempre: (sim) => {
+      setSempre(prev => {
+        if (prev !== !!sim) setVisivel(!!sim);
+        return !!sim;
+      });
+    },
   };
 
   return (
@@ -110,7 +125,7 @@ export function OlhoFinanceiro({ escuro = false, size = 18, rotulo = false }) {
   const cor = escuro ? "#e2e8f0" : "#64748b";
   return (
     <button type="button" onClick={e => { e.stopPropagation(); visivel ? ocultar() : pedir(); }}
-      title={visivel ? "Ocultar valores financeiros" : "Mostrar valores financeiros (pede senha)"}
+      title={visivel ? "Ocultar valores financeiros" : "Mostrar valores financeiros"}
       style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "transparent", color: cor, border: `1px solid ${escuro ? "#333" : "#e2e8f0"}`, borderRadius: 8, padding: rotulo ? "5px 10px" : 5, fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
       <IconeOlho aberto={visivel} size={size} />
       {rotulo && (visivel ? "Ocultar valores" : "Mostrar valores")}
