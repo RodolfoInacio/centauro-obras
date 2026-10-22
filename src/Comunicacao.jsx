@@ -5,6 +5,7 @@ import {
   fetchResumoMensagens, fetchMensagens, enviarMensagem, marcarConversaLida,
   linhaMensagem, chaveConversa, CONVERSA_GERAL,
 } from "./api";
+import { FIGURINHAS, Figurinha, figurinhaDoTexto, marcaFigurinha } from "./Figurinhas";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Comunicação entre as pessoas do sistema: @menção nos comentários da obra (🔔) e o chat
@@ -312,6 +313,120 @@ export function TextoMarcado({ texto, nomes }) {
     : parte);
 }
 
+// ─── SELETOR DE EMOJI ────────────────────────────────────────────────────────
+// Lista própria (sem lib): os emojis de uso comum no escritório, por categoria. O emoji é só
+// texto, então vai na mensagem como qualquer letra — mensagem antiga não muda nada.
+const EMOJIS = [
+  { id: "rostos", icone: "😊", nome: "Rostos", lista: "😀 😃 😄 😁 😆 😅 😂 🤣 😊 🙂 😉 😍 😘 😎 🤩 🥳 🤔 🤨 😐 😑 🙄 😏 😬 😮 😯 😲 😳 🥺 😢 😭 😤 😡 🤯 😱 😴 🤒 🤕 😷 🤗 🤭 🫡 😇 🤠".split(" ") },
+  { id: "gestos", icone: "👍", nome: "Gestos", lista: "👍 👎 👌 ✌️ 🤞 🤝 👏 🙌 🙏 💪 👋 🤙 👊 ✊ 🫶 ❤️ 🧡 💛 💚 💙 💜 🖤 💔 ✨ 🔥 💯 ✅ ❌ ⚠️ ❓ ❗ 💤".split(" ") },
+  { id: "obra", icone: "🏗️", nome: "Obra", lista: "🏗️ 🏠 🏢 🏬 🪟 🚪 🔨 🪛 🔧 🪚 📏 📐 🧰 🦺 ⛑️ 🪜 🧱 🔩 ⚙️ 🚚 🚛 📦 🧾 📄 📋 📎 ✏️ 📷 📞 📱 💻 🖨️".split(" ") },
+  { id: "tempo", icone: "☀️", nome: "Tempo e agenda", lista: "☀️ 🌤️ ⛅ ☁️ 🌧️ ⛈️ 🌩️ 💨 🌈 ❄️ 🌡️ ☔ 📅 🗓️ ⏰ ⏳ ⌛ 🕐 🚀 🐢 🎯 📌 📍 🔔".split(" ") },
+  { id: "comida", icone: "☕", nome: "Comida", lista: "☕ 🍵 🥤 🍺 🍻 🥂 🍕 🍔 🌭 🍟 🥪 🍝 🍖 🍗 🥩 🍰 🎂 🍫 🍩 🍪 🍎 🍌 🍉 🍇".split(" ") },
+  { id: "outros", icone: "🎉", nome: "Outros", lista: "🎉 🎊 🎁 🏆 🥇 ⚽ 💰 💵 💳 📈 📉 🔒 🔑 💡 🔋 🚗 ✈️ 🇧🇷 ⭐ 🌟 ✔️ ➕ ➖ ➡️".split(" ") },
+];
+const CHAVE_RECENTES = "chat.emojisRecentes";
+function lerRecentes() {
+  try { const l = JSON.parse(localStorage.getItem(CHAVE_RECENTES) || "[]"); return Array.isArray(l) ? l : []; } catch { return []; }
+}
+
+// Popup preso a um botão: fecha ao clicar fora ou no Esc.
+function usePopup() {
+  const [aberto, setAberto] = useState(false);
+  const caixaRef = useRef(null);
+  useEffect(() => {
+    if (!aberto) return;
+    const fora = (e) => { if (caixaRef.current && !caixaRef.current.contains(e.target)) setAberto(false); };
+    const esc = (e) => { if (e.key === "Escape") setAberto(false); };
+    document.addEventListener("mousedown", fora);
+    document.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", fora); document.removeEventListener("keydown", esc); };
+  }, [aberto]);
+  return { aberto, setAberto, caixaRef };
+}
+const estiloBotaoCampo = (aberto) => ({ background: aberto ? "#f1f5f9" : "#fff", border: "1px solid #e2e8f0", borderRadius: 8, width: 38, height: 38, fontSize: 18, cursor: "pointer", lineHeight: 1 });
+const estiloPopup = { position: "absolute", bottom: "100%", left: 0, marginBottom: 6, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 10, boxShadow: "0 8px 24px rgba(0,0,0,0.15)", zIndex: 40, overflow: "hidden" };
+
+export function BotaoEmoji({ onEscolher }) {
+  const { aberto, setAberto, caixaRef } = usePopup();
+  const [cat, setCat] = useState(() => lerRecentes().length ? "recentes" : "rostos");
+  const [recentes, setRecentes] = useState(lerRecentes);
+
+  function escolher(em) {
+    onEscolher(em);
+    const l = [em, ...recentes.filter(x => x !== em)].slice(0, 24);
+    setRecentes(l);
+    try { localStorage.setItem(CHAVE_RECENTES, JSON.stringify(l)); } catch { /* sem storage, só não lembra */ }
+  }
+
+  const abas = [...(recentes.length ? [{ id: "recentes", icone: "🕘", nome: "Recentes", lista: recentes }] : []), ...EMOJIS];
+  const atual = abas.find(a => a.id === cat) || abas[0];
+  return (
+    <div ref={caixaRef} style={{ position: "relative" }}>
+      {/* onMouseDown com preventDefault: o campo de texto não perde o foco nem a posição do cursor */}
+      <button type="button" title="Emoji" onMouseDown={e => e.preventDefault()} onClick={() => setAberto(a => !a)} style={estiloBotaoCampo(aberto)}>
+        😊
+      </button>
+      {aberto && (
+        <div style={{ ...estiloPopup, width: 300 }}>
+          <div style={{ display: "flex", borderBottom: "1px solid #e2e8f0", background: "#f8fafc" }}>
+            {abas.map(a => (
+              <button key={a.id} type="button" title={a.nome} onMouseDown={e => e.preventDefault()} onClick={() => setCat(a.id)}
+                style={{ flex: 1, background: "none", border: "none", borderBottom: `2px solid ${a.id === atual.id ? "#c9a227" : "transparent"}`, padding: "6px 0", fontSize: 16, cursor: "pointer" }}>
+                {a.icone}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: "#94a3b8", padding: "6px 10px 0" }}>{atual.nome}</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(8, 1fr)", padding: 6, maxHeight: 200, overflowY: "auto" }}>
+            {atual.lista.map(em => (
+              <button key={em} type="button" onMouseDown={e => e.preventDefault()} onClick={() => escolher(em)}
+                style={{ background: "none", border: "none", borderRadius: 6, fontSize: 20, padding: "4px 0", cursor: "pointer" }}
+                onMouseEnter={e => { e.currentTarget.style.background = "#f1f5f9"; }} onMouseLeave={e => { e.currentTarget.style.background = "none"; }}>
+                {em}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Figurinha sai na hora, como no WhatsApp: não mexe no que já estava digitado no campo.
+export function BotaoFigurinha({ onEnviar, desabilitado }) {
+  const { aberto, setAberto, caixaRef } = usePopup();
+  return (
+    <div ref={caixaRef} style={{ position: "relative" }}>
+      <button type="button" title="Figurinha" onMouseDown={e => e.preventDefault()} onClick={() => setAberto(a => !a)} style={estiloBotaoCampo(aberto)}>
+        🎴
+      </button>
+      {aberto && (
+        <div style={{ ...estiloPopup, width: 324 }}>
+          <div style={{ fontSize: 11, color: "#94a3b8", padding: "8px 10px 0" }}>Figurinhas — clique para enviar</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 4, padding: 8, maxHeight: 340, overflowY: "auto" }}>
+            {FIGURINHAS.map(f => (
+              <button key={f.id} type="button" title={f.texto} disabled={desabilitado} onMouseDown={e => e.preventDefault()}
+                onClick={() => { setAberto(false); onEnviar(marcaFigurinha(f.id)); }}
+                style={{ background: "none", border: "none", borderRadius: 8, padding: 3, cursor: desabilitado ? "wait" : "pointer" }}
+                onMouseEnter={e => { e.currentTarget.style.background = "#f1f5f9"; }} onMouseLeave={e => { e.currentTarget.style.background = "none"; }}>
+                <Figurinha fig={f} tamanho={66} />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Insere `ins` no lugar da seleção do campo e devolve o cursor logo depois dele.
+function inserirNoCursor(el, valor, ins, onChange) {
+  const ini = el ? el.selectionStart ?? valor.length : valor.length;
+  const fim = el ? el.selectionEnd ?? valor.length : valor.length;
+  onChange(valor.slice(0, ini) + ins + valor.slice(fim));
+  requestAnimationFrame(() => { if (el) { el.focus(); const p = ini + ins.length; el.setSelectionRange(p, p); } });
+}
+
 // ─── TELA: MENSAGENS ─────────────────────────────────────────────────────────
 export function ChatView({ conversa: conversaParam, onConversa, obras, onAbrirObra }) {
   const c = useComunicacao();
@@ -322,6 +437,7 @@ export function ChatView({ conversa: conversaParam, onConversa, obras, onAbrirOb
   const [enviando, setEnviando] = useState(false);
   const [busca, setBusca] = useState("");
   const fimRef = useRef(null);
+  const campoRef = useRef(null);
 
   const userId = c?.userId;
   const outros = (c?.pessoas || []).filter(p => p.id !== userId);
@@ -357,8 +473,10 @@ export function ChatView({ conversa: conversaParam, onConversa, obras, onAbrirOb
     );
   }
 
-  async function enviar() {
-    const t = texto.trim();
+  // Sem argumento envia o que está no campo; com argumento (figurinha), envia só ele e deixa o campo como está.
+  async function enviar(avulso) {
+    const doCampo = typeof avulso !== "string";
+    const t = doCampo ? texto.trim() : avulso;
     if (!t) return;
     // Conversa direta com a pessoa ainda não carregada: sem isso a mensagem cairia no Geral.
     if (conversa !== CONVERSA_GERAL && !pessoaDaConversa) { setErro("Pessoa não encontrada — escolha a conversa na lista."); return; }
@@ -366,7 +484,8 @@ export function ChatView({ conversa: conversaParam, onConversa, obras, onAbrirOb
     try {
       const nova = await enviarMensagem({ deId: userId, deNome: nomePessoa(c.eu), paraId: pessoaDaConversa?.id || null, texto: t });
       setMensagens(prev => prev && !prev.some(x => x.id === nova.id) ? [...prev, nova] : prev);
-      setTexto(""); setErro("");
+      if (doCampo) setTexto("");
+      setErro("");
       c.lerConversa(conversa);
       c.recarregar();
     } catch (err) {
@@ -442,6 +561,7 @@ export function ChatView({ conversa: conversaParam, onConversa, obras, onAbrirOb
               const agrupada = anterior && anterior.deId === m.deId && new Date(m.createdAt) - new Date(anterior.createdAt) < 5 * 60000;
               const autor = c.pessoas.find(p => p.id === m.deId);
               const nome = autor ? nomePessoa(autor) : (m.deNome || "—");
+              const fig = figurinhaDoTexto(m.texto);
               return (
                 <div key={m.id} style={{ display: "flex", gap: 8, flexDirection: minha ? "row-reverse" : "row", marginTop: agrupada ? -6 : 0 }}>
                   <div style={{ width: 28, flexShrink: 0 }}>{!minha && !agrupada && <Avatar nome={nome} />}</div>
@@ -451,6 +571,7 @@ export function ChatView({ conversa: conversaParam, onConversa, obras, onAbrirOb
                         {!minha && <b style={{ color: "#1e293b" }}>{nome} </b>}{fmtQuando(m.createdAt)}
                       </div>
                     )}
+                    {fig ? <Figurinha fig={fig} /> : (
                     <div style={{ fontSize: 13, background: minha ? "#1a1a1a" : "#fff", color: minha ? "#fff" : "#1e293b", border: minha ? "none" : "1px solid #e2e8f0", borderRadius: 12, padding: "7px 11px", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                       <TextoMarcado texto={m.texto} nomes={nomesMarcaveis} />
                       {m.obraId && (
@@ -459,6 +580,7 @@ export function ChatView({ conversa: conversaParam, onConversa, obras, onAbrirOb
                         </button>
                       )}
                     </div>
+                    )}
                   </div>
                 </div>
               );
@@ -467,13 +589,15 @@ export function ChatView({ conversa: conversaParam, onConversa, obras, onAbrirOb
           </div>
           <div style={{ padding: 12, borderTop: "1px solid #e2e8f0" }}>
             <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+              <BotaoEmoji onEscolher={em => { inserirNoCursor(campoRef.current, texto, em, setTexto); if (erro) setErro(""); }} />
+              <BotaoFigurinha onEnviar={enviar} desabilitado={enviando} />
               <div style={{ flex: 1 }}>
-                <textarea rows={2} value={texto} placeholder={`Mensagem para ${pessoaDaConversa ? nomePessoa(pessoaDaConversa) : "todos"}… (Enter envia, Shift+Enter quebra linha)`}
+                <textarea ref={campoRef} rows={2} value={texto} placeholder={`Mensagem para ${pessoaDaConversa ? nomePessoa(pessoaDaConversa) : "todos"}… (Enter envia, Shift+Enter quebra linha)`}
                   onChange={e => { setTexto(e.target.value); if (erro) setErro(""); }}
                   onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); enviar(); } }}
                   style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 10px", fontSize: 13, resize: "none", boxSizing: "border-box", fontFamily: "inherit" }} />
               </div>
-              <button onClick={enviar} disabled={enviando || !texto.trim()}
+              <button onClick={() => enviar()} disabled={enviando || !texto.trim()}
                 style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", fontWeight: 700, fontSize: 13, cursor: enviando ? "wait" : "pointer", opacity: texto.trim() ? 1 : 0.5 }}>
                 {enviando ? "…" : "Enviar"}
               </button>

@@ -62,7 +62,9 @@ src/
   LeituraIA.jsx    "✨ Ler com IA" de um anexo: chama a function e mostra a conferência antes de aplicar.
   ComentariosObra.jsx  Coluna de comentários e atividade da obra + autor lembrado no navegador + @menção.
   Comunicacao.jsx  Pessoas (profiles), 🔔 notificações de @menção, ✉️ chat (Geral + conversa direta),
-                   provider com Realtime, campo de texto com @ e a tela de Mensagens.
+                   provider com Realtime, campo de texto com @ e a tela de Mensagens (com seletor de emoji).
+  Figurinhas.jsx   Pacote fixo de figurinhas do chat (SVG): vão como o texto "[fig:<id>]" e a bolha desenha.
+                   Nunca reaproveitar um id para outro desenho — as mensagens já enviadas mudariam.
   OrcamentoLivre.jsx  🧾 Orçamentos livres (fora do Wvetro): modelo, lista, editor, cálculo por vãos e a folha A4 com a marca.
   AprovacoesCompra.jsx  ✅ Aprovações de compra: os pedidos de todas as obras, orçamentos lado a lado, aprovar/recusar.
   ArquivoObras.jsx Arquivar → Excluídas → exclusão definitiva: modelo (`obra.arquivo`), botões da obra e as duas pastas.
