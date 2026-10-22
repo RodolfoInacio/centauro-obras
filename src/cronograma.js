@@ -56,12 +56,15 @@ function intervalosDia(config) {
   return [[eS, eE]];
 }
 export function ehDiaUtil(date, config) { return normConfig(config).diasUteis.includes(date.getDay()); }
+// Versão interna, para os laços de dia/minuto: `cfg` já vem normalizado, e refazer o normConfig
+// (um spread de objeto) a cada dia testado era boa parte do custo do agendamento.
+const diaUtil = (date, cfg) => cfg.diasUteis.includes(date.getDay());
 
 function proximoInstanteUtil(d, config) {
   let cur = new Date(d);
   const ints = intervalosDia(config);
   for (let g = 0; g < 3660; g++) {
-    if (ehDiaUtil(cur, config)) {
+    if (diaUtil(cur, config)) {
       const cm = cur.getHours() * 60 + cur.getMinutes();
       for (const [s, e] of ints) {
         if (cm < s) return atMinutes(cur, s);
@@ -102,7 +105,7 @@ function minutosUteisEntre(a, b, config) {
   const end = new Date(b.getFullYear(), b.getMonth(), b.getDate());
   let guard = 0;
   while (cur <= end && guard++ < 4000) {
-    if (ehDiaUtil(cur, config)) {
+    if (diaUtil(cur, config)) {
       for (const [s, e] of ints) {
         const iniInt = atMinutes(cur, s), fimInt = atMinutes(cur, e);
         const lo = a > iniInt ? a : iniInt;
@@ -256,27 +259,52 @@ export function distribuirPercent(tasks, i, alvo, config) {
   return mapa;
 }
 
+// Cache do agendamento, por array de tarefas: toda edição cria um array novo, então o cronograma
+// que não mudou devolve o resultado anterior. Sem isso cada tecla no editor reagendava todos os
+// cronogramas do macro. Quem recebe o resultado não pode mutá-lo (ninguém muta hoje).
+const cacheAgenda = new WeakMap();
+
 // Retorna { [taskId]: { inicio, termino, percent, durDias, isSummary } }
 export function agendar(tasks, config) {
   const cfg = normConfig(config);
+  // Sem data base o projeto parte de hoje, então o dia entra na chave.
+  const chave = JSON.stringify([cfg.dataBase || dayKey(new Date()), cfg.expediente, cfg.almoco, cfg.horasDia]);
+  const salvo = cacheAgenda.get(tasks);
+  if (salvo && salvo.chave === chave) return salvo.out;
+  const out = agendarSemCache(tasks, cfg);
+  cacheAgenda.set(tasks, { chave, out });
+  return out;
+}
+
+function agendarSemCache(tasks, cfg) {
   const raw = cfg.dataBase
     ? (cfg.dataBase.includes("T") ? cfg.dataBase : cfg.dataBase + "T" + cfg.expediente[0])
     : dayKey(new Date()) + "T" + cfg.expediente[0];
   const base = proximoInstanteUtil(parseDT(raw), cfg);
   const summary = tasks.map((_, i) => ehResumo(tasks, i));
+  const preds = tasks.map(t => normPredecessoras(t.predecessoras));
+  const fixos = tasks.map(t => inicioEstaFixo(t));
   const sched = {};
 
+  // Cada passada propaga as datas pelas predecessoras; quando uma passada não muda nada, as
+  // seguintes dariam o mesmo resultado, então para ali. O teto de passadas só pesa em ciclo.
   const passes = tasks.length + 5;
   for (let p = 0; p < passes; p++) {
+    let mudou = false;
+    const grava = (id, inicio, termino) => {
+      const s = sched[id];
+      if (!s || s.inicio?.getTime() !== inicio?.getTime() || s.termino?.getTime() !== termino?.getTime()) mudou = true;
+      sched[id] = { inicio, termino };
+    };
     for (let i = 0; i < tasks.length; i++) {
       if (summary[i]) continue;
       const t = tasks[i];
       let inicio;
-      if (inicioEstaFixo(t)) inicio = parseDT(t.inicioManual);
+      if (fixos[i]) inicio = parseDT(t.inicioManual);
       else {
         // Várias predecessoras: começa depois da mais tardia. II conta o início dela, TI o término.
         let latest = null;
-        for (const p of normPredecessoras(t.predecessoras)) {
+        for (const p of preds[i]) {
           const s = sched[p.id];
           if (!s) continue;
           const marco = p.tipo === "II" ? s.inicio : s.termino;
@@ -287,17 +315,18 @@ export function agendar(tasks, config) {
       inicio = proximoInstanteUtil(inicio, cfg);
       const horas = duracaoParaHoras(t, cfg);
       const termino = horas > 0 ? addMinutosUteis(inicio, horas * 60, cfg) : inicio;
-      sched[t.id] = { inicio, termino };
+      grava(t.id, inicio, termino);
     }
     // resumos (de baixo p/ cima, para resumos aninhados)
     for (let i = tasks.length - 1; i >= 0; i--) {
       if (!summary[i]) continue;
       const kids = filhosIdx(tasks, i).map(j => tasks[j].id).map(id => sched[id]).filter(Boolean);
-      if (!kids.length) { sched[tasks[i].id] = { inicio: new Date(base), termino: new Date(base) }; continue; }
+      if (!kids.length) { grava(tasks[i].id, new Date(base), new Date(base)); continue; }
       let mn = null, mx = null;
       for (const s of kids) { if (!mn || s.inicio < mn) mn = s.inicio; if (!mx || s.termino > mx) mx = s.termino; }
-      sched[tasks[i].id] = { inicio: mn, termino: mx };
+      grava(tasks[i].id, mn, mx);
     }
+    if (!mudou) break;
   }
 
   const out = {};

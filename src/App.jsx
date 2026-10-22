@@ -1,4 +1,4 @@
-import { Fragment, useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { Fragment, useState, useEffect, useRef, useCallback, useMemo, useDeferredValue } from "react";
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
@@ -3514,6 +3514,13 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
   const sched = agendar(c.tasks, cfg);
   const agora = new Date();
   const equipesEscolha = equipes.filter(e => !e.arquivada);
+  const equipePorId = Object.fromEntries(equipes.map(e => [e.id, e]));
+  // Situação de cada folha, calculada uma vez: a coluna Situação e a cor da barra leem daqui.
+  const situacao = {};
+  for (const t of c.tasks) {
+    const sc = sched[t.id];
+    if (sc && !sc.isSummary) situacao[t.id] = situacaoTarefa(t.percent, sc.inicio, sc.termino, agora, cfg);
+  }
 
   // faixa da timeline
   let tStart = null, tEnd = null;
@@ -3747,7 +3754,7 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
                 </div>
                 <div style={{ width: COL.sit, textAlign: "center" }}>
                   {(() => {
-                    const k = sc.isSummary ? null : situacaoTarefa(t.percent, sc.inicio, sc.termino, agora, cfg);
+                    const k = situacao[t.id];
                     if (!k) return null;
                     const r = SITUACAO_ROTULO[k];
                     const esperado = percentEsperadoEm(sc.inicio, sc.termino, agora, cfg);
@@ -3832,9 +3839,9 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
                   </div>
                 );
               }
-              const atrasada = situacaoTarefa(t.percent, sc.inicio, sc.termino, agora, cfg) === "atrasada";
+              const atrasada = situacao[t.id] === "atrasada";
               const cor = atrasada ? ["#fecaca", "#dc2626"] : ["#5eead4", "#0d9488"];
-              const eq = t.equipeId ? equipes.find(e => e.id === t.equipeId) : null;
+              const eq = t.equipeId ? equipePorId[t.equipeId] : null;
               return (
                 <div key={t.id} title={`${t.nome}\n${fmtDataHora(sc.inicio)} → ${fmtDataHora(sc.termino)}${eq ? `\nEquipe: ${eq.nome}` : ""}${atrasada ? "\nAtrasada" : ""}`}
                   style={{ position: "absolute", left: x, top: y + CR_ROW_H / 2 - 6, width: w, height: 12, background: cor[0], border: `1px solid ${cor[1]}`, borderLeft: `${eq ? 4 : 1}px solid ${eq?.cor || cor[1]}`, borderRadius: 2, overflow: "hidden" }}>
@@ -4654,14 +4661,18 @@ export default function App() {
 
   // Agenda obra × obra uma vez só: alimenta a tela macro e o início herdado do editor de cada obra.
   // Cronograma de obra arquivada/excluída sai do macro (e do planejado), como a própria obra.
+  // Os derivados de todos os cronogramas (macro, calendário planejado, avisos) andam um passo atrás
+  // da digitação: o editor usa o `cronogramas` imediato e o resto recalcula em segundo plano, sem
+  // travar a tecla. O `agendar` tem cache por cronograma, então só o editado é reagendado.
+  const cronogramasAdiados = useDeferredValue(cronogramas);
   const cronogramasAtivos = useMemo(() => {
     const inativas = new Set(obrasTodas.filter(o => !obraAtiva(o)).map(o => o.id));
-    return inativas.size ? cronogramas.filter(c => !inativas.has(c.obraId)) : cronogramas;
-  }, [cronogramas, obrasTodas]);
+    return inativas.size ? cronogramasAdiados.filter(c => !inativas.has(c.obraId)) : cronogramasAdiados;
+  }, [cronogramasAdiados, obrasTodas]);
   const macro = useMemo(() => agendarMacro(cronogramasAtivos), [cronogramasAtivos]);
   // O Calendário mostra a agenda manual + os dias das tarefas com equipe no cronograma (derivados,
   // nunca gravados). Ajustar um dia planejado no calendário grava uma linha real com a `origem`.
-  const planejados = useMemo(() => servicosPlanejados(cronogramas, macro, obras), [cronogramas, macro, obras]);
+  const planejados = useMemo(() => servicosPlanejados(cronogramasAdiados, macro, obras), [cronogramasAdiados, macro, obras]);
   planejadosRef.current = planejados;
   const agendaEf = useMemo(() => agendaEfetiva(agenda, planejados), [agenda, planejados]);
   const choques = useMemo(() => conflitosAgenda(agendaEf), [agendaEf]);
@@ -4682,8 +4693,8 @@ export default function App() {
     return out;
   }, [choques, agendaEf, equipes, obras]);
   // Contador do menu: obras abertas com algum aviso crítico (sem os anexos, que a central lê à parte).
-  const ctxAvisos = useMemo(() => ({ agenda: agendaEf, cronogramas, macro, conflitos: choques, diarios, hoje: hoje() }),
-    [agendaEf, cronogramas, macro, choques, diarios]);
+  const ctxAvisos = useMemo(() => ({ agenda: agendaEf, cronogramas: cronogramasAdiados, macro, conflitos: choques, diarios, hoje: hoje() }),
+    [agendaEf, cronogramasAdiados, macro, choques, diarios]);
   const nAprovacoes = useMemo(() => contarAguardando(obras), [obras]);
   // O 🔔 rotula pelo id da obra; aviso do Comercial (e @menção na ficha da negociação) traz o NEG-….
   const obrasENegs = useMemo(() => [...obras, ...comercial.negs.map(n => ({ id: n.id, numero: n.numero, cliente: n.cliente }))], [obras, comercial.negs]);
