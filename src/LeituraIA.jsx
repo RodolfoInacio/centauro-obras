@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useState } from "react";
 import Modal from "./Modal";
-import { lerDocumentoComIA, mudarCategoriaAnexo } from "./api";
+import { lerDocumentoComIA, mudarCategoriaAnexo, lancarBaixaFin, fetchFinanceiroObra } from "./api";
+import { useComunicacao } from "./Comunicacao";
+import { situacaoContrato, camposEspelho, hojeLocal } from "./recebimentos";
 import { normCadastro } from "./CadastroObra";
 import { CATEGORIAS_COMPRA, CATEGORIA_LABEL, normCompras, lancarDocumentoCompra } from "./ComprasObra";
 import { useSigilo, Dinheiro } from "./Sigilo";
@@ -128,6 +130,11 @@ function TravaValor() {
 
 export default function LeituraIA({ obra, anexo, onFechar, onAplicar }) {
   const { visivel } = useSigilo();
+  const com = useComunicacao();
+  // Recebido agora é do Financeiro: o comprovante vira uma baixa, e só com o financeiro do
+  // contrato gerado e o acesso "financeiro". O valor do contrato também é dele.
+  const temFin = !!obra.financeiroResumo;
+  const podeFin = !!(com?.temAcesso?.("financeiro") || com?.eu?.master);
   const jaLido = normDocumentosLidos(obra.documentosLidos)[anexo.id];
   const [fase, setFase] = useState("lendo"); // lendo | erro | pronto
   const [erro, setErro] = useState("");
@@ -191,10 +198,11 @@ export default function LeituraIA({ obra, anexo, onFechar, onAplicar }) {
   const camposContrato = tipo !== "contrato" ? [] : CAMPOS_CONTRATO.filter(c => {
     const l = ed.contrato[c.id], atual = atualContrato(obra, c);
     if (!l.marcado || vazio(l.valor, c.tipo)) return false;
+    if (c.id === "valorTotal" && temFin) return false;
     if (c.tipo === "valor" && !visivel) return false;
     return c.tipo === "acrescenta" || String(atual ?? "") !== String(l.valor);
   });
-  const pagamentoOk = tipo === "comprovante" && visivel && ed.pagamento.marcado && ed.pagamento.valor > 0;
+  const pagamentoOk = tipo === "comprovante" && visivel && temFin && podeFin && ed.pagamento.marcado && ed.pagamento.valor > 0;
   const compraOk = ehCompra && visivel && ed.compra.marcado && !!ed.compra.categoria && !!ed.compra.fornecedor.trim()
     && (!!ed.compra.itemId || !!ed.compra.especificacao.trim());
   const algo = camposContrato.length > 0 || pagamentoOk || compraOk;
@@ -219,10 +227,23 @@ export default function LeituraIA({ obra, anexo, onFechar, onAplicar }) {
       nova.cadastro = cad;
       atividade = `Leitura com IA do contrato ${nome} preencheu: ${camposContrato.map(c => c.rotulo).join(", ")}`;
     } else if (tipo === "comprovante") {
-      // Arredonda em centavos: 0,1 + 0,2 somados várias vezes viram 0,30000000000000004.
-      nova.valorRecebido = Math.round(((Number(obra.valorRecebido) || 0) + ed.pagamento.valor) * 100) / 100;
+      // Vira uma baixa sem parcela (abate na ordem de vencimento) com este anexo ligado, e a obra
+      // recebe o espelho já com ela.
+      try {
+        await lancarBaixaFin({
+          obraId: obra.id, dia: ed.pagamento.data || hojeLocal(), principal: Math.round(ed.pagamento.valor * 100) / 100,
+          forma: (doc.pagamento?.forma || "").toUpperCase(), anexos: [anexo.id],
+          obs: `LIDO PELA IA DO COMPROVANTE ${anexo.nome}`.toUpperCase(), lancadoPor: com?.eu?.nome || "",
+        });
+        const f = await fetchFinanceiroObra(obra.id);
+        if (f.contrato) nova = { ...nova, ...camposEspelho(situacaoContrato(f.contrato, f.baixas)) };
+      } catch (err) {
+        alert("O recebimento não foi lançado: " + err.message);
+        setAplicando(false);
+        return;
+      }
       // Sem o valor no texto: a coluna de comentários aparece com os valores ocultos.
-      atividade = `Leitura com IA do comprovante ${nome}: pagamento${ed.pagamento.data ? " de " + fmtData(ed.pagamento.data) : ""} somado ao Recebido`;
+      atividade = `Leitura com IA do comprovante ${nome}: recebimento${ed.pagamento.data ? " de " + fmtData(ed.pagamento.data) : ""} lançado no Financeiro`;
     } else if (ehCompra) {
       const ehNF = tipo === "nota_fiscal";
       const { compras: c, finalizouOrcamento } = lancarDocumentoCompra(obra.compras, {
@@ -306,9 +327,15 @@ export default function LeituraIA({ obra, anexo, onFechar, onAplicar }) {
         {tipo === "comprovante" && (
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
             <label style={{ gridColumn: "1 / -1", display: "flex", gap: 8, alignItems: "center", fontSize: 13, fontWeight: 700, color: "#334155" }}>
-              <input type="checkbox" checked={ed.pagamento.marcado && visivel} disabled={!visivel} onChange={e => setPagamento({ marcado: e.target.checked })} />
-              Somar este pagamento ao Recebido da obra
+              <input type="checkbox" checked={ed.pagamento.marcado && visivel && temFin && podeFin} disabled={!visivel || !temFin || !podeFin} onChange={e => setPagamento({ marcado: e.target.checked })} />
+              Lançar como recebimento no Financeiro (com este comprovante anexado)
             </label>
+            {(!temFin || !podeFin) && (
+              <div style={{ gridColumn: "1 / -1", background: "#fffbeb", border: "1px solid #fde68a", color: "#92400e", borderRadius: 8, padding: "8px 10px", fontSize: 12.5 }}>
+                {!temFin ? "Gere o financeiro do contrato desta obra (tela Financeiro) antes de lançar recebimentos."
+                  : "Só quem tem o acesso Financeiro lança recebimentos. Avise o financeiro — o comprovante fica nos anexos."}
+              </div>
+            )}
             <div>
               <span style={lbl}>Valor pago</span>
               {visivel ? <CampoValor value={ed.pagamento.valor} onChange={v => setPagamento({ valor: v })} /> : <TravaValor />}

@@ -9,6 +9,7 @@ import { pendenciasCompras, comprasTotais } from "./ComprasObra";
 import { contagemMedicao } from "./MedicaoItem";
 import { obraComTrava, liberacaoEtapa } from "./regrasEtapas";
 import { avisosPlanejamento } from "./planejamento";
+import { vencidoDoResumo } from "./recebimentos";
 
 export const AREAS = [
   { k: "itens", rotulo: "Itens", secao: "itens" },
@@ -17,6 +18,7 @@ export const AREAS = [
   { k: "prazos", rotulo: "Prazos", secao: null },
   { k: "orcar", rotulo: "Orçar", secao: "compras" },
   { k: "comprar", rotulo: "Comprar", secao: "compras" },
+  { k: "financeiro", rotulo: "Financeiro", secao: "financeiro" },
   { k: "medicao", rotulo: "Medição", secao: "itens" },
   { k: "producao", rotulo: "Produção", secao: "itens" },
   { k: "agenda", rotulo: "Agenda", secao: null },
@@ -78,6 +80,14 @@ export function avisosDaObra(obra, ctx = {}) {
   if (aComprar > aReceber) add("comprar", "erro", "🚩 A comprar maior que o saldo a receber");
   const conferido = obra.compras && obra.compras.conferido && obra.compras.conferido.em;
   if (!conferido && (gasto > 0 || pend.some(p => p.nivel === "comprar"))) add("comprar", "atencao", "Compra sem conferência dos itens");
+
+  // Financeiro: lê o espelho que a tela Financeiro grava na obra. Sem R$ no texto.
+  const rf = obra.financeiroResumo;
+  if (!rf) add("financeiro", "info", "Financeiro do contrato não gerado");
+  else {
+    const v = vencidoDoResumo(rf, hoje);
+    if (v.qtd) add("financeiro", "erro", `${v.qtd} parcela(s) vencida(s) sem baixa`);
+  }
 
   // Medição: obrigatória na obra nova (trava); na antiga, só informativa.
   if (itens.length) {

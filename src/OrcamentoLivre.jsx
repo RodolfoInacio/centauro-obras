@@ -443,7 +443,7 @@ function EditorOrcamento({ orc, orcamentos, obras, onSalvar, onExcluir, onImprim
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
         <Bloco titulo="Cliente">
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <div data-caixa-alta style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
             <Campo rotulo="Vincular a uma obra (opcional)" largo>
               <select value={orc.obraId} onChange={e => vincularObra(e.target.value)} style={inp}>
                 <option value="">— sem vínculo —</option>
@@ -454,7 +454,7 @@ function EditorOrcamento({ orc, orcamentos, obras, onSalvar, onExcluir, onImprim
             <Campo rotulo="CPF / CNPJ"><input value={orc.cliente.documento} onChange={e => setCliente("documento", e.target.value)} style={inp} /></Campo>
             <Campo rotulo="Telefone"><input value={orc.cliente.telefone} onChange={e => setCliente("telefone", e.target.value)} style={inp} /></Campo>
             <Campo rotulo="Contato"><input value={orc.cliente.contato} onChange={e => setCliente("contato", e.target.value)} style={inp} /></Campo>
-            <Campo rotulo="E-mail"><input value={orc.cliente.email} onChange={e => setCliente("email", e.target.value)} style={inp} /></Campo>
+            <Campo rotulo="E-mail"><input data-livre value={orc.cliente.email} onChange={e => setCliente("email", e.target.value)} style={inp} /></Campo>
             <Campo rotulo="Endereço"><input value={orc.cliente.endereco} onChange={e => setCliente("endereco", e.target.value)} style={inp} /></Campo>
             <Campo rotulo="Cidade / UF"><input value={orc.cliente.cidade} onChange={e => setCliente("cidade", e.target.value)} style={inp} /></Campo>
           </div>

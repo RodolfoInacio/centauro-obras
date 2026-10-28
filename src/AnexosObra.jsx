@@ -15,6 +15,7 @@ export const CATEGORIAS_ANEXO = [
   { id: "contrato", rotulo: "Contrato", icone: "📝" },
   { id: "orcamento", rotulo: "Orçamento", icone: "📄" },
   { id: "comprovante", rotulo: "Comprovante", icone: "🧾" },
+  { id: "nota_fiscal", rotulo: "Nota fiscal", icone: "🧮" },
   { id: "projeto", rotulo: "Projeto", icone: "📐" },
   { id: "foto", rotulo: "Foto", icone: "📷" },
   { id: "outro", rotulo: "Outro", icone: "📎" },

@@ -806,6 +806,97 @@ export async function copiarAnexos(deId, paraId) {
   return { anexos, mapa };
 }
 
+// ─── FINANCEIRO (migration_financeiro.sql) ────────────────────────────────────
+// fin_contratos: o contrato financeiro de cada obra (jsonb + trava de versão, como a obra).
+// fin_baixas: os recebimentos, imutáveis — errou, estorna. Só quem tem o acesso "financeiro"
+// grava (RLS); a tela só esconde os botões.
+
+// null = tabela ainda não existe (a tela mostra o aviso da migration).
+export async function fetchFinanceiro() {
+  try {
+    const [contratos, baixas] = await Promise.all([
+      todasAsLinhas(() => supabase.from("fin_contratos").select("obra_id, data, updated_at").order("obra_id")),
+      todasAsLinhas(() => supabase.from("fin_baixas").select("*").order("created_at").order("id")),
+    ]);
+    return {
+      contratos: Object.fromEntries(contratos.map(r => [r.obra_id, { contrato: r.data, versao: r.updated_at }])),
+      baixas: baixas.map(baixaFin),
+    };
+  } catch (error) {
+    if (tabelaAusente(error)) { console.warn("fetchFinanceiro:", error.message); return null; }
+    throw error;
+  }
+}
+
+// Uma obra só (espelho depois de um lançamento feito fora da tela Financeiro, ex.: Ler com IA).
+export async function fetchFinanceiroObra(obraId) {
+  const [c, b] = await Promise.all([
+    supabase.from("fin_contratos").select("data, updated_at").eq("obra_id", obraId).maybeSingle(),
+    supabase.from("fin_baixas").select("*").eq("obra_id", obraId).order("created_at").order("id"),
+  ]);
+  if (c.error) throw c.error;
+  if (b.error) throw b.error;
+  return { contrato: c.data?.data || null, versao: c.data?.updated_at || null, baixas: (b.data || []).map(baixaFin) };
+}
+
+function baixaFin(r) {
+  return {
+    id: r.id, obraId: r.obra_id, parcelaId: r.parcela_id || null, tipo: r.tipo, dia: r.dia,
+    principal: Number(r.principal) || 0, juros: Number(r.juros) || 0, multa: Number(r.multa) || 0,
+    desconto: Number(r.desconto) || 0, forma: r.forma || "", nfNumero: r.nf_numero || "", obs: r.obs || "",
+    anexos: r.anexos || [], estornoDe: r.estorno_de || null, lancadoPor: r.lancado_por || "",
+    lancadoPorId: r.lancado_por_id || null, createdAt: r.created_at,
+  };
+}
+
+// versao null = contrato novo (INSERT). Devolve a versão nova.
+export async function salvarContratoFin(obraId, contrato, versao) {
+  if (!versao) {
+    const { data, error } = await supabase.from("fin_contratos").insert({ obra_id: obraId, data: contrato }).select("updated_at");
+    if (error) {
+      if (error.code === "23505") {
+        const err = new Error("O financeiro desta obra já foi gerado em outro lugar — recarregue.");
+        err.conflito = true;
+        throw err;
+      }
+      if (error.code === "42501") throw new Error("Sem permissão: só quem tem o acesso Financeiro grava.");
+      throw error;
+    }
+    return data[0].updated_at;
+  }
+  const { data, error } = await supabase.from("fin_contratos").update({ data: contrato })
+    .eq("obra_id", obraId).eq("updated_at", versao).select("updated_at");
+  if (error) throw error;
+  if (!data || data.length === 0) {
+    const err = new Error("O contrato foi alterado em outro lugar (ou você não tem o acesso Financeiro). Recarregue.");
+    err.conflito = true;
+    throw err;
+  }
+  return data[0].updated_at;
+}
+
+export async function lancarBaixaFin(b) {
+  const { data, error } = await supabase.from("fin_baixas").insert({
+    obra_id: b.obraId, parcela_id: b.parcelaId || null, tipo: b.tipo || "baixa", dia: b.dia,
+    principal: b.principal || 0, juros: b.juros || 0, multa: b.multa || 0, desconto: b.desconto || 0,
+    forma: b.forma || null, nf_numero: b.nfNumero || null, obs: b.obs || null, anexos: b.anexos || [],
+    estorno_de: b.estornoDe || null, lancado_por: b.lancadoPor || null,
+  }).select("*").single();
+  if (error) {
+    if (error.code === "42501") throw new Error("Sem permissão: só quem tem o acesso Financeiro lança.");
+    if (error.code === "23505") throw new Error("Esta baixa já foi estornada.");
+    throw error;
+  }
+  return baixaFin(data);
+}
+
+export async function anexarNaBaixaFin(id, anexos) {
+  const { data, error } = await supabase.from("fin_baixas").update({ anexos }).eq("id", id).select("*");
+  if (error) throw error;
+  if (!data || data.length === 0) throw new Error("O anexo não foi ligado à baixa — sem permissão.");
+  return baixaFin(data[0]);
+}
+
 // ─── BACKUP COMPLETO (botão "Exportar dados") ────────────────────────────────
 // Todas as tabelas, paginadas. Obras é obrigatória; o resto vira null se a tabela não existir.
 // Os arquivos em si (anexos, fotos, desenhos) ficam no Storage e não entram aqui.
@@ -818,7 +909,10 @@ export async function fetchBackupCompleto() {
   const nomes = ["equipes", "agenda", "cronogramas", "lembretes", "diarios", "obra_anexos", "obra_comentarios",
     "obras_historico", "orcamentos", "negociacoes", "negociacoes_excluidas", "mensagens", "notificacoes", "estoque_itens", "estoque_documentos", "estoque_movimentos"];
   const resto = await Promise.all(nomes.map(opcional));
-  return { geradoEm: new Date().toISOString(), obras, ...Object.fromEntries(nomes.map((n, i) => [n, resto[i]])) };
+  const finContratos = await todasAsLinhas(() => supabase.from("fin_contratos").select("*").order("obra_id"))
+    .catch(err => { console.warn("backup fin_contratos:", err.message); return null; });
+  const finBaixas = await opcional("fin_baixas");
+  return { geradoEm: new Date().toISOString(), obras, ...Object.fromEntries(nomes.map((n, i) => [n, resto[i]])), fin_contratos: finContratos, fin_baixas: finBaixas };
 }
 
 // Para o CSV: o livro inteiro, na ordem em que foi lançado.

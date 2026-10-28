@@ -618,7 +618,7 @@ function ItemForm({ item, onSalvar, onFechar }) {
   const campo = { marginBottom: 12 };
   return (
     <Modal open title={novo ? "Novo item de estoque" : `Editar ${item.codigo}`} onClose={salvando ? undefined : onFechar} width={520}>
-      <form onSubmit={salvar}>
+      <form onSubmit={salvar} data-caixa-alta>
         <div style={campo}>
           <label style={rotulo}>Nome *</label>
           <input autoFocus value={f.nome} onChange={e => set("nome", e.target.value)} style={inp}
@@ -633,7 +633,7 @@ function ItemForm({ item, onSalvar, onFechar }) {
           </div>
           <div>
             <label style={rotulo}>Unidade</label>
-            <input value={f.unidade} onChange={e => set("unidade", e.target.value)} list="estoque-unidades" style={inp} />
+            <input data-livre value={f.unidade} onChange={e => set("unidade", e.target.value)} list="estoque-unidades" style={inp} />
             <datalist id="estoque-unidades">{UNIDADES.map(u => <option key={u} value={u} />)}</datalist>
           </div>
           <div>

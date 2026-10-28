@@ -67,6 +67,12 @@ src/
                    Nunca reaproveitar um id para outro desenho — as mensagens já enviadas mudariam.
   OrcamentoLivre.jsx  🧾 Orçamentos livres (fora do Wvetro): modelo, lista, editor, cálculo por vãos e a folha A4 com a marca.
   AprovacoesCompra.jsx  ✅ Aprovações de compra: os pedidos de todas as obras, orçamentos lado a lado, aprovar/recusar.
+  Financeiro.jsx   💰 Financeiro: painel (KPIs, a receber, recebimentos, por obra, sem financeiro), ficha da obra,
+                   popup do contrato (gerar/renegociar parcelas) e popup de baixa (com comprovante/NF).
+  recebimentos.js  Modelo puro do financeiro: normContratoFin, gerarParcelas, situacaoContrato (saldo/situação
+                   por parcela), encargosSugeridos, espelho na obra (camposEspelho, vencidoDoResumo).
+                   Não pode se chamar financeiro.js: no Windows colide com Financeiro.jsx no import.
+  caixaAlta.js     Ouvinte global que converte para maiúscula os campos dentro de `data-caixa-alta`.
   ArquivoObras.jsx Arquivar → Excluídas → exclusão definitiva: modelo (`obra.arquivo`), botões da obra e as duas pastas.
   NovoContrato.jsx Popup "+ Novo cliente / contrato" (cliente novo ou contrato de obra existente; `inicial` = conversão).
   Comercial.jsx    💼 Comercial: negociações (prospecção → orçamento → negociação → obra/declinada), modelo,
@@ -98,6 +104,9 @@ supabase/
                              — rodar depois da de acessos. Acessos novos: `comercial`, `orcamentista`.
   migration_comercial_excluir.sql  `negociacoes_excluidas` (imutável) + RPC `negociacao_excluir` (só master,
                              só declinada) + trigger que não deixa reusar número excluído — rodar depois da comercial.
+  migration_financeiro.sql   `fin_contratos` (trava de versão) + `fin_baixas` (imutável, estorno), RLS de escrita
+                             pelo acesso `financeiro`/master, categoria `nota_fiscal` em `obra_anexos` — rodar
+                             depois da de acessos e da ficha_obra.
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF do orçamento.
   functions/whatsapp-notificar/  Edge Function que manda o aviso do 🔔 pelo WhatsApp (Evolution API v2).
   functions/analisar-documento/  Edge Function que lê um anexo (contrato, comprovante, NF, orçamento de fornecedor).
@@ -165,6 +174,8 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 | `mensagens` | `id` (uuid) | `conversa` (`geral` ou `dm:<uuid>:<uuid>`), `de_id`, `de_nome`, `para_id`, `texto`, `obra_id`, `created_at` | — (**não usa `data`**; imutável) |
 | `mensagens_lidas` | (`user_id`,`conversa`) | `lida_ate` | — |
 | `negociacoes` | `id` (= `numero`, `NEG-0001`) | `numero` (único), `cliente`, `etapa`, `vendedor_id`, `orcamentista_id`, `obra_id`, `updated_at`, `data` | a negociação (`normNegociacao`): cliente/obra/cidade/vendedor/`cadastro` no formato da obra, responsáveis (login), `orcamento {numeroProposta, valor, validade, pronto…}`, `revisoes`, `declinio`, `conversao`, `historico` de etapas, `capa` |
+| `fin_contratos` | `obra_id` | `updated_at`, `data` | o contrato financeiro (`normContratoFin`): valor, data, forma, condição, `multaPct`, `jurosMesPct`, `parcelas [{id, descricao, vencimento, valor, forma}]`, `historico` de alterações |
+| `fin_baixas` | `id` (uuid) | `obra_id`, `parcela_id` (null = sem parcela), `tipo` (`baixa`/`saldo_inicial`/`estorno`), `dia`, `principal`, `juros`, `multa`, `desconto`, `forma`, `nf_numero`, `obs`, `anexos uuid[]`, `estorno_de`, `lancado_por(_id)` | — (**não usa `data`**; imutável, só `anexos` cresce) |
 | `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (**vazia**, fundação para o futuro) |
 
 - `obra_membros` e os papéis `encarregado`/`cliente` existem no schema mas **não são usados**: as
@@ -251,7 +262,8 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   obra), `cronogramaPrint` (`id`), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`),
   `aprovacoes`, `estoque` (`codigo` opcional, vindo do QR), `estoqueDoc` (`docId`), `estoqueEtiquetas` (`itemIds`),
   `orcamentos` (`id` opcional = editor aberto), `orcamentoPrint` (`id`), `mensagens` (`conversa` opcional),
-  `comercial` (`pasta: "andamento"|"declinadas"|"convertidas"` ou `id` = ficha da negociação; sem nada = painel).
+  `comercial` (`pasta: "andamento"|"declinadas"|"convertidas"` ou `id` = ficha da negociação; sem nada = painel),
+  `financeiro` (`obraId` opcional = ficha financeira da obra; a aba do painel fica no sessionStorage).
   `relatorio` aceita `personalizar: true` (só no `history.state`), que abre o painel de filtros.
   `DiaAgenda`, as três telas do diário e as quatro do estoque continuam sendo early-returns dos
   próprios componentes, mas guiados pelos parâmetros da view (`diario` tem `obraId`/`diarioId`,
@@ -304,7 +316,11 @@ travadas — não dá para conferir o que não se vê. `obra.documentosLidos` ma
 a tela avisa na segunda vez (o mesmo comprovante somaria em dobro); ele não impede, porque
 reler um contrato para completar um campo é legítimo. O texto da atividade nunca leva o valor,
 porque a coluna de comentários aparece com os valores ocultos. `categoria` de `obra_anexos` tem
-`check` no banco, por isso não existe categoria "Nota fiscal": NF não troca a categoria do anexo.
+`check` no banco: a NF de compra lida pela IA não troca a categoria do anexo. A categoria `nota_fiscal`
+existe desde a `migration_financeiro.sql`, para a NF de venda anexada na baixa. O comprovante lido pela IA
+**não soma mais ao `valorRecebido`**: vira uma baixa sem parcela no Financeiro (com o anexo ligado), e só
+com o financeiro do contrato gerado e o acesso `financeiro`. Com o financeiro gerado, a IA também não
+troca o valor total do contrato.
 
 **Pastas por status em vez de lista única.** O "progresso médio" sobre todas as obras era falso —
 metade já estava concluída. A tela inicial mostra só os KPIs gerais + duas pastas; o progresso
@@ -677,7 +693,7 @@ orçamento aprovado leva `aprovadoPor/Em`. Compras pede (um item ou o lote dos o
 notificação por pedido), o aprovador decide em ✅ Aprovações (`AprovacoesCompra.jsx`) ou dentro da obra,
 e Compras recebe o retorno. Quem pede e quem aprova é o **login** (`profiles`), não o nome digitado: aqui
 a identidade é o controle — exceção deliberada à regra do `autor`/`responsavel` digitado.
-Acessos (`ACESSOS` em `Comunicacao.jsx`: `aprova_compras`, `compras`, `ver_valores`, `comercial`, `orcamentista`) moram em `profiles.acessos`;
+Acessos (`ACESSOS` em `Comunicacao.jsx`: `aprova_compras`, `compras`, `financeiro`, `ver_valores`, `comercial`, `orcamentista`) moram em `profiles.acessos`;
 só o master (`profiles.master`, marcado à mão no SQL — o e-mail não vai para o repositório) muda, na
 seção "Pessoas e acessos" de Configurações, que para ele abre sem a senha. Os destinatários quem
 escolhe é o banco (`notificar_compra`, pelo acesso), e "aprovada/recusada" só sai de quem tem
@@ -742,6 +758,40 @@ Declinada pode ser **excluída de vez só pelo master** (🗑 na pasta Declinada
 trigger anti-DELETE só para aquele id (mesmo desenho da exclusão de obra). Anexos e comentários ficam com o
 id antigo, por isso o número **nunca volta**: `proximoNumeroNeg` conta os excluídos e um trigger recusa INSERT
 de id já excluído.
+
+**Financeiro por contrato: plano de parcelas + baixas imutáveis, e a obra só espelha.** Antes a obra
+tinha `valorTotal` e `valorRecebido` digitados por qualquer um, sem data nem parcela. Hoje o financeiro de
+cada obra nasce do contrato (`fin_contratos`, popup "Gerar financeiro": valor, forma, condição, multa/juros
+e as parcelas, geradas por "entrada + N vezes" ou à mão — a soma tem que fechar com o valor) e cada
+recebimento é uma linha de `fin_baixas`. Baixa tem `principal` (abate da parcela), `juros`, `multa` e
+`desconto`; o caixa é principal + juros + multa − desconto (pagou 950 numa parcela de 1.000 com 50 de
+desconto: principal 1.000, a parcela quita). Baixa ligada a uma parcela abate nela; sem parcela (e o
+excedente) abate na ordem de vencimento. Saldo e situação da parcela (a vencer / vence hoje / vencida /
+parcial / paga) são **derivados** em `situacaoContrato`, nunca gravados. Multa e juros vêm **sugeridos**
+(multa % única + juros simples ao dia) e são editáveis. Baixa é imutável como o estoque: errou, estorna
+(linha `estorno` apontando para a original, os dois aparecem riscados); só `anexos` cresce (comprovante/NF
+que chega depois). Renegociar (mudar parcela) é permitido e fica em `historico`; com recebimento lançado
+pede motivo, e parcela com baixa ligada não sai da lista. Ao gerar, o `valorRecebido` antigo da obra pode
+entrar como baixa `saldo_inicial`.
+Quem grava é o **acesso `financeiro`** (ou o master) — conferido no banco (RLS), separado do `ver_valores`
+(que só abre a visão). Os outros veem a tela em leitura.
+A obra guarda o **espelho**: `valorTotal` = contrato, `valorRecebido` = principal recebido e
+`financeiroResumo` (`resumoParaObra`: forma, condição e as parcelas com saldo). Quem escreve é a tela
+Financeiro (efeito que compara com `espelhoDiferente` — sem depender da ordem das chaves do jsonb — e grava
+pelo `updateObra`, com trava de versão), depois de cada lançamento e ao abrir, se alguém lançou e não
+espelhou. Por isso Dashboard, `finObra`, a 🚩 de compras e os relatórios seguem funcionando sem saber das
+tabelas. A seção Financeiro da obra só lê (o campo "Valor Recebido" saiu) e tem o botão para a ficha. O
+"vencido" do espelho é calculado na leitura (`vencidoDoResumo`), e a Central de avisos ganhou a área
+Financeiro (sem financeiro gerado; parcela vencida). Reimportar o PDF não troca o valor com financeiro gerado.
+
+**Caixa alta nos cadastros é um ouvinte, não um onChange por campo.** `caixaAlta.js` (ligado no `main.jsx`)
+escuta `input` na captura, antes do React, e converte o campo para maiúscula quando ele está dentro de um
+`data-caixa-alta`; `data-livre` mais próximo desliga (observações, e-mail do orçamento, unidade do estoque).
+E-mail, senha, número e data ficam de fora pelo tipo. O valor é escrito pelo **setter do protótipo**: com
+`el.value = …` o React acha que nada mudou e engole o onChange. Marcados hoje: `CadastroObra` (obra, novo
+contrato, comercial), equipes, item do estoque, cliente do orçamento livre, fornecedor de Compras e os popups
+do Financeiro. Grava em maiúscula, então o que já estava gravado em minúscula continua assim até ser editado.
+Formulário novo de cadastro: ponha `data-caixa-alta` no contêiner.
 
 **Central de avisos é derivada.** `avisosDaObra` (avisos.js) deduz tudo dos dados — nada é gravado.
 Documentos vêm de `fetchResumoAnexos` (categoria dos anexos fora da lixeira) ou do checklist marcado.

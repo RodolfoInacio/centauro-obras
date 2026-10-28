@@ -22,6 +22,8 @@ import LeituraIA, { normDocumentosLidos } from "./LeituraIA";
 import ComentariosObra, { lerAutor } from "./ComentariosObra";
 import { ComunicacaoProvider, SinoNotificacoes, BotaoMensagens, ChatView, MeuPerfil, useComunicacao } from "./Comunicacao";
 import NovoContrato from "./NovoContrato";
+import FinanceiroView from "./Financeiro";
+import { vencidoDoResumo } from "./recebimentos";
 import { ConfiguracoesView, useConfig } from "./Configuracoes";
 import { ETAPAS, PESOS, itemPercentual, precisaAlertaCompras, finObra, finTotais, agruparObras } from "./calculos";
 import { viewParaHash, hashParaView, paiDe, useEstadoSessao } from "./rotas";
@@ -133,7 +135,8 @@ function normObra(o) {
     grupo: o.grupo || "",
     dataLimiteEntrega: o.dataLimiteEntrega || "",
     material: o.material || { dataLimite: "", dataCompra: "", previsaoEntrega: "" },
-    // Financeiro por obra: por enquanto preenchido a mão (planilha), depois vem do ERP.
+    // valorTotal/valorRecebido/financeiroResumo são o espelho da tela Financeiro (recebimentos.js)
+    // quando o contrato tem financeiro gerado; a obra só lê.
     dataContrato: o.dataContrato || "",
     // Bandeiras penduradas à mão (a automática de compras não fica aqui — é calculada)
     flags: (Array.isArray(o.flags) ? o.flags : [])
@@ -199,7 +202,8 @@ function mesclarImportacao(atual, lida) {
   return normObra({
     ...atual,
     cliente: vazio("cliente"), obra: vazio("obra"), cidade: vazio("cidade"), vendedor: vazio("vendedor"), data: vazio("data"),
-    valorTotal: Number(lida.valorTotal) || atual.valorTotal || 0,
+    // Com o financeiro do contrato gerado, o valor é dele (Financeiro.jsx), não do PDF.
+    valorTotal: atual.financeiroResumo ? atual.valorTotal : Number(lida.valorTotal) || atual.valorTotal || 0,
     itens,
   });
 }
@@ -699,7 +703,7 @@ function ChecklistObra({ itens, onChange }) {
 // O planejamento da obra é o cronograma (seção 📅), não mais datas por item: `datasItens` é o
 // período de cada item lido do cronograma e `cronogramaSlot` é o próprio editor, montado pelo App.
 function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque, onEntradaEstoque, onAtividade, atividadeVersao = 0, itemAberto = null, onItemAberto, onImprimirMedicao, secaoFoco = null,
-  cronograma = null, cronogramaSlot = null, cronogramaResumo = "", datasItens = {}, andamento = null, onCriarCronograma, onPassoArquivo, onAvisoCompra, onAbrirNegociacao }) {
+  cronograma = null, cronogramaSlot = null, cronogramaResumo = "", datasItens = {}, andamento = null, onCriarCronograma, onPassoArquivo, onAvisoCompra, onAbrirNegociacao, onAbrirFinanceiro }) {
   // Item expandido mora na view (#/obra/2729/item/5): voltar de outra tela reabre o mesmo item.
   const expandedId = itemAberto;
   const setExpandedId = (id) => onItemAberto?.(id);
@@ -763,6 +767,8 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
 
   // "A Receber" nunca é gravado — sempre recalculado, pra nunca ficar inconsistente com os outros dois.
   const valorAReceber = Math.max(0, (localObra.valorTotal || 0) - (localObra.valorRecebido || 0));
+  const resumoFin = localObra.financeiroResumo || null;
+  const vencidoFin = vencidoDoResumo(resumoFin);
   const diasContrato = diasDesdeContrato(localObra);
   const compras = comprasTotais(localObra);
   const alertaCompras = precisaAlertaCompras(localObra);
@@ -1103,19 +1109,53 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
                     {diasContrato === null ? "— sem data de contrato" : `⏱ ${diasContrato} dia${diasContrato === 1 ? "" : "s"} desde o contrato`}
                   </div>
                 </div>
-                <div>
-                  <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 2 }}>Valor Recebido</label>
-                  <Oculto>
-                    <input type="number" min={0} step="0.01" value={localObra.valorRecebido || 0}
-                      onChange={e => update({ ...localObra, valorRecebido: Math.max(0, Number(e.target.value) || 0) })}
-                      style={{ ...campoData, width: 120 }} />
-                  </Oculto>
-                </div>
+                {resumoFin && (
+                  <div>
+                    <div style={{ fontSize: 10, color: "#dc2626", fontWeight: 700, textTransform: "uppercase" }}>● Vencido</div>
+                    <div style={{ fontSize: 16, fontWeight: 800, color: vencidoFin.vencido ? "#dc2626" : "#cbd5e1" }}>
+                      {vencidoFin.vencido ? <Dinheiro v={vencidoFin.vencido} /> : "—"}
+                    </div>
+                    {vencidoFin.qtd > 0 && <div style={{ fontSize: 11, color: "#dc2626" }}>{vencidoFin.qtd} parcela(s)</div>}
+                  </div>
+                )}
                 <div>
                   <label style={{ fontSize: 10, color: "#94a3b8", display: "block", marginBottom: 4 }}>Bandeiras</label>
                   <FlagsObra flags={localObra.flags} onChange={fs => update({ ...localObra, flags: fs })} />
                 </div>
               </div>
+            </div>
+            {/* Espelho do Financeiro: aqui só se lê. Valor e recebimentos mudam na tela Financeiro. */}
+            <div style={{ padding: "0 16px 16px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+                <div style={{ fontSize: 12, color: "#475569" }}>
+                  {resumoFin
+                    ? [resumoFin.forma, resumoFin.condicao].filter(Boolean).join(" · ") || "Contrato sem forma de pagamento informada"
+                    : "Financeiro do contrato ainda não gerado — os valores acima são os antigos da obra."}
+                </div>
+                {onAbrirFinanceiro && <button onClick={() => onAbrirFinanceiro(obra.id)}
+                  style={{ marginLeft: "auto", background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 7, padding: "6px 12px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+                  💰 {resumoFin ? "Abrir no Financeiro" : "Gerar no Financeiro"}</button>}
+              </div>
+              {resumoFin?.parcelas?.length > 0 && (
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead><tr style={{ background: "#f1f5f9", color: "#475569" }}>
+                    {["Parcela", "Vencimento", "Valor", "Saldo"].map(h => <th key={h} style={{ padding: "5px 8px", textAlign: h === "Valor" || h === "Saldo" ? "right" : "left", fontWeight: 700 }}>{h}</th>)}
+                  </tr></thead>
+                  <tbody>
+                    {resumoFin.parcelas.map(p => {
+                      const vencida = p.saldo > 0.004 && p.vencimento && p.vencimento < hoje();
+                      return (
+                        <tr key={p.id} style={{ borderBottom: "1px solid #f1f5f9", color: p.saldo <= 0.004 ? "#94a3b8" : vencida ? "#b91c1c" : "#1e293b" }}>
+                          <td style={{ padding: "5px 8px", fontWeight: 600 }}>{p.descricao}</td>
+                          <td style={{ padding: "5px 8px" }}>{fmtDate(p.vencimento)}{vencida && " · vencida"}</td>
+                          <td style={{ padding: "5px 8px", textAlign: "right" }}><Dinheiro v={p.valor} /></td>
+                          <td style={{ padding: "5px 8px", textAlign: "right", fontWeight: 700 }}>{p.saldo <= 0.004 ? "paga" : <Dinheiro v={p.saldo} />}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
             </div>
           </Secao>
 
@@ -1318,7 +1358,7 @@ Ela não tem nenhum serviço no calendário nem obra atribuída, então nada de 
       </p>
 
       {/* Form */}
-      <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", border: "1px solid #e2e8f0", marginBottom: 24 }}>
+      <div data-caixa-alta style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", border: "1px solid #e2e8f0", marginBottom: 24 }}>
         <div style={{ fontSize: 12, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", marginBottom: 12 }}>
           {editingId ? "Editar Equipe" : "Nova Equipe"}
         </div>
@@ -2958,83 +2998,6 @@ function SideMenu({ open, onClose, onNav, onImport, onExportar, current, nAvisos
 
 // ─── FINANCEIRO (protegido por senha) ─────────────────────────────────────────
 // A senha é a mesma do olho (Sigilo.jsx): liberar aqui mostra os valores no app inteiro, e vice-versa.
-function FinanceiroView({ obras, onRelatorio }) {
-  const { visivel, desbloquear } = useSigilo();
-  const [pw, setPw] = useState("");
-  const [err, setErr] = useState("");
-
-  if (!visivel) {
-    return (
-      <div style={{ padding: "60px 20px", display: "flex", justifyContent: "center" }}>
-        <form onSubmit={e => { e.preventDefault(); if (!desbloquear(pw)) { setErr("Senha incorreta."); setPw(""); } }}
-          style={{ background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: 32, width: 340, maxWidth: "100%", boxShadow: "0 4px 20px rgba(0,0,0,0.08)" }}>
-          <div style={{ fontSize: 34, textAlign: "center", marginBottom: 6 }}>🔒</div>
-          <div style={{ fontSize: 18, fontWeight: 800, color: BRAND, textAlign: "center" }}>Área Financeira</div>
-          <div style={{ fontSize: 13, color: "#64748b", textAlign: "center", marginBottom: 20 }}>Digite a senha para acessar</div>
-          <input type="password" value={pw} onChange={e => setPw(e.target.value)} autoFocus placeholder="Senha"
-            style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 8, padding: "10px 12px", fontSize: 14, boxSizing: "border-box", marginBottom: 12 }} />
-          {err && <div style={{ background: "#fee2e2", color: "#dc2626", borderRadius: 8, padding: "8px 12px", fontSize: 13, marginBottom: 12 }}>{err}</div>}
-          <button type="submit" style={{ width: "100%", background: BRAND, color: "#fff", border: "none", borderRadius: 8, padding: 11, fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Acessar</button>
-        </form>
-      </div>
-    );
-  }
-
-  // Uma linha por obra (grupo de contratos), não por proposta. O total continua somando tudo —
-  // o que muda é a distribuição entre as linhas.
-  const total = obras.reduce((a, o) => a + (o.valorTotal || 0), 0);
-  const linhas = agruparObras(obras)
-    .map(g => ({
-      chave: g.chave,
-      nome: g.nome,
-      numeros: g.contratos.map(o => "#" + o.numero).join(" · "),
-      cidades: [...new Set(g.contratos.map(o => o.cidade).filter(Boolean))].join(" · "),
-      valor: g.fin.total,
-    }))
-    .sort((a, b) => b.valor - a.valor);
-  return (
-    <div style={{ padding: "24px 28px", maxWidth: 900, margin: "0 auto" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
-        <h2 style={{ fontSize: 20, fontWeight: 800, color: BRAND, margin: 0 }}>Financeiro</h2>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 10, alignItems: "center" }}>
-          {onRelatorio && <button onClick={onRelatorio} style={{ background: "#1a1a1a", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>🖨 Relatório com gráficos</button>}
-          <OlhoFinanceiro rotulo />
-        </div>
-      </div>
-      <div style={{ background: "#fff", borderRadius: 12, padding: 20, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", borderLeft: "4px solid #c9a227", marginBottom: 20 }}>
-        <div style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700, textTransform: "uppercase" }}>Total em Obras</div>
-        <div style={{ fontSize: 28, fontWeight: 800, color: "#c9a227" }}>R$ {fmt(total)}</div>
-        <div style={{ fontSize: 12, color: "#64748b", marginTop: 4 }}>
-          {linhas.length} obra{linhas.length === 1 ? "" : "s"} · {obras.length} pedido{obras.length === 1 ? "" : "s"}
-        </div>
-      </div>
-      <div style={{ background: "#fff", borderRadius: 12, boxShadow: "0 1px 4px rgba(0,0,0,0.07)", overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-          <thead>
-            <tr style={{ background: BRAND, color: "#fff" }}>
-              {["#", "Cliente", "Cidade", "Valor", "% do total"].map(h => (
-                <th key={h} style={{ padding: "8px 12px", textAlign: h === "Valor" || h === "% do total" ? "right" : "left", fontWeight: 600, fontSize: 12 }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {linhas.map((l, i) => (
-              <tr key={l.chave} style={{ background: i % 2 ? "#f8fafc" : "#fff", borderBottom: "1px solid #e2e8f0" }}>
-                <td style={{ padding: "7px 12px", fontWeight: 700, whiteSpace: "nowrap" }}>{l.numeros}</td>
-                <td style={{ padding: "7px 12px" }}>{l.nome}</td>
-                <td style={{ padding: "7px 12px", color: "#64748b" }}>{l.cidades}</td>
-                <td style={{ padding: "7px 12px", textAlign: "right", fontWeight: 700, color: "#c9a227" }}>R$ {fmt(l.valor)}</td>
-                <td style={{ padding: "7px 12px", textAlign: "right", color: "#64748b" }}>{total ? (l.valor / total * 100).toFixed(1) : 0}%</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <div style={{ fontSize: 12, color: "#94a3b8", marginTop: 12 }}>Mais recursos financeiros serão adicionados aqui.</div>
-    </div>
-  );
-}
-
 // ─── CRONOGRAMA COMERCIAL (mini MS Project) ──────────────────────────────────
 function clampPercent(v) { return Math.max(0, Math.min(100, Math.round(Number(v) || 0))); }
 function clampDuracao(v) { return Math.max(0, Math.min(999, Math.round((Number(v) || 0) * 10) / 10)); }
@@ -3976,6 +3939,8 @@ export default function App() {
   // filtrado aqui uma vez — assim nenhuma tela precisa saber que existe arquivo.
   const [obrasTodas, setObras] = useState([]);
   const obras = useMemo(() => obrasTodas.filter(obraAtiva), [obrasTodas]);
+  const obrasRef = useRef(obrasTodas);
+  obrasRef.current = obrasTodas;
   const [equipes, setEquipes] = useState([]);
   const [cronogramas, setCronogramas] = useState([]);
   const [agenda, setAgenda] = useState([]);   // serviços do dia (obra x equipe)
@@ -4375,6 +4340,14 @@ export default function App() {
     setObras(prev => prev.map(o => o.id === updated.id ? updated : o));
     persistObra(updated);
   }, [persistObra]);
+
+  // Espelho do financeiro (Financeiro.jsx): valor do contrato, recebido e o resumo das parcelas
+  // gravados na obra pelo caminho normal (fila + trava de versão). Lê a obra mais recente do
+  // estado, não a que a tela tinha na mão, para não desfazer uma edição feita no meio.
+  const espelharFinanceiro = useCallback((id, campos) => {
+    const atual = obrasRef.current.find(o => o.id === id);
+    if (atual) updateObra({ ...atual, ...campos });
+  }, [updateObra]);
 
   // Obra nova passa pela fila: nenhuma gravação dela sai antes do INSERT voltar com a versão.
   // INSERT, não upsert: proposta repetida é recusada em vez de sobrescrever a que existe.
@@ -4997,6 +4970,7 @@ export default function App() {
               onAtividade={texto => registrarAtividade(selectedObra.id, texto)} atividadeVersao={atividadeVersao}
               onPassoArquivo={handlePassoArquivo} onAvisoCompra={avisoCompra}
               onAbrirNegociacao={id => navTo({ type: "comercial", id })}
+              onAbrirFinanceiro={id => navTo({ type: "financeiro", obraId: id })}
               onAbrirDocEstoque={docId => navTo({ type: "estoqueDoc", docId })}
               onEntradaEstoque={origem => navTo({ type: "estoque", entradaCompra: {
                 ...origem, obraId: selectedObra.id, obraRotulo: `#${selectedObra.numero} — ${selectedObra.cliente}`,
@@ -5058,7 +5032,11 @@ export default function App() {
                         onAtividade={registrarAtividade} onErro={showError} onAbrirObra={openObra}
                         onConverter={(neg, quem) => setConversao({ neg, quem })} />
                   : view.type === "financeiro"
-                    ? <FinanceiroView obras={obras} onRelatorio={() => navTo({ type: "relatorio", tipo: "financeiro" })} />
+                    ? <FinanceiroView obras={obras} obraId={view.obraId || null}
+                        onAbrirFicha={id => navTo({ type: "financeiro", obraId: id })} onVoltar={back}
+                        onAbrirObra={id => navTo({ type: "gantt", obraId: id, secao: "financeiro" })}
+                        onEspelhar={espelharFinanceiro} onAtividade={registrarAtividade}
+                        onRelatorio={() => navTo({ type: "relatorio", tipo: "financeiro" })} />
                   : view.type === "configuracoes"
                     ? <ConfiguracoesView />
                   : view.type === "mensagens"

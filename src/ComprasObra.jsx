@@ -428,7 +428,7 @@ function CartaoFornecedor({ f, n, st, menor, onChange, onAprovar, onRemover, onE
     <div style={{ background: "#fff", border: `1px solid ${f.aprovado ? "#0891b255" : "#e2e8f0"}`, borderRadius: 8, padding: 10, opacity: st.apagado ? 0.6 : 1 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
         <span style={{ fontSize: 11, color: "#94a3b8", fontWeight: 700 }}>Orçamento {n}</span>
-        <input value={f.nome} list={DATALIST_ID} placeholder="Nome do fornecedor"
+        <input data-caixa-alta value={f.nome} list={DATALIST_ID} placeholder="Nome do fornecedor"
           onChange={e => onChange({ ...f, nome: e.target.value })}
           style={{ ...inp, fontSize: 13, fontWeight: 700, flex: "1 1 200px", maxWidth: 320 }} />
         <Chip cor={st.cor}>{st.rotulo}</Chip>

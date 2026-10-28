@@ -56,7 +56,7 @@ export default function CadastroObra({ obra, onChange, comLinks = false }) {
   const mapa = comLinks && linkMapa(cad.enderecoObra, obra.cidade);
 
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px 14px" }}>
+    <div data-caixa-alta style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "10px 14px" }}>
       <Campo rotulo="Cliente / empresa">
         <input style={inp} value={obra.cliente || ""} onChange={e => setSolto("cliente", e.target.value)} placeholder="J L Campanholo Consultoria" />
       </Campo>
@@ -102,7 +102,7 @@ export default function CadastroObra({ obra, onChange, comLinks = false }) {
         <input style={inp} value={cad.medidas} onChange={e => setCad("medidas", e.target.value)} placeholder="Em anexo" />
       </Campo>
       <Campo rotulo="Observações" largo>
-        <textarea rows={3} style={{ ...inp, resize: "vertical" }} value={cad.obs} onChange={e => setCad("obs", e.target.value)} />
+        <textarea data-livre rows={3} style={{ ...inp, resize: "vertical" }} value={cad.obs} onChange={e => setCad("obs", e.target.value)} />
       </Campo>
     </div>
   );

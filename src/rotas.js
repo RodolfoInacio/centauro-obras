@@ -30,7 +30,7 @@ export function viewParaHash(v) {
     case "cronogramas": return "#/cronogramas";
     case "cronograma": return `#/cronograma/${enc(v.id)}`;
     case "cronogramaPrint": return `#/cronograma/${enc(v.id)}/imprimir`;
-    case "financeiro": return "#/financeiro";
+    case "financeiro": return v.obraId ? `#/financeiro/obra/${enc(v.obraId)}` : "#/financeiro";
     case "avisos": return "#/avisos";
     case "aprovacoes": return "#/aprovacoes";
     case "relatorios": return "#/relatorios";
@@ -73,7 +73,7 @@ export function hashParaView(hash) {
     case "equipes": return { type: "equipes" };
     case "cronogramas": return { type: "cronogramas" };
     case "cronograma": return b ? (c === "imprimir" ? { type: "cronogramaPrint", id: b } : { type: "cronograma", id: b }) : { type: "cronogramas" };
-    case "financeiro": return { type: "financeiro" };
+    case "financeiro": return b === "obra" && c ? { type: "financeiro", obraId: c } : { type: "financeiro" };
     case "avisos": return { type: "avisos" };
     case "aprovacoes": return { type: "aprovacoes" };
     case "relatorios": return { type: "relatorios" };
@@ -119,6 +119,7 @@ export function paiDe(v) {
     case "estoque": return v.tela && v.tela.tipo !== "lista" ? { type: "estoque" } : VIEW_INICIAL;
     case "estoqueDoc": case "estoqueEtiquetas": return { type: "estoque" };
     case "relatorio": return { type: "relatorios" };
+    case "financeiro": return v.obraId ? { type: "financeiro" } : VIEW_INICIAL;
     case "orcamentos": return v.id ? { type: "orcamentos" } : VIEW_INICIAL;
     case "orcamentoPrint": return { type: "orcamentos", id: v.id };
     case "comercial": return v.id ? { type: "comercial", pasta: "andamento" } : v.pasta ? { type: "comercial" } : VIEW_INICIAL;
