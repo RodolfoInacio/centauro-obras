@@ -890,6 +890,14 @@ export async function lancarBaixaFin(b) {
   return baixaFin(data);
 }
 
+// Contratos anexados (categoria "contrato", fora da lixeira) de todas as obras, do mais novo ao
+// mais antigo — o lote do Financeiro lê o mais recente de cada obra.
+export async function fetchContratosAnexados() {
+  const linhas = await todasAsLinhas(() => supabase.from("obra_anexos").select("id, obra_id, nome, mime, tamanho, created_at")
+    .eq("categoria", "contrato").is("removido_em", null).order("created_at", { ascending: false }).order("id"));
+  return linhas.map(r => ({ id: r.id, obraId: r.obra_id, nome: r.nome, mime: r.mime || "", tamanho: r.tamanho, createdAt: r.created_at }));
+}
+
 export async function anexarNaBaixaFin(id, anexos) {
   const { data, error } = await supabase.from("fin_baixas").update({ anexos }).eq("id", id).select("*");
   if (error) throw error;

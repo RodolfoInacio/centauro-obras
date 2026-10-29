@@ -4,11 +4,11 @@ import InputData from "./InputData";
 import { useSigilo, Dinheiro, Oculto, OlhoFinanceiro } from "./Sigilo";
 import { useComunicacao } from "./Comunicacao";
 import { useEstadoSessao } from "./rotas";
-import { fetchFinanceiro, salvarContratoFin, lancarBaixaFin, anexarNaBaixaFin, fetchAnexosObra } from "./api";
+import { fetchFinanceiro, salvarContratoFin, lancarBaixaFin, anexarNaBaixaFin, fetchAnexosObra, fetchContratosAnexados, lerDocumentoComIA } from "./api";
 import { enviarArquivos, urlsComCache } from "./AnexosObra";
 import {
   FORMAS_PAGAMENTO, SITUACOES, cent, hojeLocal, normContratoFin, normParcela, somaParcelas,
-  caixaDaBaixa, gerarParcelas, situacaoContrato, encargosSugeridos, camposEspelho, espelhoDiferente,
+  caixaDaBaixa, gerarParcelas, situacaoContrato, encargosSugeridos, camposEspelho, espelhoDiferente, contratoDoRascunhoIA,
 } from "./recebimentos";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -103,7 +103,7 @@ export default function FinanceiroView({ obras, obraId = null, onAbrirFicha, onV
     if (!pode || !fin) return;
     for (const o of obras) {
       const s = sits[o.id];
-      if (s && espelhoDiferente(o, s)) onEspelhar(o.id, camposEspelho(s));
+      if (s && s.contrato.conferido && espelhoDiferente(o, s)) onEspelhar(o.id, camposEspelho(s));
     }
   }, [pode, fin, sits, obras, onEspelhar]);
 
@@ -154,7 +154,7 @@ export default function FinanceiroView({ obras, obraId = null, onAbrirFicha, onV
 // ═════════════════════════════════════════════════════════════════════════════
 // Painel: indicadores + quatro abas.
 function Painel({ obras, ctx, onAbrirFicha, onRelatorio, erroCarga }) {
-  const { fin, sits, pode } = ctx;
+  const { fin, sits, pode, carregar } = ctx;
   const [aba, setAba] = useEstadoSessao("fin.aba", "receber");
   const [busca, setBusca] = useEstadoSessao("fin.busca", "");
   const [filtroSit, setFiltroSit] = useEstadoSessao("fin.sit", "abertas");
@@ -164,8 +164,52 @@ function Painel({ obras, ctx, onAbrirFicha, onRelatorio, erroCarga }) {
   const hoje = hojeLocal();
   const em30 = (() => { const d = new Date(); d.setDate(d.getDate() + 30); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
 
-  const comContrato = obras.filter(o => sits[o.id]);
+  const { eu } = usePode();
+  // Rascunho da IA ainda não conta em nada: nem nos indicadores, nem no a receber.
+  const comContrato = obras.filter(o => sits[o.id]?.contrato.conferido);
+  const rascunhos = obras.filter(o => sits[o.id] && !sits[o.id].contrato.conferido);
   const semContrato = obras.filter(o => !sits[o.id]);
+
+  // Contrato anexado de cada obra (o mais recente que a IA consegue ler).
+  const [anexosCt, setAnexosCt] = useState(null);
+  useEffect(() => {
+    fetchContratosAnexados().then(l => {
+      const m = {};
+      for (const a of l) (m[a.obraId] ||= []).push(a);
+      setAnexosCt(m);
+    }).catch(e => { console.warn("contratos anexados:", e.message); setAnexosCt({}); });
+  }, []);
+  const legivel = a => (a.mime === "application/pdf" || /^image\/(jpeg|png|webp|gif)$/.test(a.mime)) && !(Number(a.tamanho) > 20 * 1024 * 1024);
+  const contratoDe = id => (anexosCt?.[id] || []).find(legivel) || null;
+  const [lote, setLote] = useState(null);   // {rodando, feitos, total, atual, erros}
+
+  // Lê o contrato anexado de cada obra sem financeiro e grava o RASCUNHO (conferido: false).
+  // Duas leituras por vez: cada uma leva ~20 s, sem estourar o limite da API.
+  async function gerarLote() {
+    const alvos = semContrato.map(o => ({ obra: o, anexo: contratoDe(o.id) })).filter(x => x.anexo);
+    if (!alvos.length) return;
+    if (!confirm(`Ler ${alvos.length} contrato(s) com IA e gerar os rascunhos do financeiro?\n\nLeva uns 20 segundos por contrato — deixe esta aba aberta. Nada vale (nem vai para a obra) até você conferir cada um na aba "A conferir".`)) return;
+    const erros = [];
+    let i = 0, feitos = 0;
+    setLote({ rodando: true, feitos: 0, total: alvos.length, atual: "", erros: [] });
+    const trabalhar = async () => {
+      while (i < alvos.length) {
+        const { obra, anexo } = alvos[i++];
+        setLote(l => ({ ...l, atual: rotuloObra(obra) }));
+        try {
+          const ia = await lerDocumentoComIA(anexo.id, { cliente: obra.cliente, obra: obra.obra, cidade: obra.cidade });
+          await salvarContratoFin(obra.id, contratoDoRascunhoIA(obra, ia, anexo, eu?.nome || ""), null);
+        } catch (e) {
+          erros.push(`${rotuloObra(obra)}: ${e.message}`);
+        }
+        feitos++;
+        setLote(l => ({ ...l, feitos, erros: [...erros] }));
+      }
+    };
+    await Promise.all([trabalhar(), trabalhar()]);
+    setLote(l => ({ ...l, rodando: false, atual: "" }));
+    await carregar();
+  }
   const casa = (o) => {
     const q = busca.trim().toUpperCase();
     return !q || [o.numero, o.cliente, o.obra, o.cidade].some(x => String(x || "").toUpperCase().includes(q));
@@ -194,6 +238,7 @@ function Painel({ obras, ctx, onAbrirFicha, onRelatorio, erroCarga }) {
     { id: "receber", rotulo: "A receber", n: abertas.length },
     { id: "recebimentos", rotulo: "Recebimentos" },
     { id: "obras", rotulo: "Por obra", n: comContrato.length },
+    { id: "conferir", rotulo: "A conferir", n: rascunhos.length, alerta: rascunhos.length > 0 },
     { id: "pendentes", rotulo: "Sem financeiro", n: semContrato.length, alerta: semContrato.length > 0 },
   ];
 
@@ -321,34 +366,100 @@ function Painel({ obras, ctx, onAbrirFicha, onRelatorio, erroCarga }) {
         </div>
       )}
 
-      {aba === "pendentes" && (
+      {aba === "conferir" && (
         <div style={{ ...card, overflow: "auto" }}>
           <div style={{ padding: "10px 14px", fontSize: 12.5, color: "#475569", borderBottom: "1px solid #f1f5f9" }}>
-            Obras ativas sem o financeiro do contrato. Ao gerar, o valor do contrato e as parcelas passam a valer para a
-            obra; o "recebido" antigo pode entrar como saldo inicial.
+            Rascunhos lidos pela IA do contrato anexado. Abra cada um, confira valor, parcelas e vencimentos contra o
+            contrato e clique em <b>Confirmar e ativar</b> — só então o financeiro passa a valer e vai para a obra.
           </div>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
             <thead><tr style={{ background: BRAND, color: "#fff" }}>
-              <th style={th}>Obra</th><th style={th}>Data contrato</th><th style={{ ...th, ...num }}>Valor (atual)</th><th style={{ ...th, ...num }}>Recebido (antigo)</th><th style={th}></th>
+              <th style={th}>Obra</th><th style={th}>Contrato lido</th><th style={th}>Condição</th><th style={{ ...th, ...num }}>Valor lido</th>
+              <th style={{ ...th, ...num }}>Parcelas</th><th style={th}>Avisos</th><th style={th}></th>
             </tr></thead>
             <tbody>
-              {semContrato.filter(casa).sort((a, b) => String(b.numero).localeCompare(String(a.numero), "pt-BR", { numeric: true })).map(o => (
-                <tr key={o.id}>
-                  <td style={{ ...td, fontWeight: 700 }}>{rotuloObra(o)}{o.obra && <div style={{ fontWeight: 400, fontSize: 11, color: "#64748b" }}>{o.obra}</div>}</td>
-                  <td style={td}>{fmtData(o.dataContrato)}</td>
-                  <td style={{ ...td, ...num }}><Dinheiro v={o.valorTotal || 0} /></td>
-                  <td style={{ ...td, ...num, color: "#64748b" }}><Dinheiro v={o.valorRecebido || 0} /></td>
-                  <td style={{ ...td, textAlign: "right" }}>
-                    {pode ? <button onClick={() => setGerando(o)} style={btn("#047857")}>Gerar financeiro</button>
-                      : <button onClick={() => onAbrirFicha(o.id)} style={btn("#64748b", true)}>Abrir</button>}
-                  </td>
-                </tr>
-              ))}
-              {!semContrato.length && <tr><td colSpan={5} style={{ ...td, textAlign: "center", color: "#047857", padding: 30, fontWeight: 600 }}>✓ Todas as obras ativas têm financeiro gerado.</td></tr>}
+              {rascunhos.filter(casa).map(o => {
+                const s2 = sits[o.id], r = s2.contrato.rascunho || {};
+                const av = r.avisos || [];
+                return (
+                  <tr key={o.id}>
+                    <td style={{ ...td, fontWeight: 700 }}>{rotuloObra(o)}</td>
+                    <td style={{ ...td, fontSize: 11.5, color: "#475569", maxWidth: 200 }}>{r.anexoNome || "—"}</td>
+                    <td style={{ ...td, fontSize: 11.5, color: "#475569" }}>{[s2.contrato.forma, s2.contrato.condicao].filter(Boolean).join(" · ") || "—"}</td>
+                    <td style={{ ...td, ...num, fontWeight: 700 }}><Dinheiro v={s2.contrato.valor} /></td>
+                    <td style={{ ...td, ...num }}>{s2.contrato.parcelas.length}</td>
+                    <td style={{ ...td, fontSize: 11.5, color: av.length ? "#b45309" : "#047857", maxWidth: 280 }}>
+                      {av.length ? <>⚠ {av.length}: {av[0]}{av.length > 1 ? " …" : ""}</> : "✓ sem avisos"}
+                    </td>
+                    <td style={{ ...td, textAlign: "right" }}><button onClick={() => onAbrirFicha(o.id)} style={btn("#047857")}>Conferir</button></td>
+                  </tr>
+                );
+              })}
+              {!rascunhos.length && <tr><td colSpan={7} style={{ ...td, textAlign: "center", color: "#94a3b8", padding: 30 }}>Nenhum rascunho para conferir.</td></tr>}
             </tbody>
           </table>
         </div>
       )}
+
+      {aba === "pendentes" && (() => {
+        const comAnexo = semContrato.filter(o => contratoDe(o.id));
+        const ilegivel = semContrato.filter(o => !contratoDe(o.id) && anexosCt?.[o.id]?.length);
+        const semAnexo = semContrato.filter(o => !anexosCt?.[o.id]?.length);
+        return (
+          <div style={{ ...card, overflow: "auto" }}>
+            <div style={{ padding: "10px 14px", fontSize: 12.5, color: "#475569", borderBottom: "1px solid #f1f5f9", display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+              <div style={{ flex: 1, minWidth: 260 }}>
+                Obras ativas sem o financeiro do contrato.{" "}
+                {anexosCt === null ? "Procurando os contratos anexados…" : <>
+                  <b style={{ color: "#047857" }}>{comAnexo.length} com contrato anexado</b> ·{" "}
+                  <b style={{ color: "#b91c1c" }}>{semAnexo.length} sem contrato</b>
+                  {ilegivel.length > 0 && <> · <b style={{ color: "#b45309" }}>{ilegivel.length} com contrato que a IA não lê</b> (não é PDF/imagem ou passa de 20 MB)</>}
+                </>}
+              </div>
+              {pode && comAnexo.length > 0 && !lote?.rodando && (
+                <button onClick={gerarLote} style={btn("#7c3aed")}>✨ Gerar rascunhos com IA ({comAnexo.length})</button>
+              )}
+            </div>
+            {lote && (
+              <div style={{ padding: "10px 14px", background: lote.rodando ? "#f5f3ff" : "#f0fdf4", borderBottom: "1px solid #f1f5f9", fontSize: 12.5 }}>
+                {lote.rodando
+                  ? <>✨ Lendo contratos… <b>{lote.feitos}/{lote.total}</b>{lote.atual && <> · {lote.atual}</>} — deixe esta aba aberta.</>
+                  : <>✓ Leitura concluída: <b>{lote.total - lote.erros.length}</b> rascunho(s) na aba <a onClick={() => setAba("conferir")} style={{ cursor: "pointer", color: "#1d4ed8", fontWeight: 700 }}>A conferir</a>.</>}
+                <div style={{ background: "#e2e8f0", borderRadius: 4, height: 6, marginTop: 6 }}><div style={{ width: `${lote.total ? lote.feitos / lote.total * 100 : 0}%`, background: "#7c3aed", height: 6, borderRadius: 4 }} /></div>
+                {lote.erros.length > 0 && <div style={{ color: "#b91c1c", marginTop: 6 }}>{lote.erros.length} não leu: {lote.erros.join(" · ")}</div>}
+              </div>
+            )}
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+              <thead><tr style={{ background: BRAND, color: "#fff" }}>
+                <th style={th}>Obra</th><th style={th}>Status</th><th style={th}>Contrato anexado</th><th style={{ ...th, ...num }}>Valor (atual)</th><th style={{ ...th, ...num }}>Recebido (antigo)</th><th style={th}></th>
+              </tr></thead>
+              <tbody>
+                {semContrato.filter(casa).sort((a, b) => (contratoDe(a.id) ? 1 : 0) - (contratoDe(b.id) ? 1 : 0) || String(b.numero).localeCompare(String(a.numero), "pt-BR", { numeric: true })).map(o => {
+                  const ct = contratoDe(o.id), todos = anexosCt?.[o.id] || [];
+                  return (
+                    <tr key={o.id}>
+                      <td style={{ ...td, fontWeight: 700 }}>{rotuloObra(o)}{o.obra && <div style={{ fontWeight: 400, fontSize: 11, color: "#64748b" }}>{o.obra}</div>}</td>
+                      <td style={{ ...td, fontSize: 11.5, color: "#64748b" }}>{o.status || "—"}</td>
+                      <td style={{ ...td, fontSize: 11.5, maxWidth: 220 }}>
+                        {anexosCt === null ? "…" : ct ? <span style={{ color: "#047857" }}>📝 {ct.nome}{todos.length > 1 && <span style={{ color: "#94a3b8" }}> (+{todos.length - 1})</span>}</span>
+                          : todos.length ? <span style={{ color: "#b45309" }}>⚠ {todos[0].nome} — a IA não lê</span>
+                          : <b style={{ color: "#b91c1c" }}>Sem contrato anexado</b>}
+                      </td>
+                      <td style={{ ...td, ...num }}><Dinheiro v={o.valorTotal || 0} /></td>
+                      <td style={{ ...td, ...num, color: "#64748b" }}><Dinheiro v={o.valorRecebido || 0} /></td>
+                      <td style={{ ...td, textAlign: "right" }}>
+                        {pode ? <button onClick={() => setGerando(o)} style={btn("#047857", true)}>Gerar à mão</button>
+                          : <button onClick={() => onAbrirFicha(o.id)} style={btn("#64748b", true)}>Abrir</button>}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {!semContrato.length && <tr><td colSpan={6} style={{ ...td, textAlign: "center", color: "#047857", padding: 30, fontWeight: 600 }}>✓ Todas as obras ativas têm financeiro gerado.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        );
+      })()}
 
       {baixando && (
         <BaixaModal obra={baixando.obra} sit={sits[baixando.obra.id]} parcelaId={baixando.parcelaId} ctx={ctx}
@@ -511,6 +622,9 @@ function FichaFinanceira({ obra, ctx, onVoltar, onAbrirObra }) {
         </div>
       ) : (
         <>
+          {!sit.contrato.conferido && (
+            <RascunhoIA r={sit.contrato.rascunho} anexo={anexos[sit.contrato.rascunho?.anexoId]} onAbrir={abrirAnexo} />
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10, marginBottom: 14 }}>
             <Kpi rotulo="Contrato" v={sit.contrato.valor} cor={OURO} />
             <Kpi rotulo="Recebido (principal)" v={sit.principal} cor="#10b981" sub={<>caixa <Dinheiro v={sit.caixa} /></>} />
@@ -523,7 +637,7 @@ function FichaFinanceira({ obra, ctx, onVoltar, onAbrirObra }) {
           <div style={{ ...card, padding: 16, marginBottom: 14 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
               <div style={{ fontWeight: 800, fontSize: 14 }}>📝 Contrato</div>
-              {pode && <button onClick={() => setEditando(true)} style={{ ...btn("#1a1a1a", true), marginLeft: "auto" }}>Editar / renegociar</button>}
+              {pode && <button onClick={() => setEditando(true)} style={{ ...btn(sit.contrato.conferido ? "#1a1a1a" : "#047857", sit.contrato.conferido), marginLeft: "auto" }}>{sit.contrato.conferido ? "Editar / renegociar" : "Conferir e ativar"}</button>}
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "8px 16px", fontSize: 13 }}>
               <Info r="Data do contrato" v={fmtData(sit.contrato.dataContrato)} />
@@ -546,7 +660,7 @@ function FichaFinanceira({ obra, ctx, onVoltar, onAbrirObra }) {
 
           <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "4px 0 8px" }}>
             <div style={{ fontWeight: 800, fontSize: 14 }}>Parcelas</div>
-            {pode && <button onClick={() => setBaixando("")} style={{ ...btn("#047857", true), marginLeft: "auto" }}>+ Recebimento sem parcela</button>}
+            {pode && sit.contrato.conferido && <button onClick={() => setBaixando("")} style={{ ...btn("#047857", true), marginLeft: "auto" }}>+ Recebimento sem parcela</button>}
           </div>
           <div style={{ ...card, overflow: "auto", marginBottom: 16 }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
@@ -564,7 +678,7 @@ function FichaFinanceira({ obra, ctx, onVoltar, onAbrirObra }) {
                     <td style={{ ...td, ...num, color: "#047857" }}>{p.abatido ? <Dinheiro v={p.abatido} /> : "—"}</td>
                     <td style={{ ...td, ...num, fontWeight: 800 }}><Dinheiro v={p.saldo} /></td>
                     <td style={td}><Chip sit={p.situacao} extra={p.diasAtraso ? ` · ${p.diasAtraso}d` : ""} /></td>
-                    <td style={{ ...td, textAlign: "right" }}>{pode && p.saldo > 0.004 && <button onClick={() => setBaixando(p.id)} style={btn("#047857")}>Dar baixa</button>}</td>
+                    <td style={{ ...td, textAlign: "right" }}>{pode && sit.contrato.conferido && p.saldo > 0.004 && <button onClick={() => setBaixando(p.id)} style={btn("#047857")}>Dar baixa</button>}</td>
                   </tr>
                 ))}
                 {!sit.parcelas.length && <tr><td colSpan={8} style={{ ...td, textAlign: "center", color: "#94a3b8", padding: 24 }}>Sem parcelas — edite o contrato para gerar.</td></tr>}
@@ -588,8 +702,28 @@ function FichaFinanceira({ obra, ctx, onVoltar, onAbrirObra }) {
         </>
       )}
 
-      {editando && <ContratoModal obra={obra} atual={reg ? { contrato: reg.contrato, versao: reg.versao } : null} baixas={baixas} ctx={ctx} onFechar={() => setEditando(false)} />}
+      {editando && <ContratoModal obra={obra} atual={reg ? { contrato: reg.contrato, versao: reg.versao } : null} baixas={baixas} ctx={ctx} onFechar={() => setEditando(false)}
+        anexoRascunho={anexos[reg?.contrato?.rascunho?.anexoId]} onAbrirAnexo={abrirAnexo} />}
       {baixando !== null && sit && <BaixaModal obra={obra} sit={sit} parcelaId={baixando} ctx={ctx} onFechar={() => setBaixando(null)} />}
+    </div>
+  );
+}
+
+// Faixa do rascunho lido pela IA: de onde veio, o que ela achou estranho e o link do contrato.
+function RascunhoIA({ r, anexo, onAbrir, compacto = false }) {
+  if (!r) return null;
+  return (
+    <div style={{ background: "#f5f3ff", border: "1px solid #ddd6fe", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 12.5, color: "#4c1d95" }}>
+      <div style={{ fontWeight: 800 }}>
+        ✨ Rascunho lido pela IA {r.anexoNome && <>de {anexo ? <a onClick={() => onAbrir(anexo)} style={{ cursor: "pointer", color: "#6d28d9", textDecoration: "underline" }}>{r.anexoNome}</a> : `"${r.anexoNome}"`}</>}
+        {!compacto && " — ainda não vale: confira contra o contrato e ative."}
+      </div>
+      {r.resumo && <div style={{ marginTop: 3, color: "#5b21b6" }}>{r.resumo}</div>}
+      {r.avisos?.length > 0 && (
+        <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "#92400e" }}>
+          {r.avisos.map((a, i) => <li key={i}>{a}</li>)}
+        </ul>
+      )}
     </div>
   );
 }
@@ -606,10 +740,12 @@ function Info({ r, v, largo }) {
 // ═════════════════════════════════════════════════════════════════════════════
 // Gerar / editar o contrato financeiro. Renegociar depois de haver recebimento pede motivo e
 // fica no histórico; parcela que já recebeu dinheiro não sai da lista.
-function ContratoModal({ obra, atual, baixas = [], ctx, onFechar }) {
+function ContratoModal({ obra, atual, baixas = [], ctx, onFechar, anexoRascunho, onAbrirAnexo }) {
   const { carregar, onAtividade } = ctx;
   const { eu } = usePode();
   const novo = !atual;
+  const conferindo = !!atual && atual.contrato?.conferido === false;
+  const ativando = novo || conferindo;   // é agora que o financeiro passa a valer
   const [c, setC] = useState(() => normContratoFin(atual?.contrato || {
     valor: obra.valorTotal || 0, dataContrato: obra.dataContrato || "", condicao: "",
   }));
@@ -618,7 +754,7 @@ function ContratoModal({ obra, atual, baixas = [], ctx, onFechar }) {
   const [ger, setGer] = useState({ entradaPct: 30, entrada: cent((obra.valorTotal || 0) * 0.3), dataEntrada: obra.dataContrato || hojeLocal(), qtd: 3, primeiroVenc: "", intervalo: "mensal", dias: 30 });
   const [motivo, setMotivo] = useState("");
   const legado = cent(obra.valorRecebido);
-  const [saldoIni, setSaldoIni] = useState({ usar: novo && legado > 0 && !temBaixas, dia: obra.dataContrato || hojeLocal() });
+  const [saldoIni, setSaldoIni] = useState({ usar: ativando && legado > 0 && !temBaixas, dia: obra.dataContrato || hojeLocal() });
   const [ocupado, setOcupado] = useState(false);
   const [erro, setErro] = useState("");
 
@@ -636,6 +772,18 @@ function ContratoModal({ obra, atual, baixas = [], ctx, onFechar }) {
     if (ult) setParcela(ult.id, { valor: cent(ult.valor + dif) });
   }
 
+  // Rascunho: grava como está (sem as travas), para continuar a conferência depois.
+  async function salvarRascunho() {
+    setErro("");
+    if (!(c.valor > 0)) return setErro("Informe o valor do contrato.");
+    setOcupado(true);
+    try {
+      await salvarContratoFin(obra.id, { ...c, parcelas: c.parcelas.map(normParcela), conferido: false }, atual.versao);
+      await carregar();
+      onFechar(true);
+    } catch (e) { setErro(e.message); setOcupado(false); }
+  }
+
   async function salvar() {
     setErro("");
     if (!(c.valor > 0)) return setErro("Informe o valor do contrato.");
@@ -646,22 +794,26 @@ function ContratoModal({ obra, atual, baixas = [], ctx, onFechar }) {
     setOcupado(true);
     const agora = new Date().toISOString();
     const por = eu?.nome || "";
-    const texto = novo ? `Financeiro gerado: ${c.parcelas.length} parcela(s)` : `Contrato alterado${motivo.trim() ? ": " + motivo.trim().toUpperCase() : ""}`;
+    const texto = novo ? `Financeiro gerado: ${c.parcelas.length} parcela(s)`
+      : conferindo ? `Rascunho da IA conferido e ativado: ${c.parcelas.length} parcela(s)`
+      : `Contrato alterado${motivo.trim() ? ": " + motivo.trim().toUpperCase() : ""}`;
     const dados = {
       ...c,
+      conferido: true,
+      rascunho: c.rascunho ? { ...c.rascunho, conferidoEm: agora, conferidoPor: por } : null,
       parcelas: c.parcelas.map(normParcela),
       historico: [...c.historico, { em: agora, porId: eu?.id || null, por, texto }],
       criadoEm: c.criadoEm || agora, criadoPor: c.criadoPor || por,
     };
     try {
       await salvarContratoFin(obra.id, dados, atual?.versao || null);
-      if (novo && saldoIni.usar && legado > 0) {
+      if (ativando && saldoIni.usar && legado > 0 && !temBaixas) {
         await lancarBaixaFin({
           obraId: obra.id, tipo: "saldo_inicial", dia: saldoIni.dia || hojeLocal(), principal: legado,
           obs: "RECEBIDO ANTES DO FINANCEIRO POR CONTRATO (VALOR QUE ESTAVA NA OBRA)", lancadoPor: por,
         });
       }
-      onAtividade?.(obra.id, novo ? "Financeiro do contrato gerado" : `Financeiro: contrato alterado${motivo.trim() ? " — " + motivo.trim() : ""}`);
+      onAtividade?.(obra.id, novo ? "Financeiro do contrato gerado" : conferindo ? "Financeiro do contrato conferido e ativado" : `Financeiro: contrato alterado${motivo.trim() ? " — " + motivo.trim() : ""}`);
       await carregar();
       onFechar(true);
     } catch (e) {
@@ -671,8 +823,9 @@ function ContratoModal({ obra, atual, baixas = [], ctx, onFechar }) {
   }
 
   return (
-    <Modal open title={novo ? `Gerar financeiro — ${rotuloObra(obra)}` : `Contrato — ${rotuloObra(obra)}`} onClose={() => !ocupado && onFechar(false)} width={880}>
+    <Modal open title={novo ? `Gerar financeiro — ${rotuloObra(obra)}` : conferindo ? `Conferir contrato — ${rotuloObra(obra)}` : `Contrato — ${rotuloObra(obra)}`} onClose={() => !ocupado && onFechar(false)} width={880}>
       <div style={{ maxHeight: "70vh", overflowY: "auto", paddingRight: 4 }} data-caixa-alta>
+        {conferindo && <RascunhoIA r={c.rascunho} anexo={anexoRascunho} onAbrir={a => onAbrirAnexo?.(a)} compacto />}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "10px 12px", marginBottom: 14 }}>
           <label><span style={lbl}>Valor do contrato</span><CampoValor value={c.valor} onChange={v => set({ valor: v })} /></label>
           <label><span style={lbl}>Data do contrato</span><InputData value={c.dataContrato} onChange={v => set({ dataContrato: v })} style={inp} /></label>
@@ -746,7 +899,7 @@ function ContratoModal({ obra, atual, baixas = [], ctx, onFechar }) {
             : c.parcelas.length > 0 && <span style={{ color: "#047857", fontWeight: 700 }}>✓ fecha com o contrato</span>}
         </div>
 
-        {novo && legado > 0 && (
+        {ativando && legado > 0 && !temBaixas && (
           <label style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", background: "#f5f3ff", border: "1px solid #ddd6fe", borderRadius: 8, padding: 10, fontSize: 12.5, marginBottom: 12 }}>
             <input type="checkbox" checked={saldoIni.usar} onChange={e => setSaldoIni({ ...saldoIni, usar: e.target.checked })} />
             Lançar os <b><Dinheiro v={legado} /></b> que já estavam como recebidos na obra como <b>saldo inicial</b>, em
@@ -755,7 +908,7 @@ function ContratoModal({ obra, atual, baixas = [], ctx, onFechar }) {
           </label>
         )}
 
-        {!novo && (
+        {!ativando && (
           <label style={{ display: "block", marginBottom: 12 }}><span style={lbl}>Motivo da alteração {temBaixas ? "(obrigatório — já há recebimentos)" : "(opcional)"}</span>
             <input value={motivo} onChange={e => setMotivo(e.target.value)} placeholder="EX.: CLIENTE PEDIU PARA ADIAR A 3ª PARCELA" style={inp} />
           </label>
@@ -764,7 +917,8 @@ function ContratoModal({ obra, atual, baixas = [], ctx, onFechar }) {
       {erro && <div style={{ background: "#fee2e2", color: "#b91c1c", borderRadius: 8, padding: "8px 12px", fontSize: 13, margin: "10px 0" }}>{erro}</div>}
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
         <button onClick={() => onFechar(false)} disabled={ocupado} style={btn("#64748b", true)}>Cancelar</button>
-        <button onClick={salvar} disabled={ocupado} style={btn("#047857")}>{ocupado ? "Gravando…" : novo ? "Gerar financeiro" : "Salvar contrato"}</button>
+        {conferindo && <button onClick={salvarRascunho} disabled={ocupado} style={btn("#7c3aed", true)}>Salvar rascunho</button>}
+        <button onClick={salvar} disabled={ocupado} style={btn("#047857")}>{ocupado ? "Gravando…" : novo ? "Gerar financeiro" : conferindo ? "Confirmar e ativar" : "Salvar contrato"}</button>
       </div>
     </Modal>
   );

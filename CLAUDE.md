@@ -217,7 +217,7 @@ As peças server-side são duas Edge Functions:
 | Função | Entrada | O que faz |
 |---|---|---|
 | `parse-obra-pdf` | `POST { lines: string[], filename }` + `Authorization: Bearer <jwt>` | Valida o usuário, manda o texto do PDF para a API da Anthropic (`claude-sonnet-5`, tool-use forçado) e devolve a obra estruturada. Erros → 400/401/500/502; o cliente cai no parser local. |
-| `analisar-documento` | `POST { anexoId, contexto }` + `Authorization: Bearer <jwt>` | Busca o anexo **pelo id** com o login do usuário (RLS de `obra_anexos` e do bucket `obras`), manda o PDF (`document`) ou a imagem (`image`) para `claude-opus-5` com structured outputs e `fallbacks: "default"`, e devolve `{tipo, resumo, contrato, pagamento, compra, avisos}`. **Não grava nada.** Até 20 MB. `contexto` = cliente e itens de compra da obra, sem valores. |
+| `analisar-documento` | `POST { anexoId, contexto }` + `Authorization: Bearer <jwt>` | Busca o anexo **pelo id** com o login do usuário (RLS de `obra_anexos` e do bucket `obras`), manda o PDF (`document`) ou a imagem (`image`) para `claude-opus-5` com structured outputs e `fallbacks: "default"`, e devolve `{tipo, resumo, contrato, financeiro, pagamento, compra, avisos}` (`financeiro` = forma, condição, multa/juros e parcelas do contrato). **Não grava nada.** Até 20 MB. `contexto` = cliente e itens de compra da obra, sem valores. |
 
 | `whatsapp-notificar` | gatilho: `POST { notificacaoId }` + header `x-segredo`; teste: `POST { teste: userId }` + JWT do master | Lê a notificação com a service_role, monta a mensagem (sem R$, com link para o app) e manda pela Evolution (`/message/sendText/<instância>`, `{number, text}`) para `profiles.whatsapp`. Grava cada tentativa em `whatsapp_envios`. `verify_jwt = false` (`config.toml`): quem chama é o banco. |
 
@@ -783,6 +783,18 @@ espelhou. Por isso Dashboard, `finObra`, a 🚩 de compras e os relatórios segu
 tabelas. A seção Financeiro da obra só lê (o campo "Valor Recebido" saiu) e tem o botão para a ficha. O
 "vencido" do espelho é calculado na leitura (`vencidoDoResumo`), e a Central de avisos ganhou a área
 Financeiro (sem financeiro gerado; parcela vencida). Reimportar o PDF não troca o valor com financeiro gerado.
+**Rascunho da IA em lote.** Na aba "Sem financeiro", "✨ Gerar rascunhos com IA" lê o contrato anexado mais
+recente de cada obra (`fetchContratosAnexados`; só PDF/imagem até 20 MB, duas leituras por vez) com a
+`analisar-documento`, que devolve também o bloco `financeiro {forma, condicao, multaPct, jurosMesPct,
+parcelas[]}`, e grava em `fin_contratos` com `conferido: false` + `rascunho {anexoId, anexoNome, resumo,
+avisos}` (`contratoDoRascunhoIA`: o que a IA não trouxe cai no que a obra tem, e o que não fecha vira aviso —
+valor diferente da obra, soma das parcelas, parcela sem vencimento). Rascunho **não vale**: fica fora dos
+indicadores e do a receber, não espelha na obra e não recebe baixa. Aparece na aba "A conferir"; na ficha,
+"Conferir e ativar" abre o popup com os avisos e o link do contrato, "Salvar rascunho" guarda sem as travas
+e "Confirmar e ativar" exige soma fechando e todo vencimento preenchido — é aí que entra o saldo inicial.
+Contrato gravado antes do campo existir conta como conferido (`conferido !== false`). A mesma tela lista as
+obras sem contrato anexado e as com contrato que a IA não lê. Roda no navegador, com o login de quem clica
+(RLS e acesso `financeiro` valem) — a IA demora ~20 s por contrato, então a aba precisa ficar aberta.
 
 **Caixa alta nos cadastros é um ouvinte, não um onChange por campo.** `caixaAlta.js` (ligado no `main.jsx`)
 escuta `input` na captura, antes do React, e converte o campo para maiúscula quando ele está dentro de um

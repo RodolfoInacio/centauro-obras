@@ -36,7 +36,7 @@ const DATA = "Data no formato AAAA-MM-DD, ou \"\" se não houver";
 const SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["tipo", "resumo", "contrato", "pagamento", "compra", "avisos"],
+  required: ["tipo", "resumo", "contrato", "financeiro", "pagamento", "compra", "avisos"],
   properties: {
     tipo: {
       type: "string",
@@ -62,6 +62,37 @@ const SCHEMA = {
         cor: txt("Cor/acabamento do alumínio"),
         vidro: txt("Especificação do vidro"),
         obs: txt("Condições de pagamento, prazo em dias e outras cláusulas úteis para o escritório, em poucas linhas"),
+      },
+    },
+    financeiro: {
+      type: "object",
+      additionalProperties: false,
+      description: "Só para tipo contrato: a estrutura de pagamento combinada com o cliente.",
+      required: ["forma", "condicao", "multaPct", "jurosMesPct", "parcelas"],
+      properties: {
+        forma: {
+          type: "string",
+          enum: ["PIX", "BOLETO", "TRANSFERÊNCIA", "CARTÃO DE CRÉDITO", "CARTÃO DE DÉBITO", "DINHEIRO", "CHEQUE", "PERMUTA", "OUTRO", ""],
+          description: "Forma de pagamento principal; \"\" se o contrato não disser",
+        },
+        condicao: txt("A condição de pagamento resumida numa linha, como está no contrato (ex.: 30% na assinatura + 3x mensais)"),
+        multaPct: num("Multa por atraso em %, 0 se o contrato não prever"),
+        jurosMesPct: num("Juros de mora ao mês em %, 0 se o contrato não prever (1% ao mês = 1; 0,033% ao dia ≈ 1)"),
+        parcelas: {
+          type: "array",
+          description: "Cada pagamento previsto, na ordem. A soma deve fechar com o valor total.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["descricao", "vencimento", "valor", "forma"],
+            properties: {
+              descricao: txt("Ex.: ENTRADA, PARCELA 1/3, NA ENTREGA DOS VIDROS"),
+              vencimento: txt(DATA + " — calcule quando o contrato der a regra a partir de uma data conhecida (ex.: 30 dias após a assinatura); \"\" se depender de um evento sem data (entrega, instalação)"),
+              valor: num("Valor da parcela em reais (converta percentual em valor)"),
+              forma: txt("Forma desta parcela se for diferente da principal, senão \"\""),
+            },
+          },
+        },
       },
     },
     pagamento: {
@@ -109,6 +140,7 @@ A Centauro é a CONTRATADA nos contratos, a RECEBEDORA nos comprovantes de pagam
 - Identifique o tipo e preencha só o bloco correspondente; os outros blocos voltam com "" e 0.
 - Valores em reais como número: "7.427,92" = 7427.92.
 - Datas sempre AAAA-MM-DD.
+- No contrato, preencha "financeiro" com a forma, a condição e TODAS as parcelas previstas (entrada, parcelas, saldo na entrega…). Percentual vira valor sobre o total, e o último centavo vai na última parcela para a soma fechar. Vencimento que depende de evento sem data fica "" e o evento vai na descrição. Se a soma não fechar com o total ou a condição for ambígua, diga em avisos.
 - Nunca invente: campo que não está no documento volta vazio. Se algo estiver ilegível, ambíguo ou parecer ser de outro cliente/obra (compare com o contexto), escreva em avisos.`;
 
 Deno.serve(async (req: Request) => {

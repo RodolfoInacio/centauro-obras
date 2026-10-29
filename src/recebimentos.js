@@ -73,7 +73,52 @@ export function normContratoFin(c) {
     historico: Array.isArray(o.historico) ? o.historico : [],
     criadoEm: o.criadoEm || null,
     criadoPor: o.criadoPor || "",
+    // Rascunho lido pela IA do contrato anexado: não espelha na obra nem recebe baixa até alguém
+    // conferir. Contrato gerado à mão (sem o campo) já nasce conferido.
+    conferido: o.conferido !== false,
+    rascunho: o.rascunho && typeof o.rascunho === "object" ? o.rascunho : null,
   };
+}
+
+// Monta o rascunho do contrato a partir da leitura da IA (analisar-documento) do contrato anexado.
+// Tudo que a IA não trouxe cai no que a obra já tem; o que não fecha vira aviso para a conferência.
+export function contratoDoRascunhoIA(obra, ia, anexo, por) {
+  const ct = ia?.contrato || {}, fin = ia?.financeiro || {};
+  const valor = cent(ct.valorTotal) || cent(obra.valorTotal);
+  const base = Date.now();
+  let parcelas = (Array.isArray(fin.parcelas) ? fin.parcelas : [])
+    .filter(p => cent(p.valor) > 0)
+    .map((p, i) => normParcela({
+      id: `p_${base}_${i}`, descricao: String(p.descricao || `PARCELA ${i + 1}`).toUpperCase(),
+      vencimento: /^\d{4}-\d{2}-\d{2}$/.test(p.vencimento || "") ? p.vencimento : "",
+      valor: p.valor, forma: String(p.forma || "").toUpperCase(),
+    }, i));
+  const avisos = [...(Array.isArray(ia?.avisos) ? ia.avisos : [])];
+  if (ia?.tipo && ia.tipo !== "contrato") avisos.push(`A IA leu este anexo como "${ia.tipo}", não como contrato.`);
+  if (!cent(ct.valorTotal)) avisos.push("O contrato não trouxe o valor total — usado o valor que estava na obra.");
+  else if (cent(obra.valorTotal) && Math.abs(cent(ct.valorTotal) - cent(obra.valorTotal)) > 0.5) avisos.push("O valor do contrato é diferente do que estava na obra.");
+  if (!parcelas.length) {
+    parcelas = [normParcela({ id: `p_${base}_0`, descricao: "A DEFINIR", vencimento: "", valor })];
+    avisos.push("A IA não achou as parcelas — ficou uma parcela única a definir.");
+  }
+  const dif = cent(valor - somaParcelas(parcelas));
+  if (dif !== 0) avisos.push("A soma das parcelas lidas não fecha com o valor do contrato.");
+  if (parcelas.some(p => !p.vencimento)) avisos.push("Há parcela sem vencimento (depende de evento ou não estava no contrato).");
+  const agora = new Date().toISOString();
+  return normContratoFin({
+    valor,
+    dataContrato: /^\d{4}-\d{2}-\d{2}$/.test(ct.dataContrato || "") ? ct.dataContrato : obra.dataContrato || "",
+    forma: String(fin.forma || "").toUpperCase(),
+    condicao: String(fin.condicao || "").toUpperCase(),
+    multaPct: cent(fin.multaPct) || 2,
+    jurosMesPct: cent(fin.jurosMesPct) || 1,
+    obs: String(ct.obs || ""),
+    parcelas,
+    historico: [{ em: agora, porId: null, por, texto: `Rascunho gerado pela IA a partir de "${anexo.nome}"` }],
+    criadoEm: agora, criadoPor: por,
+    conferido: false,
+    rascunho: { anexoId: anexo.id, anexoNome: anexo.nome, em: agora, resumo: ia?.resumo || "", avisos },
+  });
 }
 
 export const somaParcelas = parcelas => cent(parcelas.reduce((a, p) => a + (Number(p.valor) || 0), 0));
