@@ -740,6 +740,10 @@ Limite aceito: tarefa **sem equipe** não vai ao calendário e por isso não ger
   não estica o grupo, não pesa no % e `tarefasAgendadas` a pula (sem calendário, diário nem atraso). Quem
   dependia dela começa onde ela começaria. Ex.: os metais já estão na obra. Preferido a excluir porque
   reativar devolve a linha como estava.
+- **Duplicar** ("⧉ Duplicar" na barra): copia a linha selecionada e tudo dentro dela logo abaixo do bloco — o caso é
+  montar Produção à mão e repetir em Instalação. A cópia começa quando a original termina (TI na original), as
+  ligações internas apontam para as cópias, e nasce sem %, sem 📌 e **sem `etapa`** (mantém `itemId`): com a etapa
+  copiada, aprovar o diário da Instalação marcaria a Produção no item.
 - **Excluir cronograma pede senha** (`ExcluirCronograma`, `HASH_SENHA_CRONOGRAMA` no App.jsx — só o
   SHA-256, tranca visual): 🗑 na linha do macro e "🗑 Excluir cronograma" na barra do editor (dentro da obra e
   em tela cheia). Espera o banco antes de tirar da tela (`deleteCronograma` falha se a RLS não apagar nada) e

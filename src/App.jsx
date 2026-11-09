@@ -3589,6 +3589,31 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
     setTasks(renumerarIds(c.tasks.filter((_, i) => i !== selIdx)));
     setSel(null);
   }
+  // Duplica a linha selecionada com tudo que está dentro dela (Produção → Instalação). A cópia entra
+  // logo abaixo do bloco, começa quando a original termina e nasce zerada: sem %, sem 📌 e sem
+  // `etapa` (senão aprovar o diário da cópia marcaria a etapa da original no item).
+  function duplicar() {
+    if (selIdx < 0) return;
+    const bloco = [selIdx, ...descendentesDe(c.tasks, selIdx)];
+    let prox = Math.max(0, ...c.tasks.map(t => t.id)) + 1;
+    const novoId = {};
+    for (const i of bloco) novoId[c.tasks[i].id] = prox++;
+    const copias = bloco.map((i, k) => {
+      const t = c.tasks[i];
+      const preds = k === 0
+        ? [{ id: t.id, tipo: "TI" }]
+        : normPredecessoras(t.predecessoras).map(p => novoId[p.id] ? { id: novoId[p.id], tipo: p.tipo } : p);
+      const { etapa, ...resto } = t;
+      return {
+        ...resto, id: novoId[t.id], nome: k === 0 ? `${t.nome} (cópia)` : t.nome,
+        percent: 0, inicioFixo: false, inicioManual: "", colapsada: false, predecessoras: preds,
+      };
+    });
+    const arr = [...c.tasks];
+    arr.splice(bloco[bloco.length - 1] + 1, 0, ...copias);
+    setTasks(arr);
+    setSel(copias[0].id);
+  }
   // "Não se aplica" vale para a linha e tudo que está dentro dela: anular o grupo Suprimentos anula
   // Metais, Acessórios e Vidros. A linha continua na grade, riscada, e volta como estava ao reativar.
   function alternarNaoSeAplica() {
@@ -3668,6 +3693,8 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
           <button onClick={() => indent(-1)} style={btn} title="Desindentar">←</button>
           <button onClick={() => mover(-1)} style={btn} title="Mover para cima">↑</button>
           <button onClick={() => mover(1)} style={btn} title="Mover para baixo">↓</button>
+          <button onClick={duplicar} disabled={selIdx < 0} style={{ ...btn, opacity: selIdx < 0 ? 0.5 : 1 }}
+            title="Duplica a linha selecionada e tudo que está dentro dela, logo abaixo — a cópia começa quando a original termina">⧉ Duplicar</button>
           <button onClick={alternarNaoSeAplica} disabled={selIdx < 0} style={{ ...btn, opacity: selIdx < 0 ? 0.5 : 1 }}
             title="Marca a linha selecionada (e o que está dentro dela) como não se aplica nesta obra: fica riscada, sem duração, e não segura as próximas">
             {selIdx >= 0 && naoSeAplica(c.tasks[selIdx]) ? "↺ Reativar" : "⊘ Não se aplica"}
