@@ -7,7 +7,7 @@
 //   - os diários que aguardam registro (diariosPendentes) e as atividades do dia (tarefasDoDia).
 // Funções puras, fora do App.jsx para o Diário, os avisos e os relatórios importarem sem ciclo.
 // ─────────────────────────────────────────────────────────────────────────────
-import { ehResumo, ehDiaUtil, dayKey, normConfig, percentEsperadoEm, situacaoTarefa, terminoProjetado, diasUteisEntre } from "./cronograma";
+import { ehResumo, naoSeAplica, ehDiaUtil, dayKey, normConfig, percentEsperadoEm, situacaoTarefa, terminoProjetado, diasUteisEntre } from "./cronograma";
 
 const ts = c => Number(String(c.id).replace(/^cr_/, "")) || 0;
 
@@ -21,7 +21,8 @@ export function cronogramaDaObra(cronogramas, obraId) {
   return cronogramasDaObra(cronogramas, obraId)[0] || null;
 }
 
-// Folhas de todos os cronogramas com as datas do macro (início herdado já aplicado).
+// Folhas de todos os cronogramas com as datas do macro (início herdado já aplicado). A linha
+// "não se aplica" fica de fora: não vai ao calendário, não pede diário nem conta atraso.
 // [{ cronoId, obraId, task, inicio, termino, config }]
 export function tarefasAgendadas(cronogramas, macro) {
   const out = [];
@@ -30,7 +31,7 @@ export function tarefasAgendadas(cronogramas, macro) {
     if (!m || !m.sched) continue;
     const tasks = c.tasks || [];
     tasks.forEach((t, i) => {
-      if (ehResumo(tasks, i)) return;
+      if (ehResumo(tasks, i) || naoSeAplica(t)) return;
       const s = m.sched[t.id];
       if (!s || !s.inicio) return;
       out.push({ cronoId: c.id, obraId: c.obraId || null, task: t, inicio: s.inicio, termino: s.termino, config: m.config });

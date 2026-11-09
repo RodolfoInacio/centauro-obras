@@ -8,7 +8,7 @@ import AprovacoesCompra, { contarAguardando } from "./AprovacoesCompra";
 import { normArquivo, obraAtiva, comPasso, AcoesArquivo, PastaArquivo, ACAO_ROTULO } from "./ArquivoObras";
 import OrcamentosView, { OrcamentoPrint, normOrcamento } from "./OrcamentoLivre";
 import { cronogramaDaObra, cronogramasDaObra, datasDosItens, servicosPlanejados, agendaEfetiva, conflitosAgenda, andamentoObra, idAjuste } from "./planejamento";
-import { agendar, agendarMacro, situacaoTarefa, percentEsperadoEm, SITUACAO_ROTULO, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent, normPredecessoras, parsePredecessoras, textoPredecessoras, inicioEstaFixo, toLocalISO } from "./cronograma";
+import { agendar, agendarMacro, situacaoTarefa, percentEsperadoEm, SITUACAO_ROTULO, CONFIG_PADRAO, normConfig, fmtDataHora, textoDuracao, textoDias, MESES_ABBR, DOW1, ehDiaUtil, renumerarIds, descendentesDe, indicesVisiveis, distribuirPercent, normPredecessoras, parsePredecessoras, textoPredecessoras, inicioEstaFixo, naoSeAplica, toLocalISO } from "./cronograma";
 import CronogramaPrint from "./CronogramaPrint";
 import Modal from "./Modal";
 import PainelLembretes, { normLembrete } from "./PainelLembretes";
@@ -3146,6 +3146,7 @@ function CronogramaMacroView({ cronogramas, obras, macro, onNovo, onNovoComModel
   const [perguntarVidros, setPerguntarVidros] = useState(false);
   const [aviso, setAviso] = useState("");
   const [zoom, setZoom] = useState("semana"); // semana | mes
+  const [excluirId, setExcluirId] = useState(null);
 
   const obraSelecionada = obras.find(o => o.id === obraId) || null;
 
@@ -3330,8 +3331,8 @@ function CronogramaMacroView({ cronogramas, obras, macro, onNovo, onNovoComModel
                       onCommit={txt => commitPred(c, txt)} />
                   </div>
                   <div style={{ width: COL.del, textAlign: "center" }}>
-                    <button onClick={e => { e.stopPropagation(); if (confirm(`Excluir o cronograma "${c.titulo}"?`)) onExcluir(c.id); }}
-                      title="Excluir cronograma" style={{ border: "none", background: "transparent", cursor: "pointer", color: "#cbd5e1", fontSize: 12 }}>🗑</button>
+                    <button onClick={e => { e.stopPropagation(); setExcluirId(c.id); }}
+                      title="Excluir este cronograma (pede senha)" style={{ border: "none", background: "transparent", cursor: "pointer", color: "#94a3b8", fontSize: 14, padding: "2px 4px" }}>🗑</button>
                   </div>
                 </div>
               );
@@ -3418,14 +3419,67 @@ function CronogramaMacroView({ cronogramas, obras, macro, onNovo, onNovoComModel
           </div>
         </div>
       )}
+      {excluirId && (() => {
+        const cr = cronogramas.find(x => x.id === excluirId);
+        return <ExcluirCronograma cronograma={cr} obra={cr?.obraId ? obras.find(o => o.id === cr.obraId) : null}
+          onConfirmar={onExcluir} onFechar={() => setExcluirId(null)} />;
+      })()}
     </div>
+  );
+}
+
+// Excluir cronograma pede senha. Só o SHA-256 fica no código (o repositório é público) — é tranca
+// visual, como a do Sigilo e a das Configurações, não segurança.
+const HASH_SENHA_CRONOGRAMA = "dcedd50f0ea6e9d51ec51f4b7a84bea5568674c83213b6e2af442f0c3d47188d";
+async function sha256Hex(texto) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(texto));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+// `onConfirmar` é async: a tela só fecha depois que o banco apagou; erro fica no próprio popup.
+function ExcluirCronograma({ cronograma, obra, onConfirmar, onFechar }) {
+  const [senha, setSenha] = useState("");
+  const [erro, setErro] = useState("");
+  const [gravando, setGravando] = useState(false);
+  if (!cronograma) return null;
+  async function confirmar() {
+    if (await sha256Hex(senha) !== HASH_SENHA_CRONOGRAMA) { setErro("Senha incorreta."); return; }
+    setGravando(true); setErro("");
+    try { await onConfirmar(cronograma.id); onFechar(); }
+    catch (e) { setErro("Não foi possível excluir: " + (e.message || String(e))); setGravando(false); }
+  }
+  const nTarefas = (cronograma.tasks || []).length;
+  return (
+    <Modal open title="Excluir cronograma" onClose={gravando ? undefined : onFechar} width={440}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "#1e293b", marginBottom: 6 }}>
+        {cronograma.titulo}{obra ? ` · Obra #${obra.numero} — ${obra.cliente}` : ""}
+      </div>
+      <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.5, marginBottom: 14 }}>
+        As {nTarefas} tarefa(s) e as datas planejadas somem, e os dias que o cronograma punha no Calendário saem junto.
+        Diários, serviços lançados à mão no Calendário e a obra continuam. <b>Não dá para desfazer.</b>
+      </div>
+      <label style={{ fontSize: 12, color: "#64748b", display: "block", marginBottom: 4 }}>Senha</label>
+      <input type="password" value={senha} autoFocus onChange={e => { setSenha(e.target.value); setErro(""); }}
+        onKeyDown={e => { if (e.key === "Enter" && !gravando) confirmar(); }}
+        style={{ width: "100%", boxSizing: "border-box", border: "1px solid #cbd5e1", borderRadius: 6, padding: "7px 10px", fontSize: 13, marginBottom: 10 }} />
+      {erro && <div style={{ color: "#dc2626", fontSize: 12.5, marginBottom: 10 }}>{erro}</div>}
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <button onClick={onFechar} disabled={gravando}
+          style={{ background: "#fff", color: "#1a1a1a", border: "1px solid #e2e8f0", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>Cancelar</button>
+        <button onClick={confirmar} disabled={gravando || !senha}
+          style={{ background: "#dc2626", color: "#fff", border: "none", borderRadius: 7, padding: "7px 14px", fontWeight: 700, fontSize: 12, cursor: gravando || !senha ? "default" : "pointer", opacity: gravando || !senha ? 0.6 : 1 }}>
+          {gravando ? "Excluindo…" : "🗑 Excluir cronograma"}
+        </button>
+      </div>
+    </Modal>
   );
 }
 
 // `embutido`: dentro da tela da obra — o Ctrl+Z só vale com o foco no próprio cronograma (lá há
 // outros campos na tela) e a altura da grade fica limitada, com rolagem.
 // `conflitos`: { [taskId]: texto } das tarefas cuja equipe está em outra obra no mesmo dia.
-function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, onSalvarAgora, dataBaseEfetiva, origemInicio, onImprimir, embutido = false, conflitos = {}, onAbrirGeral }) {
+// `onExcluir(id)`: async, apaga o cronograma no banco (o botão pede a senha antes).
+function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, onSalvarAgora, dataBaseEfetiva, origemInicio, onImprimir, embutido = false, conflitos = {}, onAbrirGeral, onExcluir }) {
   const raiz = useRef(null);
   const [c, setC] = useState(cronograma);
   const [sel, setSel] = useState(null);
@@ -3434,6 +3488,7 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
   const [percentValor, setPercentValor] = useState("0");
   const [expandidoId, setExpandidoId] = useState(null); // id da task-item com detalhes abertos
   const [comentarioDraft, setComentarioDraft] = useState("");
+  const [excluindo, setExcluindo] = useState(false);
   const undoStack = useRef([]); // snapshots de `c` para Ctrl+Z (~20 níveis)
   const lastGroup = useRef({ key: null, time: 0 });
   const GROUP_MS = 800; // edições seguidas no mesmo campo viram 1 undo só
@@ -3480,9 +3535,10 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
   const equipePorId = Object.fromEntries(equipes.map(e => [e.id, e]));
   // Situação de cada folha, calculada uma vez: a coluna Situação e a cor da barra leem daqui.
   const situacao = {};
+  const anuladas = new Set(c.tasks.filter(naoSeAplica).map(t => t.id));
   for (const t of c.tasks) {
     const sc = sched[t.id];
-    if (sc && !sc.isSummary) situacao[t.id] = situacaoTarefa(t.percent, sc.inicio, sc.termino, agora, cfg);
+    if (sc && !sc.isSummary && !anuladas.has(t.id)) situacao[t.id] = situacaoTarefa(t.percent, sc.inicio, sc.termino, agora, cfg);
   }
 
   // faixa da timeline
@@ -3532,6 +3588,14 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
     if (selIdx < 0 || c.tasks.length <= 1) return;
     setTasks(renumerarIds(c.tasks.filter((_, i) => i !== selIdx)));
     setSel(null);
+  }
+  // "Não se aplica" vale para a linha e tudo que está dentro dela: anular o grupo Suprimentos anula
+  // Metais, Acessórios e Vidros. A linha continua na grade, riscada, e volta como estava ao reativar.
+  function alternarNaoSeAplica() {
+    if (selIdx < 0) return;
+    const novo = !naoSeAplica(c.tasks[selIdx]);
+    const alvo = new Set([selIdx, ...descendentesDe(c.tasks, selIdx)]);
+    setTasks(c.tasks.map((t, i) => alvo.has(i) ? { ...t, naoSeAplica: novo } : t));
   }
   // Percentual do resumo é derivado (média ponderada pelas horas das folhas), então "definir 50%
   // no grupo" só existe como escrita nas folhas — distribuídas por peso, na ordem da lista.
@@ -3604,15 +3668,24 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
           <button onClick={() => indent(-1)} style={btn} title="Desindentar">←</button>
           <button onClick={() => mover(-1)} style={btn} title="Mover para cima">↑</button>
           <button onClick={() => mover(1)} style={btn} title="Mover para baixo">↓</button>
-          <button onClick={excluir} style={{ ...btn, color: "#dc2626", borderColor: "#fecaca" }} title="Excluir">🗑</button>
+          <button onClick={alternarNaoSeAplica} disabled={selIdx < 0} style={{ ...btn, opacity: selIdx < 0 ? 0.5 : 1 }}
+            title="Marca a linha selecionada (e o que está dentro dela) como não se aplica nesta obra: fica riscada, sem duração, e não segura as próximas">
+            {selIdx >= 0 && naoSeAplica(c.tasks[selIdx]) ? "↺ Reativar" : "⊘ Não se aplica"}
+          </button>
+          <button onClick={excluir} style={{ ...btn, color: "#dc2626", borderColor: "#fecaca" }} title="Excluir a tarefa selecionada">🗑</button>
           <button onClick={() => setZoom(z => z === "dia" ? "semana" : "dia")} style={btn} title="Zoom">{zoom === "dia" ? "🔍 Semana" : "🔍 Dia"}</button>
           <button onClick={() => onSalvarAgora && onSalvarAgora(c)} disabled={!dirty}
             title={dirty ? "Há alterações não salvas — clique para salvar agora" : "Tudo salvo"}
             style={{ ...btn, background: dirty ? "#10b981" : "#fff", color: dirty ? "#fff" : "#94a3b8", borderColor: dirty ? "#10b981" : "#e2e8f0", cursor: dirty ? "pointer" : "default" }}>
             {dirty ? "💾 Salvar" : "✓ Salvo"}
           </button>
+          {onExcluir && (
+            <button onClick={() => setExcluindo(true)} style={{ ...btn, color: "#dc2626", borderColor: "#fecaca" }}
+              title="Apagar este cronograma inteiro (pede senha)">🗑 Excluir cronograma</button>
+          )}
         </div>
       </div>
+      {excluindo && <ExcluirCronograma cronograma={c} obra={obraVinculada} onConfirmar={onExcluir} onFechar={() => setExcluindo(false)} />}
 
       {/* Split: grade + gantt */}
       <div style={{ display: "flex", alignItems: "flex-start", overflowX: "auto", ...(embutido ? { maxHeight: "70vh", overflowY: "auto" } : {}) }}>
@@ -3636,6 +3709,8 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
             const sc = sched[t.id] || {};
             const selRow = sel === t.id;
             const cor = t.nivel === 0 ? "#dc2626" : sc.isSummary ? BRAND : "#1e293b";
+            const anulada = anuladas.has(t.id);
+            const traco = <span style={{ color: "#cbd5e1" }}>—</span>;
             return (
               <div key={t.id} onClick={() => setSel(t.id)}
                 style={{ display: "flex", alignItems: "center", height: CR_ROW_H, borderBottom: "1px solid #f1f5f9", background: selRow ? "#eff6ff" : (i % 2 ? "#fafafa" : "#fff"), fontSize: 12, cursor: "pointer" }}>
@@ -3648,7 +3723,7 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
                     </button>
                   )}
                   <input value={t.nome} onChange={e => updTask(t.id, { nome: e.target.value }, "nome")} onClick={e => e.stopPropagation()}
-                    style={{ ...inp, border: "1px solid transparent", background: "transparent", width: "100%", fontWeight: (sc.isSummary || t.nivel === 0) ? 700 : 400, color: cor }} />
+                    style={{ ...inp, border: "1px solid transparent", background: "transparent", width: "100%", fontWeight: (sc.isSummary || t.nivel === 0) ? 700 : 400, color: anulada ? "#94a3b8" : cor, textDecoration: anulada ? "line-through" : "none" }} />
                   {t.descricaoCompleta && (
                     <button onClick={e => { e.stopPropagation(); setExpandidoId(id => id === t.id ? null : t.id); }}
                       title="Ver detalhes e comentário" style={{ flexShrink: 0, border: "none", background: "transparent", cursor: "pointer", color: expandidoId === t.id ? BRAND : "#94a3b8", fontSize: 12, padding: "0 4px" }}>
@@ -3659,6 +3734,7 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
                 <div style={{ width: COL.dur, textAlign: "center" }}>
                   {sc.isSummary
                     ? <span style={{ color: "#64748b", fontWeight: 600 }}>{textoDuracao(t, sc)}</span>
+                    : anulada ? traco
                     : <span onClick={e => e.stopPropagation()} style={{ display: "inline-flex", gap: 3 }}>
                         <input type="number" min={0} max={999} step="0.5" value={t.durValor} onChange={e => updTask(t.id, { durValor: clampDuracao(e.target.value) }, "durValor")} style={{ ...inp, width: 58, textAlign: "right" }} />
                         <select value={t.durUnid} onChange={e => updTask(t.id, { durUnid: e.target.value })} style={{ ...inp, width: 56, paddingRight: 2 }}>
@@ -3668,11 +3744,13 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
                 </div>
                 <div style={{ width: COL.pct, textAlign: "center" }}>
                   {sc.isSummary ? <b onClick={e => { e.stopPropagation(); abrirPercent(t, sc.percent); }} style={{ cursor: "pointer", textDecoration: "underline dotted #cbd5e1" }} title="Definir o percentual deste grupo">{sc.percent}%</b>
+                    : anulada ? traco
                     : <InputPercent valor={t.percent} onClick={e => e.stopPropagation()} onChange={v => updTask(t.id, { percent: v }, "percent")} style={{ ...inp, width: 54, textAlign: "center" }} />}
                 </div>
                 <div style={{ width: COL.ini, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11 }}>
                   {sc.isSummary
                     ? <span style={{ color: "#64748b" }}>{fmtDataHora(sc.inicio)}</span>
+                    : anulada ? traco
                     : (() => {
                         const fixo = inicioEstaFixo(t);
                         // O motor empurra para o próximo instante útil: se o digitado caiu num sábado ou
@@ -3691,7 +3769,7 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
                         );
                       })()}
                 </div>
-                <div style={{ width: COL.term, textAlign: "center", fontSize: 11, color: "#64748b" }}>{fmtDataHora(sc.termino)}</div>
+                <div style={{ width: COL.term, textAlign: "center", fontSize: 11, color: "#64748b" }}>{anulada && !sc.isSummary ? traco : fmtDataHora(sc.termino)}</div>
                 <div style={{ width: COL.pred, textAlign: "center" }}>
                   <PredInput valor={textoPredecessoras(t.predecessoras)} width={70}
                     titulo={"4 = começa quando a 4 termina\n4II = começa junto com a 4\nVárias: 3, 4II"}
@@ -3701,7 +3779,7 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
                     }} />
                 </div>
                 <div style={{ width: COL.eq, display: "flex", alignItems: "center", justifyContent: "center", gap: 2 }}>
-                  {!sc.isSummary && (
+                  {!sc.isSummary && !anulada && (
                     <select value={t.equipeId || ""} onClick={e => e.stopPropagation()}
                       onChange={e => updTask(t.id, { equipeId: e.target.value || null })}
                       title="Os dias desta tarefa entram no Calendário para esta equipe"
@@ -3717,6 +3795,8 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
                 </div>
                 <div style={{ width: COL.sit, textAlign: "center" }}>
                   {(() => {
+                    if (anulada) return <span title="Esta linha não se aplica nesta obra — selecione e clique em ↺ Reativar para voltar"
+                      style={{ fontSize: 10.5, fontWeight: 800, color: "#64748b", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 999, padding: "1px 7px", whiteSpace: "nowrap" }}>Não se aplica</span>;
                     const k = situacao[t.id];
                     if (!k) return null;
                     const r = SITUACAO_ROTULO[k];
@@ -3774,7 +3854,7 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
               {visIdxs.map((origI, i) => { const t = c.tasks[origI]; return normPredecessoras(t.predecessoras).map(({ id: pid, tipo }) => {
                 const pi = visIndexById[pid];
                 const ps = sched[pid], ss = sched[t.id];
-                if (pi === undefined || !ps || !ss) return null;
+                if (pi === undefined || !ps || !ss || anuladas.has(pid) || anuladas.has(t.id)) return null;
                 const y1 = pi * CR_ROW_H + CR_ROW_H / 2;
                 const x2 = ((ss.inicio - tStart) / CR_DAY_MS) * DAY_W;
                 const y2 = i * CR_ROW_H + CR_ROW_H / 2;
@@ -3789,7 +3869,7 @@ function CronogramaEditor({ cronograma, onChange, obras, equipes = [], dirty, on
             {/* barras */}
             {visIdxs.map((origI, i) => {
               const t = c.tasks[origI];
-              const sc = sched[t.id]; if (!sc) return null;
+              const sc = sched[t.id]; if (!sc || anuladas.has(t.id)) return null;
               const x = ((sc.inicio - tStart) / CR_DAY_MS) * DAY_W;
               const w = Math.max(((sc.termino - sc.inicio) / CR_DAY_MS) * DAY_W, 4);
               const y = i * CR_ROW_H;
@@ -4622,15 +4702,18 @@ export default function App() {
       showError("Erro ao salvar cronograma: " + err.message);
     }
   }, []);
-  const handleDeleteCronograma = useCallback((id) => {
+  // Espera o banco: o popup de senha mostra o erro e o cronograma só some da tela depois de apagado.
+  const handleDeleteCronograma = useCallback(async (id) => {
     // Sem isto, uma edição feita logo antes de excluir gravava depois do DELETE e o cronograma
     // reaparecia no F5.
     const t = cronoTimer.current;
     if (t[id]) { clearTimeout(t[id]); delete t[id]; }
+    const cr = cronogramas.find(x => x.id === id);
+    await dbDeleteCronograma(id);
     setDirtyCronoIds(prev => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n; });
     setCronogramas(prev => prev.filter(x => x.id !== id));
-    dbDeleteCronograma(id).catch(err => showError("Erro ao excluir cronograma: " + err.message));
-  }, []);
+    if (cr?.obraId) registrarAtividade(cr.obraId, `Cronograma "${cr.titulo}" excluído`);
+  }, [cronogramas, registrarAtividade]);
 
   // Agenda obra × obra uma vez só: alimenta a tela macro e o início herdado do editor de cada obra.
   // Cronograma de obra arquivada/excluída sai do macro (e do planejado), como a própria obra.
@@ -4716,7 +4799,7 @@ export default function App() {
       const tocadas = new Set(ats.map(a => tasks.find(t => t.id === a.taskId)).filter(t => t && t.itemId != null && t.etapa).map(t => `${t.itemId}|${t.etapa}`));
       for (const chave of tocadas) {
         const [itemId, etapa] = chave.split("|");
-        const todas = tasks.filter(t => String(t.itemId) === itemId && t.etapa === etapa);
+        const todas = tasks.filter(t => String(t.itemId) === itemId && t.etapa === etapa && !naoSeAplica(t));
         if (!todas.every(t => clampPercent(t.percent) >= 100)) continue;
         const item = obraNova.itens.find(i => String(i.id) === itemId);
         if (!item || item.etapas?.[etapa]?.feito) continue;
@@ -4961,6 +5044,7 @@ export default function App() {
                   conflitos={choquesPorCrono[crObra.id] || {}}
                   onImprimir={id => navToSemGuarda({ type: "cronogramaPrint", id })}
                   onAbrirGeral={id => navTo({ type: "cronograma", id })}
+                  onExcluir={handleDeleteCronograma}
                   dataBaseEfetiva={macro.mapa[crObra.id]?.origemId ? macro.mapa[crObra.id].dataBaseEfetiva : ""}
                   origemInicio={macro.mapa[crObra.id]?.origemId ? cronogramas.find(x => x.id === macro.mapa[crObra.id].origemId)?.titulo : ""} />
               )}
@@ -5007,6 +5091,7 @@ export default function App() {
                           equipes={equipes} conflitos={choquesPorCrono[view.id] || {}}
                           dirty={dirtyCronoIds.has(view.id)} onSalvarAgora={handleSaveCronogramaNow}
                           onImprimir={id => navToSemGuarda({ type: "cronogramaPrint", id })}
+                          onExcluir={async id => { await handleDeleteCronograma(id); navReplace({ type: "cronogramas" }); }}
                           dataBaseEfetiva={macro.mapa[view.id]?.origemId ? macro.mapa[view.id].dataBaseEfetiva : ""}
                           origemInicio={macro.mapa[view.id]?.origemId ? cronogramas.find(x => x.id === macro.mapa[view.id].origemId)?.titulo : ""} />
                       : <CenteredMsg>Cronograma não encontrado</CenteredMsg>)

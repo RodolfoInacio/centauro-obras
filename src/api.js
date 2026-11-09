@@ -146,8 +146,11 @@ export async function upsertCronograma(c) {
 }
 
 export async function deleteCronograma(id) {
-  const { error } = await supabase.from("cronogramas").delete().eq("id", id);
+  // DELETE barrado por RLS volta 204 sem erro (a mesma armadilha das equipes): pede as linhas de
+  // volta e falha se nada foi apagado, senão o cronograma sumia da tela e voltava no F5.
+  const { data, error } = await supabase.from("cronogramas").delete().eq("id", id).select("id");
   if (error) throw error;
+  if (!data?.length) throw new Error("o banco não apagou o cronograma (sem permissão ou já excluído)");
 }
 
 // ─── AGENDA (serviços do dia por equipe) ─────────────────────────────────────

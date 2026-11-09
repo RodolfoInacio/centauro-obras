@@ -735,6 +735,15 @@ fixada. Tudo o mais é **derivado** em `planejamento.js`, nunca gravado:
   o término pelo que falta no ritmo planejado → "~N dias de atraso" no cabeçalho da obra, no macro e
   aviso quando passa da `dataLimiteEntrega`.
 Limite aceito: tarefa **sem equipe** não vai ao calendário e por isso não gera diário pendente.
+- **Não se aplica** (`task.naoSeAplica`, botão "⊘ Não se aplica" na barra, vale para a linha e tudo dentro
+  dela): a linha fica riscada na grade e na folha, mas `duracaoParaHoras` devolve 0, o 📌 dela é ignorado,
+  não estica o grupo, não pesa no % e `tarefasAgendadas` a pula (sem calendário, diário nem atraso). Quem
+  dependia dela começa onde ela começaria. Ex.: os metais já estão na obra. Preferido a excluir porque
+  reativar devolve a linha como estava.
+- **Excluir cronograma pede senha** (`ExcluirCronograma`, `HASH_SENHA_CRONOGRAMA` no App.jsx — só o
+  SHA-256, tranca visual): 🗑 na linha do macro e "🗑 Excluir cronograma" na barra do editor (dentro da obra e
+  em tela cheia). Espera o banco antes de tirar da tela (`deleteCronograma` falha se a RLS não apagar nada) e
+  registra a atividade na obra. Diários e serviços manuais do Calendário ficam; os dias planejados somem.
 
 **Comercial: a negociação é registro próprio, e vira obra copiando os anexos.** Antes da obra existe o
 funil: prospecção → aguardando orçamento → em orçamento → orçamento pronto → negociação → convertida |

@@ -11,7 +11,7 @@ import { useEffect, useState } from "react";
 import logoDark from "./assets/logo-dark.png";
 import {
   agendar, normConfig, textoDuracao, textoDias, MESES_ABBR, ehDiaUtil, ehResumo,
-  percentPonderado, textoPredecessoras, inicioEstaFixo, diasUteisEntre,
+  percentPonderado, textoPredecessoras, inicioEstaFixo, naoSeAplica, diasUteisEntre,
 } from "./cronograma";
 
 const DIA_MS = 86400000;
@@ -54,11 +54,12 @@ export default function CronogramaPrint({ cronograma: c, obras, dataBaseEfetiva,
 
   let inicio = null, termino = null;
   for (const t of tasks) {
-    const s = sched[t.id]; if (!s) continue;
+    const s = sched[t.id]; if (!s || naoSeAplica(t)) continue;
     if (!inicio || s.inicio < inicio) inicio = s.inicio;
     if (!termino || s.termino > termino) termino = s.termino;
   }
-  const folhas = tasks.filter((_, i) => !ehResumo(tasks, i));
+  // A linha "não se aplica" sai na folha riscada, mas fica fora do resumo (última, atrasadas…).
+  const folhas = tasks.filter((t, i) => !ehResumo(tasks, i) && !naoSeAplica(t));
   const pctGeral = percentPonderado(folhas, cfg);
   const diasUteis = inicio && termino ? diasUteisEntre(inicio, termino, cfg) : 0;
   const diasCorridos = inicio && termino ? Math.round((meiaNoite(termino) - meiaNoite(inicio)) / DIA_MS) + 1 : 0;
@@ -165,17 +166,18 @@ export default function CronogramaPrint({ cronograma: c, obras, dataBaseEfetiva,
             {linhas.map((t, i) => {
               const s = sched[t.id];
               const grupo = s.isSummary;
+              const anulada = naoSeAplica(t);
               return (
                 <tr key={t.id} style={{ background: t.nivel === minNivel && grupo ? "#f1f5f9" : i % 2 ? "#fafafa" : "#fff", borderBottom: "1px solid #e2e8f0" }}>
                   <td style={{ ...td, textAlign: "center", color: "#94a3b8" }}>{t.id}</td>
-                  <td style={{ ...td, paddingLeft: 5 + (t.nivel - minNivel) * 11, fontWeight: grupo ? 700 : 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={t.nome}>{t.nome}</td>
-                  <td style={{ ...td, textAlign: "center", color: grupo ? "#475569" : "#1e293b" }}>{textoDuracao(t, s)}</td>
-                  <td style={{ ...td, textAlign: "center" }}>{fmtCurta(s.inicio)}{!grupo && inicioEstaFixo(t) && <span style={{ fontSize: 8.5, marginLeft: 2 }}>📌</span>}</td>
-                  <td style={{ ...td, textAlign: "center" }}>{fmtCurta(s.termino)}</td>
-                  {mostrarPct && <td style={{ ...td, textAlign: "center", fontWeight: grupo ? 700 : 400 }}>{s.percent}%</td>}
-                  <td style={{ ...td, textAlign: "center", color: "#475569" }}>{grupo ? "" : textoPredecessoras(t.predecessoras)}</td>
+                  <td style={{ ...td, paddingLeft: 5 + (t.nivel - minNivel) * 11, fontWeight: grupo ? 700 : 400, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", ...(anulada ? { color: "#94a3b8", textDecoration: "line-through" } : {}) }} title={t.nome}>{t.nome}</td>
+                  <td style={{ ...td, textAlign: "center", color: grupo ? "#475569" : "#1e293b" }}>{anulada ? <span style={{ color: "#94a3b8", fontSize: 9 }}>não se aplica</span> : textoDuracao(t, s)}</td>
+                  <td style={{ ...td, textAlign: "center" }}>{anulada ? "—" : fmtCurta(s.inicio)}{!grupo && !anulada && inicioEstaFixo(t) && <span style={{ fontSize: 8.5, marginLeft: 2 }}>📌</span>}</td>
+                  <td style={{ ...td, textAlign: "center" }}>{anulada ? "—" : fmtCurta(s.termino)}</td>
+                  {mostrarPct && <td style={{ ...td, textAlign: "center", fontWeight: grupo ? 700 : 400 }}>{anulada ? "—" : `${s.percent}%`}</td>}
+                  <td style={{ ...td, textAlign: "center", color: "#475569" }}>{grupo || anulada ? "" : textoPredecessoras(t.predecessoras)}</td>
                   <td style={{ padding: 0, borderLeft: "1px solid #cbd5e1" }}>
-                    <Barra s={s} x0={xDe(s.inicio)} x1={xDe(s.termino)} W={W} dias={dias} pxDia={pxDia} cfg={cfg} xHoje={xHoje} mostrarPct={mostrarPct} marco={!grupo && +s.inicio === +s.termino} />
+                    {!anulada && <Barra s={s} x0={xDe(s.inicio)} x1={xDe(s.termino)} W={W} dias={dias} pxDia={pxDia} cfg={cfg} xHoje={xHoje} mostrarPct={mostrarPct} marco={!grupo && +s.inicio === +s.termino} />}
                   </td>
                 </tr>
               );

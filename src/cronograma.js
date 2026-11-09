@@ -124,7 +124,12 @@ export function diasUteisEntre(a, b, config) {
   return Math.round(minutosUteisEntre(a, b, cfg) / (cfg.horasDia * 60) * 100) / 100;
 }
 
+// "Não se aplica": a linha fica no cronograma (riscada), mas não tem duração, não pesa no % e não
+// segura ninguém — quem dependia dela começa quando ela começaria. Ex.: os metais já estão na obra.
+export function naoSeAplica(t) { return !!t?.naoSeAplica; }
+
 export function duracaoParaHoras(t, config) {
+  if (naoSeAplica(t)) return 0;
   const v = Number(t.durValor) || 0;
   return t.durUnid === "hrs" ? v : v * config.horasDia;
 }
@@ -214,6 +219,7 @@ export function renumerarIds(tasks) {
 // Média ponderada pelas horas de duração — a regra do rollup de % dos resumos.
 export function percentPonderado(folhas, config) {
   const cfg = normConfig(config);
+  folhas = folhas.filter(k => !naoSeAplica(k));
   const totH = folhas.reduce((a, k) => a + duracaoParaHoras(k, cfg), 0);
   if (totH <= 0) return 0;
   const v = Math.round(folhas.reduce((a, k) => a + duracaoParaHoras(k, cfg) * (Number(k.percent) || 0), 0) / totH);
@@ -226,7 +232,7 @@ export function percentPonderado(folhas, config) {
 export function distribuirPercent(tasks, i, alvo, config) {
   const cfg = normConfig(config);
   const alvoC = Math.max(0, Math.min(100, Math.round(Number(alvo) || 0)));
-  const idxFolhas = descendentesDe(tasks, i).filter(j => !ehResumo(tasks, j));
+  const idxFolhas = descendentesDe(tasks, i).filter(j => !ehResumo(tasks, j) && !naoSeAplica(tasks[j]));
   const mapa = {};
   if (!idxFolhas.length) return mapa;
 
@@ -283,7 +289,8 @@ function agendarSemCache(tasks, cfg) {
   const base = proximoInstanteUtil(parseDT(raw), cfg);
   const summary = tasks.map((_, i) => ehResumo(tasks, i));
   const preds = tasks.map(t => normPredecessoras(t.predecessoras));
-  const fixos = tasks.map(t => inicioEstaFixo(t));
+  const fixos = tasks.map(t => inicioEstaFixo(t) && !naoSeAplica(t));
+  const na = tasks.map(t => naoSeAplica(t));
   const sched = {};
 
   // Cada passada propaga as datas pelas predecessoras; quando uma passada não muda nada, as
@@ -320,7 +327,10 @@ function agendarSemCache(tasks, cfg) {
     // resumos (de baixo p/ cima, para resumos aninhados)
     for (let i = tasks.length - 1; i >= 0; i--) {
       if (!summary[i]) continue;
-      const kids = filhosIdx(tasks, i).map(j => tasks[j].id).map(id => sched[id]).filter(Boolean);
+      // A linha "não se aplica" não estica o grupo; grupo só com elas fica onde elas ficariam.
+      const filhos = filhosIdx(tasks, i);
+      const validos = filhos.filter(j => !na[j]);
+      const kids = (validos.length ? validos : filhos).map(j => tasks[j].id).map(id => sched[id]).filter(Boolean);
       if (!kids.length) { grava(tasks[i].id, new Date(base), new Date(base)); continue; }
       let mn = null, mx = null;
       for (const s of kids) { if (!mn || s.inicio < mn) mn = s.inicio; if (!mx || s.termino > mx) mx = s.termino; }
@@ -389,7 +399,7 @@ export function agendarMacro(cronogramas) {
     const sched = agendar(tasks, cfg);
     let inicio = null, termino = null;
     for (const t of tasks) {
-      const s = sched[t.id]; if (!s) continue;
+      const s = sched[t.id]; if (!s || naoSeAplica(t)) continue;
       if (!inicio || s.inicio < inicio) inicio = s.inicio;
       if (!termino || s.termino > termino) termino = s.termino;
     }
