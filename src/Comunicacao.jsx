@@ -28,6 +28,7 @@ export const ACESSOS = [
   { id: "financeiro", rotulo: "Financeiro", desc: "Gera o financeiro do contrato, lança e estorna recebimentos, renegocia parcelas. Só quem tem este acesso (ou o master) altera valores." },
   { id: "ver_valores", rotulo: "Vê valores", desc: "Os valores em R$ já aparecem abertos, sem pedir a senha (financeiro, compras)." },
   { id: "orcamentista", rotulo: "Orçamentista", desc: "Recebe as negociações liberadas para orçamento e devolve o orçamento pronto." },
+  { id: "portal", rotulo: "Portal do cliente", desc: "Recebe no 🔔 as mensagens e sugestões de data que os clientes mandam pelo portal. Sem ninguém marcado, toda a equipe recebe." },
 ];
 
 // Sem a migration_acessos_compras.sql (acessos === null) ninguém fica travado no que já fazia:
@@ -171,6 +172,7 @@ export function BotaoMensagens({ onAbrir }) {
 const ICONE_NOTIF = {
   compra_pedido: "📝", compra_aprovada: "✅", compra_recusada: "✖",
   comercial_liberado: "📐", comercial_pronto: "💼", comercial_revisao: "🔁", comercial_atribuido: "👤",
+  portal_mensagem: "🌐",
 };
 function tituloNotif(n, rotuloObra) {
   const quem = <b>{n.deNome || "Alguém"}</b>;
@@ -182,6 +184,7 @@ function tituloNotif(n, rotuloObra) {
   if (n.tipo === "comercial_pronto") return <>{quem} terminou o orçamento de {obra}</>;
   if (n.tipo === "comercial_revisao") return <>{quem} pediu revisão do orçamento de {obra}</>;
   if (n.tipo === "comercial_atribuido") return <>{quem} colocou você em {obra}</>;
+  if (n.tipo === "portal_mensagem") return <>{quem} (cliente) escreveu no portal de {obra}</>;
   return <>{quem} marcou você em {obra}</>;
 }
 

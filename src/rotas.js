@@ -24,6 +24,7 @@ export function viewParaHash(v) {
     case "gantt": return `#/obra/${enc(v.obraId)}${v.itemId != null ? `/item/${enc(v.itemId)}` : ""}`;
     case "print": return `#/obra/${enc(v.obraId)}/nota`;
     case "medicaoPrint": return `#/obra/${enc(v.obraId)}/medicao${v.modo === "branco" ? "/branco" : ""}`;
+    case "portalPreview": return `#/obra/${enc(v.obraId)}/portal`;
     case "calendar": return `#/calendario${v.mes ? `/${v.mes}${v.dia ? `/${v.dia}` : ""}` : ""}`;
     case "osPrint": return `#/os/${v.inicio}/${v.fim}`;
     case "equipes": return "#/equipes";
@@ -66,6 +67,7 @@ export function hashParaView(hash) {
     case "obra":
       if (!b) return VIEW_INICIAL;
       if (c === "nota") return { type: "print", obraId: b };
+      if (c === "portal") return { type: "portalPreview", obraId: b };
       if (c === "medicao") return { type: "medicaoPrint", obraId: b, modo: d === "branco" ? "branco" : "preenchida" };
       return { type: "gantt", obraId: b, ...(c === "item" && d != null ? { itemId: numOuTexto(d) } : {}) };
     case "calendario": return { type: "calendar", ...(b ? { mes: b } : {}), ...(c ? { dia: c } : {}) };
@@ -106,7 +108,7 @@ function numOuTexto(s) { return /^\d+$/.test(s) ? Number(s) : s; }
 export function paiDe(v) {
   switch (v?.type) {
     case "gantt": return v.itemId != null ? { type: "gantt", obraId: v.obraId } : { type: "obrasPasta", pasta: "andamento" };
-    case "print": case "medicaoPrint": return { type: "gantt", obraId: v.obraId };
+    case "print": case "medicaoPrint": case "portalPreview": return { type: "gantt", obraId: v.obraId };
     case "calendar": return v.dia ? { type: "calendar", mes: v.mes } : VIEW_INICIAL;
     case "osPrint": return { type: "calendar" };
     case "cronograma": return { type: "cronogramas" };

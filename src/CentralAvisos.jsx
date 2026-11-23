@@ -5,7 +5,7 @@
 // Clique na célula abre a obra já na seção certa.
 // ─────────────────────────────────────────────────────────────────────────────
 import { useEffect, useMemo, useState } from "react";
-import { fetchResumoAnexos } from "./api";
+import { fetchResumoAnexos, fetchPortalResumo } from "./api";
 import { agruparSimples } from "./agrupamento";
 import { AREAS, PESO_NIVEL, avisosDaObra, resumoPorArea } from "./avisos";
 import { useEstadoSessao } from "./rotas";
@@ -19,6 +19,7 @@ const inp = { border: "1px solid #e2e8f0", borderRadius: 8, padding: "7px 10px",
 
 export default function CentralAvisos({ obras, ctxAvisos = {}, onAbrirObra, onRelatorio }) {
   const [anexos, setAnexos] = useState(undefined); // undefined = carregando, null = indisponível
+  const [portal, setPortal] = useState(null);       // { [obraId]: { pendentes, semResposta } }
   const [busca, setBusca] = useEstadoSessao("avisos.busca", "");
   const [area, setArea] = useEstadoSessao("avisos.area", "");
   const [nivelMin, setNivelMin] = useEstadoSessao("avisos.nivel", "atencao");
@@ -28,12 +29,13 @@ export default function CentralAvisos({ obras, ctxAvisos = {}, onAbrirObra, onRe
   useEffect(() => {
     let cancel = false;
     fetchResumoAnexos().then(m => { if (!cancel) setAnexos(m); });
+    fetchPortalResumo().then(m => { if (!cancel) setPortal(m); });
     return () => { cancel = true; };
   }, []);
 
   // Avisos de cada contrato, já filtrados pelo nível mínimo escolhido.
   const linhas = useMemo(() => {
-    const ctx = { ...ctxAvisos, anexos: anexos || null };
+    const ctx = { ...ctxAvisos, anexos: anexos || null, portal };
     const piso = PESO_NIVEL[nivelMin] || 1;
     return obras
       .filter(o => comConcluidas || o.status !== "Concluído")
@@ -41,7 +43,7 @@ export default function CentralAvisos({ obras, ctxAvisos = {}, onAbrirObra, onRe
         const avisos = avisosDaObra(o, ctx).filter(a => PESO_NIVEL[a.nivel] >= piso);
         return { obra: o, avisos, resumo: resumoPorArea(avisos) };
       });
-  }, [obras, ctxAvisos, anexos, nivelMin, comConcluidas]);
+  }, [obras, ctxAvisos, anexos, portal, nivelMin, comConcluidas]);
 
   // KPI: quantos contratos têm pendência em cada área.
   const contagem = useMemo(() => {

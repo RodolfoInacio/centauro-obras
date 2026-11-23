@@ -70,6 +70,7 @@ function montarMensagem(n: Notif, obra: { numero?: string; cliente?: string } | 
     comercial_pronto: `💼 *${quem}* terminou o orçamento`,
     comercial_revisao: `🔁 *${quem}* pediu revisão do orçamento`,
     comercial_atribuido: `👤 *${quem}* colocou você numa negociação`,
+    portal_mensagem: `🌐 *${quem}* (cliente) escreveu no portal`,
   }[n.tipo] || `🔔 Aviso de *${quem}*`;
   const link = n.tipo === "compra_pedido" ? `${APP_URL}/#/aprovacoes`
     : ehNeg ? `${APP_URL}/#/comercial/${encodeURIComponent(n.obra_id!)}`

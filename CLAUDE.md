@@ -75,6 +75,12 @@ src/
   caixaAlta.js     Ouvinte global que converte para maiúscula os campos dentro de `data-caixa-alta`.
   ArquivoObras.jsx Arquivar → Excluídas → exclusão definitiva: modelo (`obra.arquivo`), botões da obra e as duas pastas.
   NovoContrato.jsx Popup "+ Novo cliente / contrato" (cliente novo ou contrato de obra existente; `inicial` = conversão).
+  Portaria.jsx     Por fora de tudo (main.jsx): login de cliente abre o portal, o resto abre o sistema; tela de entrada do `?portal`.
+  PortalCliente.jsx  🌐 Portal do cliente (celular primeiro): Resumo (KPIs, curva planejado×realizado, rosca),
+                   Cronograma em acordeão, Fotos do diário, Itens + documentos, Conversa. `derivarPortal` calcula tudo.
+  PortalConversa.jsx Conversa cliente × Centauro (bolhas, sugestão de data, Realtime) + popup `SugerirData` + `Folha`.
+  PortalObra.jsx   Seção "🌐 Portal do cliente" da obra (equipe): acessos (criar/nova senha/bloquear), conversa,
+                   aprovar sugestão (`aplicarSugestao` escreve na tarefa) e "👁 Ver como o cliente".
   Comercial.jsx    💼 Comercial: negociações (prospecção → orçamento → negociação → obra/declinada), modelo,
                    `useNegociacoes` (carga + gravação com trava de versão), painel, quadro por etapa, ficha e popups.
   index.css        CSS global mínimo.
@@ -107,6 +113,12 @@ supabase/
   migration_financeiro.sql   `fin_contratos` (trava de versão) + `fin_baixas` (imutável, estorno), RLS de escrita
                              pelo acesso `financeiro`/master, categoria `nota_fiscal` em `obra_anexos` — rodar
                              depois da de acessos e da ficha_obra.
+  migration_portal.sql       Portal do cliente: papel `cliente` pelo app_metadata, `is_cliente_da`, `obra_anexos.portal`,
+                             `portal_mensagens` + `portal_lidas`, RPCs `portal_obra`/`portal_minhas_obras`/`portal_decidir`/
+                             `portal_resumo`, tipo `portal_mensagem` no 🔔, escrita dos buckets públicos só admin — rodar
+                             depois da de acessos, mensagens, comercial e financeiro.
+  seed_portal_3048_teste.sql Obra de teste `3048_teste` (proposta 3048, 16 itens) — rodar uma vez.
+  functions/portal-cliente/  Edge Function dos logins de cliente (criar, nova senha, bloquear, listar) e do download de anexo liberado.
   functions/parse-obra-pdf/  Edge Function que chama a IA para ler o PDF do orçamento.
   functions/whatsapp-notificar/  Edge Function que manda o aviso do 🔔 pelo WhatsApp (Evolution API v2).
   functions/analisar-documento/  Edge Function que lê um anexo (contrato, comprovante, NF, orçamento de fornecedor).
@@ -176,11 +188,14 @@ inteiro do app numa coluna `data jsonb`**. A fonte de verdade é o `jsonb`.
 | `negociacoes` | `id` (= `numero`, `NEG-0001`) | `numero` (único), `cliente`, `etapa`, `vendedor_id`, `orcamentista_id`, `obra_id`, `updated_at`, `data` | a negociação (`normNegociacao`): cliente/obra/cidade/vendedor/`cadastro` no formato da obra, responsáveis (login), `orcamento {numeroProposta, valor, validade, pronto…}`, `revisoes`, `declinio`, `conversao`, `historico` de etapas, `capa` |
 | `fin_contratos` | `obra_id` | `updated_at`, `data` | o contrato financeiro (`normContratoFin`): valor, data, forma, condição, `multaPct`, `jurosMesPct`, `parcelas [{id, descricao, vencimento, valor, forma}]`, `historico` de alterações |
 | `fin_baixas` | `id` (uuid) | `obra_id`, `parcela_id` (null = sem parcela), `tipo` (`baixa`/`saldo_inicial`/`estorno`), `dia`, `principal`, `juros`, `multa`, `desconto`, `forma`, `nf_numero`, `obs`, `anexos uuid[]`, `estorno_de`, `lancado_por(_id)` | — (**não usa `data`**; imutável, só `anexos` cresce) |
-| `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (**vazia**, fundação para o futuro) |
+| `obra_membros` | (`obra_id`,`user_id`) | `papel` | — (usada pelo **portal do cliente**: `papel = 'cliente'` liga o login à obra) |
+| `portal_mensagens` | `id` (uuid) | `obra_id`, `lado` (`cliente`/`centauro`), `autor_id`, `autor_nome`, `tipo` (`comentario`/`pergunta`/`sugestao_data`), `texto`, `cronograma_id`, `task_id`, `task_nome`, `campo` (`inicio`/`termino`), `data_atual`, `data_sugerida`, `estado`, `decidido_por(_id)`, `decidido_em`, `motivo`, `created_at` | — (**não usa `data`**; imutável, só a decisão muda, por `portal_decidir`) |
+| `portal_lidas` | (`user_id`,`obra_id`) | `lida_ate` | — |
 
-- `obra_membros` e os papéis `encarregado`/`cliente` existem no schema mas **não são usados**: as
-  policies que dariam acesso a eles estão comentadas em `schema.sql`. Hoje só `admin` acessa.
-- Todo usuário novo vira `admin` automaticamente (trigger `handle_new_user`).
+- O papel `encarregado` e as policies comentadas de `schema.sql` continuam sem uso. O papel `cliente` é o do
+  portal (ver Decisões) e **não tem policy em nenhuma tabela de dados**: lê tudo por RPC.
+- Todo usuário novo vira `admin` (trigger `handle_new_user`), **exceto** o criado pela `portal-cliente`, que
+  leva `app_metadata.papel = 'cliente'` (só a service_role grava `app_metadata`).
 - Storage: buckets públicos `desenhos` (desenhos técnicos do item) e `diario` (fotos do diário).
   Leitura pública, escrita autenticada. **Leitura pública mesmo**: quem tiver a URL vê a foto.
   O bucket `obras` (anexos: contrato, comprovante, orçamento) é **privado**: só abre por URL
@@ -221,6 +236,8 @@ As peças server-side são duas Edge Functions:
 
 | `whatsapp-notificar` | gatilho: `POST { notificacaoId }` + header `x-segredo`; teste: `POST { teste: userId }` + JWT do master | Lê a notificação com a service_role, monta a mensagem (sem R$, com link para o app) e manda pela Evolution (`/message/sendText/<instância>`, `{number, text}`) para `profiles.whatsapp`. Grava cada tentativa em `whatsapp_envios`. `verify_jwt = false` (`config.toml`): quem chama é o banco. |
 
+| `portal-cliente` | `POST { acao, ... }` + JWT | Equipe (`papel = 'admin'`): `criar {obraId, usuario, nome}` (login `<usuario>@cliente.centauroesquadrias.com.br`, senha gerada devolvida **uma vez**, `obra_membros`), `vincular`, `desvincular`, `nova_senha`, `bloquear`/`desbloquear` (`ban_duration`), `listar`. Só mexe em login de papel `cliente`. Cliente: `anexo {anexoId}` → URL assinada de 1 h se o anexo tem `portal = true` (ou é a capa). Deploy manual. |
+
 Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro do ERP
 (contrato em `docs/integracao-erp-ti.md`).
 
@@ -257,7 +274,7 @@ Planejado e **ainda não implementado**: `erp-webhook`, para receber financeiro 
   diário, `tela` do estoque, `itemId` da obra, `secao` (abre a seção, vindo da Central de avisos).
   Busca/filtro de lista sobrevivem ao voltar via `useEstadoSessao` (sessionStorage).
   Tipos de view: `dashboard`, `obrasPasta` (`pasta: "andamento"|"concluidas"`), `gantt` (`obraId`),
-  `print` (`obraId`), `medicaoPrint` (`obraId`, `modo`), `avisos`, `relatorios`, `relatorio` (`tipo`, `inicio`/`fim` na agenda), `calendar` (`mes`, `dia`), `equipes`, `osPrint` (`inicio`, `fim`),
+  `print` (`obraId`), `medicaoPrint` (`obraId`, `modo`), `portalPreview` (`obraId`, a tela do cliente vista pela equipe), `avisos`, `relatorios`, `relatorio` (`tipo`, `inicio`/`fim` na agenda), `calendar` (`mes`, `dia`), `equipes`, `osPrint` (`inicio`, `fim`),
   `cronogramas` (o **macro**: todas as obras, uma por linha), `cronograma` (`id`, o micro de uma
   obra), `cronogramaPrint` (`id`), `financeiro`, `diario` (`obraId` opcional), `diarioPrint` (`obraId`, `inicio`, `fim`),
   `aprovacoes`, `estoque` (`codigo` opcional, vindo do QR), `estoqueDoc` (`docId`), `estoqueEtiquetas` (`itemIds`),
@@ -808,6 +825,25 @@ e "Confirmar e ativar" exige soma fechando e todo vencimento preenchido — é a
 Contrato gravado antes do campo existir conta como conferido (`conferido !== false`). A mesma tela lista as
 obras sem contrato anexado e as com contrato que a IA não lê. Roda no navegador, com o login de quem clica
 (RLS e acesso `financeiro` valem) — a IA demora ~20 s por contrato, então a aba precisa ficar aberta.
+
+**Portal do cliente: o cliente lê por RPC, nunca a tabela.** O cliente entra com login próprio (usuário +
+senha gerada pela `portal-cliente`; o usuário vira e-mail interno, e as duas telas de login completam o domínio
+quando não há `@`) e a `Portaria` (main.jsx) troca o app inteiro pelo `PortalCliente` — sem Sigilo, Config ou as
+cargas da equipe. O `jsonb` da obra traz compras, valores e financeiro, então dar SELECT em `obras`/`cronogramas`
+ao cliente exporia tudo pelo devtools: ele não tem policy em nenhuma tabela de dados, e o que o portal mostra
+sai de `portal_obra()` (security definer, confere `is_cliente_da`): itens sem R$, cronogramas sem equipe/comentário,
+diários **aprovados** só com clima, atividades e fotos achatadas (sem ocorrências nem assinaturas) e anexos com
+`portal = true` (o 👁 de cada anexo). As datas o portal calcula com `agendarMacro`/`andamentoObra`, iguais às da
+equipe: a RPC devolve também a `cadeia` de cronogramas de que o da obra depende (`predecessorasMacro`), sem nome
+— sem ela o início herdado sairia diferente. Nada é gravado além das mensagens.
+A conversa (`portal_mensagens`) é imutável e o nome do autor sai do perfil. A **sugestão de data** só vale depois
+de aprovada: "Aprovar" em `PortalObra` aplica na tarefa pelo `handleSaveCronograma` (início → 📌 na data;
+término → `durValor` = dias úteis do início atual até o fim do expediente do dia) e só então `portal_decidir`
+grava quem aprovou — a conversa é o registro. Mensagem de cliente avisa no 🔔 (e no WhatsApp) quem tem o acesso
+`portal`; sem ninguém marcado, toda a equipe. A Central de avisos ganhou a área Portal (pendente, sem resposta).
+`profiles` de cliente ficam fora do chat, das menções e de "Pessoas e acessos" (`fetchPessoas`). Os buckets
+públicos (`desenhos`, `diario`) passaram a aceitar escrita só de admin. A equipe vê a tela do cliente em
+"👁 Ver como o cliente" (`portalPreview`, conversa só leitura).
 
 **Caixa alta nos cadastros é um ouvinte, não um onChange por campo.** `caixaAlta.js` (ligado no `main.jsx`)
 escuta `input` na captura, antes do React, e converte o campo para maiúscula quando ele está dentro de um

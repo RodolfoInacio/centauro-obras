@@ -2,7 +2,7 @@ import { Fragment, useState, useEffect, useRef, useCallback, useMemo, useDeferre
 import logoWhite from "./assets/logo-white.png";
 import logoDark from "./assets/logo-dark.png";
 import { supabase } from "./supabase";
-import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens, fetchFotosCapa, fetchOrcamentos, upsertOrcamento, deleteOrcamento as dbDeleteOrcamento, excluirObraDefinitivo, notificarCompra, copiarAnexos } from "./api";
+import { fetchObras, fetchObra, salvarObra, inserirObra, inserirComentario, fetchBackupCompleto, fetchEquipes, upsertEquipe as dbUpsertEquipe, deleteEquipe as dbDeleteEquipe, fetchCronogramas, upsertCronograma, deleteCronograma as dbDeleteCronograma, fetchAgenda, upsertAgendamento, deleteAgendamento as dbDeleteAgendamento, fetchLembretes, upsertLembrete, deleteLembrete as dbDeleteLembrete, fetchDiarios, upsertDiario, deleteDiario as dbDeleteDiario, fetchEstoqueItens, fetchFotosCapa, fetchOrcamentos, upsertOrcamento, deleteOrcamento as dbDeleteOrcamento, excluirObraDefinitivo, notificarCompra, copiarAnexos, emailDoLogin } from "./api";
 import ComercialView, { useNegociacoes, contarPendentesComercial } from "./Comercial";
 import AprovacoesCompra, { contarAguardando } from "./AprovacoesCompra";
 import { normArquivo, obraAtiva, comPasso, AcoesArquivo, PastaArquivo, ACAO_ROTULO } from "./ArquivoObras";
@@ -33,6 +33,8 @@ import CentralAvisos from "./CentralAvisos";
 import RelatorioPrint, { RelatoriosHub } from "./Relatorios";
 import { avisosDaObra } from "./avisos";
 import { VERSAO_REGRAS, obraComTrava, liberacaoEtapa, liberacaoDesmarcar, liberacaoStatusFabricacao } from "./regrasEtapas";
+import PortalObra from "./PortalObra.jsx";
+import PortalCliente from "./PortalCliente.jsx";
 
 // ─── CONSTANTS ───────────────────────────────────────────────────────────────
 // Brand color (was navy #1a1a1a) — now charcoal black
@@ -703,7 +705,7 @@ function ChecklistObra({ itens, onChange }) {
 // O planejamento da obra é o cronograma (seção 📅), não mais datas por item: `datasItens` é o
 // período de cada item lido do cronograma e `cronogramaSlot` é o próprio editor, montado pelo App.
 function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoque, onEntradaEstoque, onAtividade, atividadeVersao = 0, itemAberto = null, onItemAberto, onImprimirMedicao, secaoFoco = null,
-  cronograma = null, cronogramaSlot = null, cronogramaResumo = "", datasItens = {}, andamento = null, onCriarCronograma, onPassoArquivo, onAvisoCompra, onAbrirNegociacao, onAbrirFinanceiro }) {
+  cronograma = null, cronogramaSlot = null, portalSlot = null, cronogramaResumo = "", datasItens = {}, andamento = null, onCriarCronograma, onPassoArquivo, onAvisoCompra, onAbrirNegociacao, onAbrirFinanceiro }) {
   // Item expandido mora na view (#/obra/2729/item/5): voltar de outra tela reabre o mesmo item.
   const expandedId = itemAberto;
   const setExpandedId = (id) => onItemAberto?.(id);
@@ -889,6 +891,12 @@ function GanttView({ obra, onChange, equipes, fornecedores = [], onAbrirDocEstoq
             resumo={cronograma ? cronogramaResumo : "sem cronograma"}>
             {cronograma ? cronogramaSlot : <CriarCronogramaObra obra={localObra} onCriar={onCriarCronograma} />}
           </Secao>
+
+          {portalSlot && (
+            <Secao id="portal" foco={secaoFoco === "portal"} titulo="Portal do cliente" icone="🌐" resumo="acesso, conversa e sugestões de data">
+              {portalSlot}
+            </Secao>
+          )}
 
           <Secao id="itens" foco={secaoFoco === "itens"} titulo="Itens" icone="🪟"
             resumo={localObra.itens.length === 0 ? "sem itens" : `${localObra.itens.length} ite${localObra.itens.length === 1 ? "m" : "ns"} · ${totalPct}%${semAgenda ? ` · ${semAgenda} fora do cronograma` : ""}`}>
@@ -4000,10 +4008,10 @@ function LoginScreen() {
     try {
       const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 20000));
       const { error } = await Promise.race([
-        supabase.auth.signInWithPassword({ email: email.trim(), password: senha }),
+        supabase.auth.signInWithPassword({ email: emailDoLogin(email), password: senha }),
         timeout,
       ]);
-      if (error) { setErro("Email ou senha inválidos."); setBusy(false); }
+      if (error) { setErro("Usuário ou senha inválidos."); setBusy(false); }
     } catch {
       setErro("Conexão lenta ou indisponível. Tente entrar novamente.");
       setBusy(false);
@@ -4017,8 +4025,8 @@ function LoginScreen() {
         <img src={logoDark} alt="Centauro Esquadrias" style={{ height: 44, display: "block", margin: "0 auto 8px" }} />
         <div style={{ textAlign: "center", fontSize: 13, color: "#64748b", marginBottom: 24 }}>Sistema de Gestão de Obras</div>
 
-        <label style={{ fontSize: 12, fontWeight: 700, color: "#64748b" }}>Email</label>
-        <input type="email" value={email} onChange={e => setEmail(e.target.value)} autoFocus required
+        <label style={{ fontSize: 12, fontWeight: 700, color: "#64748b" }}>Email ou usuário</label>
+        <input type="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} autoComplete="username" value={email} onChange={e => setEmail(e.target.value)} autoFocus required
           style={{ width: "100%", border: "1px solid #e2e8f0", borderRadius: 8, padding: "10px 12px", fontSize: 14, margin: "4px 0 14px", boxSizing: "border-box" }} />
 
         <label style={{ fontSize: 12, fontWeight: 700, color: "#64748b" }}>Senha</label>
@@ -5031,7 +5039,7 @@ export default function App() {
           <SinoNotificacoes obras={obrasENegs} onAbrirObra={obraId => navTo(/^NEG-/.test(obraId) ? { type: "comercial", id: obraId } : { type: "gantt", obraId })}
             onAbrir={n => /^NEG-/.test(n.obraId || "") ? navTo({ type: "comercial", id: n.obraId })
               : n.tipo === "compra_pedido" ? navTo({ type: "aprovacoes" })
-              : n.obraId ? navTo(n.tipo.startsWith("compra_") ? { type: "gantt", obraId: n.obraId, secao: "compras" } : { type: "gantt", obraId: n.obraId }) : null} />
+              : n.obraId ? navTo(n.tipo.startsWith("compra_") ? { type: "gantt", obraId: n.obraId, secao: "compras" } : n.tipo === "portal_mensagem" ? { type: "gantt", obraId: n.obraId, secao: "portal" } : { type: "gantt", obraId: n.obraId }) : null} />
           <BotaoMensagens onAbrir={() => navTo({ type: "mensagens" })} />
           <OlhoFinanceiro escuro size={16} />
           <MeuPerfil email={userEmail} />
@@ -5075,6 +5083,9 @@ export default function App() {
                   dataBaseEfetiva={macro.mapa[crObra.id]?.origemId ? macro.mapa[crObra.id].dataBaseEfetiva : ""}
                   origemInicio={macro.mapa[crObra.id]?.origemId ? cronogramas.find(x => x.id === macro.mapa[crObra.id].origemId)?.titulo : ""} />
               )}
+              portalSlot={<PortalObra obra={selectedObra} cronogramas={cronogramasDaObra(cronogramas, selectedObra.id)} macro={macro}
+                onSalvarCronograma={handleSaveCronograma} onAtividade={texto => registrarAtividade(selectedObra.id, texto)}
+                onVerComoCliente={() => navTo({ type: "portalPreview", obraId: selectedObra.id })} />}
               itemAberto={view.itemId ?? null} secaoFoco={view.secao || null}
               onImprimirMedicao={modo => navTo({ type: "medicaoPrint", obraId: selectedObra.id, modo })}
               onItemAberto={id => navReplace(id == null ? { type: "gantt", obraId: selectedObra.id } : { type: "gantt", obraId: selectedObra.id, itemId: id })}
@@ -5086,6 +5097,8 @@ export default function App() {
               onEntradaEstoque={origem => navTo({ type: "estoque", entradaCompra: {
                 ...origem, obraId: selectedObra.id, obraRotulo: `#${selectedObra.numero} — ${selectedObra.cliente}`,
               } })} /> : <CenteredMsg>Obra não encontrada</CenteredMsg>)
+          : view.type === "portalPreview"
+            ? <PortalCliente previewObraId={view.obraId} onVoltar={back} />
           : view.type === "calendar"
             ? <CalendarView obras={obras} equipes={equipes} agenda={agendaEf} choques={choques} lembretes={lembretes}
                 mesSel={view.mes} diaSel={view.dia} onVoltarDia={back}

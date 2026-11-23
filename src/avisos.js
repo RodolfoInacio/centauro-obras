@@ -24,6 +24,7 @@ export const AREAS = [
   { k: "agenda", rotulo: "Agenda", secao: null },
   { k: "cronograma", rotulo: "Cronograma", secao: "cronograma" },
   { k: "diario", rotulo: "Diário", secao: null },
+  { k: "portal", rotulo: "Portal", secao: "portal" },
 ];
 export const PESO_NIVEL = { erro: 3, atencao: 2, info: 1 };
 
@@ -39,7 +40,7 @@ const DOCS = [
 ];
 
 // ctx: { anexos: Map<obraId, Set<categoria>> | null, agenda (a efetiva, com o planejado), cronogramas,
-//        macro, conflitos, diarios, hoje } — cada parte é opcional; sem ela, a área correspondente fica de fora.
+//        macro, conflitos, diarios, portal (fetchPortalResumo), hoje } — cada parte é opcional; sem ela, a área correspondente fica de fora.
 export function avisosDaObra(obra, ctx = {}) {
   const hoje = ctx.hoje || hojeLocal();
   const out = [];
@@ -105,6 +106,11 @@ export function avisosDaObra(obra, ctx = {}) {
   // Agenda, cronograma (prazo, atraso, choque de equipe) e diário
   if (ctx.agenda && !ctx.agenda.some(a => a.obraId === obra.id)) add("agenda", "info", "Nenhum serviço lançado no calendário");
   for (const a of avisosPlanejamento(obra, { ...ctx, agendaEf: ctx.agenda, hoje })) out.push(a);
+
+  // Portal do cliente: sugestão de data esperando decisão e cliente sem resposta.
+  const pt = ctx.portal?.[obra.id];
+  if (pt?.pendentes) add("portal", "erro", `${pt.pendentes} sugestão(ões) de data do cliente esperando aprovação`);
+  if (pt?.semResposta && !pt?.pendentes) add("portal", "atencao", "O cliente escreveu no portal e ainda não teve resposta");
 
   return out;
 }

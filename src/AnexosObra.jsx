@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchAnexosObra, enviarAnexoObra, removerAnexo, restaurarAnexo, mudarCategoriaAnexo, urlsAssinadas } from "./api";
+import { fetchAnexosObra, enviarAnexoObra, removerAnexo, restaurarAnexo, mudarCategoriaAnexo, liberarAnexoPortal, urlsAssinadas } from "./api";
 import { redimensionarImagem } from "./FotoMarkup";
 import { lerAutor } from "./ComentariosObra";
 import { podeLerComIA, TIPOS_DOC } from "./LeituraIA";
@@ -224,6 +224,7 @@ export default function AnexosObra({ obraId, capa, onCapa, onAtividade, onContag
                 {a.autor && <span>· {a.autor}</span>}
                 {a.tamanho > 0 && <span>· {fmtTamanho(a.tamanho)}</span>}
                 {ehCapa && <span style={{ color: "#c9a227", fontWeight: 800 }}>· ★ capa</span>}
+                {a.portal && !a.removidoEm && <span style={{ color: "#0369a1", fontWeight: 800 }}>· 👁 o cliente vê no portal</span>}
                 {lidos[a.id] && <span style={{ color: "#7c3aed", fontWeight: 700 }}>· ✨ aplicado pela IA como {TIPOS_DOC[lidos[a.id].tipo].rotulo.toLowerCase()}</span>}
                 {a.removidoEm && <span style={{ color: "#dc2626" }}>· removido {a.removidoPor ? "por " + a.removidoPor : ""}</span>}
               </div>
@@ -242,6 +243,11 @@ export default function AnexosObra({ obraId, capa, onCapa, onAtividade, onContag
                     ✨ Ler com IA
                   </button>
                 )}
+                <button style={{ ...btn, color: a.portal ? "#0369a1" : "#94a3b8", borderColor: a.portal ? "#0369a155" : undefined, fontWeight: a.portal ? 800 : undefined }}
+                  title={a.portal ? "O cliente baixa este arquivo no portal — clique para esconder" : "Liberar este arquivo para o cliente no portal"}
+                  onClick={() => trocar(a, () => liberarAnexoPortal(a.id, !a.portal), `${a.portal ? "Escondeu do" : "Liberou no"} portal do cliente o anexo "${a.nome}"`)}>
+                  👁{a.portal ? " cliente vê" : ""}
+                </button>
                 {img && (
                   <button style={{ ...btn, color: ehCapa ? "#c9a227" : "#475569" }} title={ehCapa ? "Tirar da capa" : "Usar como capa da obra"}
                     onClick={() => onCapa?.(ehCapa ? null : { anexoId: a.id, path: a.path })}>★</button>

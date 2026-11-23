@@ -449,6 +449,7 @@ function anexo(r) {
     id: r.id, obraId: r.obra_id, nome: r.nome, path: r.path, mime: r.mime || "",
     tamanho: Number(r.tamanho) || 0, categoria: r.categoria, autor: r.autor || "",
     createdAt: r.created_at, removidoEm: r.removido_em || null, removidoPor: r.removido_por || "",
+    portal: !!r.portal,   // liberado para o cliente baixar no portal (migration_portal.sql)
   };
 }
 
@@ -530,6 +531,7 @@ async function atualizarAnexo(id, campos) {
 export const removerAnexo = (id, por) => atualizarAnexo(id, { removido_em: new Date().toISOString(), removido_por: por || null });
 export const restaurarAnexo = (id) => atualizarAnexo(id, { removido_em: null, removido_por: null });
 export const mudarCategoriaAnexo = (id, categoria) => atualizarAnexo(id, { categoria });
+export const liberarAnexoPortal = (id, portal) => atualizarAnexo(id, { portal: !!portal });
 
 // Bucket privado: o link é assinado e vence em 1 h. Várias de uma vez para as miniaturas.
 export async function urlsAssinadas(paths, segundos = 3600) {
@@ -598,7 +600,9 @@ export async function ocultarComentario(id, oculto) {
 // `acessos` volta null (ver temAcesso em Comunicacao.jsx) e a menção segue funcionando.
 export async function fetchPessoas() {
   try {
-    const linhas = await todasAsLinhas(() => supabase.from("profiles").select("id, nome, acessos, master, email, whatsapp").order("id"));
+    // Login de cliente (portal) não é pessoa da equipe: fica fora do chat, das menções e dos acessos.
+    const linhas = (await todasAsLinhas(() => supabase.from("profiles").select("id, nome, acessos, master, email, whatsapp, papel").order("id")))
+      .filter(r => r.papel !== "cliente");
     return linhas.map(r => ({ id: r.id, nome: (r.nome || "").trim(), acessos: r.acessos || [], master: !!r.master, email: r.email || "", whatsapp: r.whatsapp || "" }));
   } catch (err) {
     if (!/acessos|master|email|whatsapp|column/i.test(err.message || "")) { console.warn("fetchPessoas:", err.message); return []; }
@@ -936,4 +940,85 @@ export async function fetchTodosMovimentosEstoque() {
     valorUnitario: m.valor_unitario == null ? null : Number(m.valor_unitario),
     codigo: m.item?.codigo || "", nome: m.item_nome || "", unidade: m.unidade || "", doc: docEstoque(m.doc),
   }));
+}
+
+// ─── PORTAL DO CLIENTE (migration_portal.sql + function portal-cliente) ──────
+// O cliente nunca lê obras/cronogramas/diarios direto: tudo vem de portal_obra(), já sem valores.
+async function rpc(nome, args) {
+  const { data, error } = await supabase.rpc(nome, args);
+  if (error) {
+    if (/Could not find the function|does not exist/i.test(error.message)) throw new Error("O portal do cliente ainda não foi instalado no banco (rodar supabase/migration_portal.sql).");
+    throw error;
+  }
+  return data;
+}
+// Login do cliente é só o usuário ("rodrigo3048"): vira o e-mail interno que a function criou.
+export const DOMINIO_CLIENTE = "cliente.centauroesquadrias.com.br";
+export function emailDoLogin(texto) {
+  const t = String(texto || "").trim().toLowerCase();
+  return !t || t.includes("@") ? t : `${t}@${DOMINIO_CLIENTE}`;
+}
+export const portalMinhasObras = () => rpc("portal_minhas_obras").then(l => l || []);
+export const portalObra = (obraId) => rpc("portal_obra", { p_obra: obraId });
+export const portalDecidir = (id, estado, motivo) => rpc("portal_decidir", { p_msg: id, p_estado: estado, p_motivo: motivo || null });
+
+// Papel do login: 'cliente' abre o portal, o resto abre o sistema. Sem perfil, sistema (como antes).
+export async function papelDoLogin(userId) {
+  const { data, error } = await supabase.from("profiles").select("papel").eq("id", userId).maybeSingle();
+  if (error) { console.warn("papelDoLogin:", error.message); return "admin"; }
+  return data?.papel || "admin";
+}
+
+function mensagemPortal(r) {
+  return {
+    id: r.id, obraId: r.obra_id, lado: r.lado, autorId: r.autor_id, autorNome: r.autor_nome || "",
+    tipo: r.tipo, texto: r.texto || "", cronogramaId: r.cronograma_id, taskId: r.task_id, taskNome: r.task_nome || "",
+    campo: r.campo, dataAtual: r.data_atual, dataSugerida: r.data_sugerida, estado: r.estado || "",
+    decididoPor: r.decidido_por || "", decididoEm: r.decidido_em, motivo: r.motivo || "", createdAt: r.created_at,
+  };
+}
+export async function fetchPortalMensagens(obraId) {
+  const linhas = await todasAsLinhas(() => supabase.from("portal_mensagens").select("*").eq("obra_id", obraId).order("created_at").order("id"));
+  return linhas.map(mensagemPortal);
+}
+export async function enviarPortalMensagem(m) {
+  const { data: { user } } = await supabase.auth.getUser();
+  const linha = {
+    obra_id: m.obraId, lado: m.lado, autor_id: user?.id, tipo: m.tipo || "comentario", texto: m.texto || "",
+    estado: m.tipo === "sugestao_data" ? "pendente" : "",
+    ...(m.tipo === "sugestao_data" ? {
+      cronograma_id: m.cronogramaId, task_id: m.taskId, task_nome: m.taskNome || null, campo: m.campo,
+      data_atual: m.dataAtual || null, data_sugerida: m.dataSugerida,
+    } : {}),
+  };
+  const { data, error } = await supabase.from("portal_mensagens").insert(linha).select("*").single();
+  if (error) throw error;
+  return mensagemPortal(data);
+}
+export async function marcarPortalLido(obraId) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return;
+  const { error } = await supabase.from("portal_lidas").upsert({ user_id: user.id, obra_id: obraId, lida_ate: new Date().toISOString() });
+  if (error) console.warn("marcarPortalLido:", error.message);
+}
+// Para a equipe: por obra, não lidas, sugestões pendentes e se a última palavra foi do cliente.
+// Sem a migration, devolve {} e nada aparece.
+export async function fetchPortalResumo() {
+  const { data, error } = await supabase.rpc("portal_resumo");
+  if (error) { console.warn("fetchPortalResumo:", error.message); return {}; }
+  return Object.fromEntries((data || []).map(r => [r.obra_id, {
+    ultimaEm: r.ultima_em, naoLidas: Number(r.nao_lidas) || 0, pendentes: Number(r.pendentes) || 0, semResposta: !!r.sem_resposta,
+  }]));
+}
+// Ações da function portal-cliente (criar login, nova senha, bloquear, listar, abrir documento).
+export async function portalAcao(acao, corpo = {}) {
+  const { data, error } = await supabase.functions.invoke("portal-cliente", { body: { acao, ...corpo } });
+  if (error) {
+    let msg = error.message;
+    try { msg = (await error.context.json()).error || msg; } catch { /* corpo não é JSON */ }
+    if (/not found|404|Failed to send/i.test(msg)) msg = "A function portal-cliente ainda não foi publicada no Supabase.";
+    throw new Error(msg);
+  }
+  if (data?.error) throw new Error(data.error);
+  return data;
 }
